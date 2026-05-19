@@ -25,15 +25,17 @@ full agent runtime against the supplied workspace dir:
 ```
 /agent/run
   → SkillStore::discover_in(workspace_dir)
-  → MCP servers loaded
-  → plugins / policies resolved
+  → MCP servers loaded (currently from AppConfig — workspace-driven is a follow-up)
+  → plugins resolved (daemon-level for now)
   → Skill tool registered, catalog appended to system prompt
   → Agent::new(...).run_turn(prompt)
 ```
 
 So if the orchestrator writes `<workspace_dir>/.thclaws/skills/<name>/SKILL.md`
 files before calling, those skills are active for that request. Same
-contract claude-code uses with `.claude/skills/`.
+contract claude-code uses with `.claude/skills/`. (MCP and policy
+files written into the same workspace are not yet consumed
+per-request — see the comparison table for current status.)
 
 ## Request
 
@@ -215,13 +217,15 @@ been flushed.
 | Caller | thClaws orchestrators | OpenAI-compatible clients |
 | Request shape | thClaws-native | OpenAI standard |
 | `workspace_dir` | required | n/a |
-| Skill discovery | per-request from `workspace_dir` | not loaded |
-| MCP per-request | yes (via workspace) | no |
+| Skill discovery | per-request from `workspace_dir` (`SkillStore::discover_in`) | not loaded |
+| MCP servers | currently daemon-level (`AppConfig.mcp_servers`); per-request workspace-driven plumbing is a documented follow-up | not loaded |
 | System prompt | thClaws default + skill catalog + client `system` | thClaws default + client `system` |
 | Tool calls in SSE | `event: tool_use_*` named events | `x_thclaws_tool_use` extension field on OpenAI chunks |
 | Skill calls in SSE | `event: skill_invoked` distinct | folded into `x_thclaws_tool_use` |
 | `x_callback` async | yes | yes (identical semantics) |
 | Streaming | named SSE events + `[DONE]` | OpenAI chunks + `[DONE]` |
+
+> **MCP status (2026-05): the per-request workspace path for MCP servers is wired on the adapter side — `materialize-workspace.ts` writes `<workspace_dir>/.thclaws/mcp.json` when the orchestrator supplies servers — but the thClaws daemon's `build_runtime_for_workspace` still loads MCP from `AppConfig.mcp_servers` only. The file is written defensively for the upcoming closer of this loop; until then, MCP server changes require a daemon restart, same as before dev-plan/25. Tracking under dev-plan/25 "Open questions".
 
 External tools (Cursor, Aider) keep using `/v1/chat/completions`
 unchanged. orchestrators that previously used the chat endpoint

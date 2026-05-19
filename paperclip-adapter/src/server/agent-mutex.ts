@@ -24,23 +24,29 @@ const queues: Map<string, Promise<void>> = new Map();
  * Acquire the per-agent lock. Returns a release function. Callers
  * MUST call release in a finally block — leaking the lock wedges
  * every future run for the same agent.
+ *
+ * The Map stores `next` directly (not a `.then()` chain wrapper), so
+ * the release-time identity check `queues.get(agentId) === next` can
+ * actually match — otherwise the Map would leak one entry per unique
+ * agentId forever.
  */
 export async function acquireAgentLock(agentId: string): Promise<Resolver> {
-  // Chain onto whatever's currently queued for this agent (or a
-  // resolved promise if nothing is). The chain's tail becomes the new
-  // "current"; the next acquire chains onto us.
+  // Whatever's currently in the Map is the tail of the FIFO chain —
+  // either a still-pending `next` we await, or undefined (no one
+  // holding the lock). Replace it with ours so the next acquirer
+  // chains onto us.
   const previous = queues.get(agentId) ?? Promise.resolve();
   let release!: Resolver;
   const next = new Promise<void>((resolve) => {
     release = () => {
-      // Drop ourselves from the map if we're still the tail. (If
-      // someone chained behind us, they're the tail now — leave them.)
+      // Only delete if we're still the tail — if a later acquirer
+      // already replaced us, leave them in place.
       if (queues.get(agentId) === next) queues.delete(agentId);
       resolve();
     };
   });
-  queues.set(agentId, previous.then(() => next));
-  // Wait for our turn.
+  queues.set(agentId, next);
+  // Wait for our turn (resolves immediately if the map was empty).
   await previous;
   return release;
 }
@@ -48,4 +54,9 @@ export async function acquireAgentLock(agentId: string): Promise<Resolver> {
 /** Test-only: drop all queued promises. */
 export function _resetAgentLocksForTests(): void {
   queues.clear();
+}
+
+/** Test-only: how many agentIds currently hold queued promises. */
+export function _agentLockMapSizeForTests(): number {
+  return queues.size;
 }

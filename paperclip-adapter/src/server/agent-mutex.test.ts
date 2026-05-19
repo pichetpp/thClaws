@@ -4,7 +4,11 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { acquireAgentLock, _resetAgentLocksForTests } from "./agent-mutex.js";
+import {
+  acquireAgentLock,
+  _agentLockMapSizeForTests,
+  _resetAgentLocksForTests,
+} from "./agent-mutex.js";
 
 test("different agents acquire concurrently", async () => {
   _resetAgentLocksForTests();
@@ -63,4 +67,44 @@ test("release is idempotent (defensive)", async () => {
   // The next acquire should still work.
   const r2 = await acquireAgentLock("agent-z");
   r2();
+});
+
+test("map empties after every waiter releases (no memory leak)", async () => {
+  _resetAgentLocksForTests();
+  assert.equal(_agentLockMapSizeForTests(), 0);
+
+  // Acquire across several unique agentIds.
+  const releases: Array<() => void> = [];
+  for (const id of ["a", "b", "c"]) {
+    releases.push(await acquireAgentLock(id));
+  }
+  assert.equal(_agentLockMapSizeForTests(), 3, "one entry per active agent");
+
+  // Release in arbitrary order.
+  releases[1]();
+  releases[2]();
+  releases[0]();
+
+  // Give microtasks a tick to drain.
+  await new Promise((r) => setTimeout(r, 5));
+
+  assert.equal(
+    _agentLockMapSizeForTests(),
+    0,
+    "Map should empty once all waiters release — guards against a previous bug where queues.set stored a .then() wrapper that never matched the identity check on cleanup",
+  );
+});
+
+test("map empties when chain length > 1 fully drains", async () => {
+  _resetAgentLocksForTests();
+  const r1 = await acquireAgentLock("chain");
+  const a2 = acquireAgentLock("chain");
+  const a3 = acquireAgentLock("chain");
+  assert.equal(_agentLockMapSizeForTests(), 1, "single entry while chain queues");
+
+  r1();
+  (await a2)();
+  (await a3)();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(_agentLockMapSizeForTests(), 0, "entry gone after deepest waiter releases");
 });
