@@ -46,6 +46,11 @@ export interface RunChatResult {
   usage?: {
     inputTokens: number;
     outputTokens: number;
+    /** dev-plan/24: extra token-type counts from thClaws's usage
+     *  block. Used by paperclip-adapter's local cost compute. */
+    cachedInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    reasoningOutputTokens?: number;
   };
   errorMessage?: string;
   errorCode?: string;
@@ -75,7 +80,16 @@ interface ChatCompletionChunk {
     delta?: { role?: string; content?: string };
     finish_reason?: string | null;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    // dev-plan/24: thClaws extends the usage block with these
+    // optional per-token-type counts so consumers can compute cost.
+    cached_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+    reasoning_output_tokens?: number;
+  };
   x_thclaws_tool_use?: {
     id: string;
     name: string;
@@ -218,6 +232,15 @@ export async function runChat(req: RunChatRequest): Promise<RunChatResult> {
         usage = {
           inputTokens: chunk.usage.prompt_tokens ?? 0,
           outputTokens: chunk.usage.completion_tokens ?? 0,
+          ...(chunk.usage.cached_input_tokens !== undefined
+            ? { cachedInputTokens: chunk.usage.cached_input_tokens }
+            : {}),
+          ...(chunk.usage.cache_creation_input_tokens !== undefined
+            ? { cacheCreationInputTokens: chunk.usage.cache_creation_input_tokens }
+            : {}),
+          ...(chunk.usage.reasoning_output_tokens !== undefined
+            ? { reasoningOutputTokens: chunk.usage.reasoning_output_tokens }
+            : {}),
         };
       }
     }

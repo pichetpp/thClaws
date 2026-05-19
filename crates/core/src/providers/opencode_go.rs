@@ -421,6 +421,7 @@ impl OpencodeGoProvider {
                             .and_then(|d| d.get("cached_tokens"))
                             .and_then(Value::as_u64)
                             .map(|n| n as u32),
+                        reasoning_output_tokens: None,
                     });
                     if !state.emitted_message_stop {
                         state.emitted_message_stop = true;
@@ -447,6 +448,7 @@ impl OpencodeGoProvider {
                     .unwrap_or(0) as u32,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
             });
             if !state.emitted_message_stop {
                 state.emitted_message_stop = true;
@@ -572,6 +574,7 @@ impl OpencodeGoProvider {
                         .get("cache_read_input_tokens")
                         .and_then(Value::as_u64)
                         .map(|n| n as u32),
+                    reasoning_output_tokens: None,
                 });
                 Ok(Some(ProviderEvent::MessageStop { stop_reason, usage }))
             }

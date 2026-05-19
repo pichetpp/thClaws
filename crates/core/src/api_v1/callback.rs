@@ -104,6 +104,15 @@ pub struct PayloadUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    // dev-plan/24: extra token-type counts for downstream cost compute.
+    // Receivers (paperclip-adapter, thcompany) multiply these by the
+    // pricing rates from /v1/models. thClaws never emits cost_usd.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u32>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -154,6 +163,9 @@ impl CallbackPayload {
                         prompt_tokens: u.input_tokens,
                         completion_tokens: u.output_tokens,
                         total_tokens: u.input_tokens + u.output_tokens,
+                        cached_input_tokens: u.cache_read_input_tokens,
+                        cache_creation_input_tokens: u.cache_creation_input_tokens,
+                        reasoning_output_tokens: u.reasoning_output_tokens,
                     })
                     .unwrap_or_default();
                 Self {
@@ -516,6 +528,9 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                reasoning_output_tokens: None,
             },
             tool_calls: vec!["Read".into()],
             tool_denials: vec![],

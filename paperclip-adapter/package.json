@@ -27,6 +27,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./server": "./dist/server/index.js",
+    "./server/pricing": "./dist/server/pricing.js",
     "./ui-parser": "./dist/ui-parser.js"
   },
   "files": ["dist", "README.md"],

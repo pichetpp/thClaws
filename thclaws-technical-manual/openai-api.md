@@ -48,10 +48,34 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:7878/v1/models
 {
   "object": "list",
   "data": [
-    { "id": "claude-haiku-4-5", "object": "model",
-      "created": 1747449617, "owned_by": "anthropic" },
-    { "id": "gpt-5.4", "object": "model",
-      "created": 1747449617, "owned_by": "openai" }
+    {
+      "id": "claude-sonnet-4-6",
+      "object": "model",
+      "created": 1747449617,
+      "owned_by": "anthropic",
+      "context_window": 200000,
+      "pricing": {
+        "currency": "USD",
+        "input_per_mtok": 3.0,
+        "output_per_mtok": 15.0,
+        "cached_input_per_mtok": 0.3,
+        "cache_creation_per_mtok": 3.75
+      }
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "object": "model",
+      "created": 1747449617,
+      "owned_by": "anthropic",
+      "context_window": 200000,
+      "pricing": {
+        "currency": "USD",
+        "input_per_mtok": 1.0,
+        "output_per_mtok": 5.0,
+        "cached_input_per_mtok": 0.1,
+        "cache_creation_per_mtok": 1.25
+      }
+    }
   ]
 }
 ```
@@ -60,6 +84,45 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:7878/v1/models
 (`anthropic`, `openai`, `openrouter`, `gemini`, `dashscope`, etc).
 Non-chat models (embeddings, audio, image-only) are filtered out so the
 list matches what `/v1/chat/completions` can actually serve.
+
+#### `context_window`
+
+Optional. Maximum total tokens (prompt + completion) the model
+accepts. Sourced from the model catalogue
+([`model-catalogue.md`](model-catalogue.md)); omitted when the
+catalogue hasn't recorded it for a given id.
+
+#### `pricing`
+
+Optional. USD-denominated rates from the model catalogue. dev-
+plan/24 made this the canonical discovery surface for any client
+that needs to estimate cost — n8n nodes, Zapier integrations,
+custom dashboards, paperclip-adapter's optional live-refresh path.
+
+Fields:
+
+| Field | Meaning |
+|---|---|
+| `currency` | Always `"USD"`. Orchestrators handle FX downstream. |
+| `input_per_mtok` | USD per 1M uncached prompt tokens. |
+| `output_per_mtok` | USD per 1M completion tokens. |
+| `cached_input_per_mtok` | USD per 1M cache-READ tokens (Anthropic cache_read, OpenAI cached-input). Falls back to `input_per_mtok` when absent. |
+| `cache_creation_per_mtok` | USD per 1M cache-WRITE tokens (Anthropic cache_creation; OpenAI auto-manages, leaves this `null`). |
+| `reasoning_per_mtok` | USD per 1M o1/o3 hidden reasoning tokens, when the provider bills them separately. Most fold into output — field omitted there. |
+| `tier_billed` | `true` for subscription-bundled models (Codex via ChatGPT Plus/Pro/Team). Per-token math doesn't reflect actual billing — clients should show "tier-billed" instead of a $ amount. |
+| `free` | `true` for free-tier models (OpenRouter free passes). Cost compute returns 0. |
+
+The entire `pricing` object is omitted when the catalogue entry has
+no pricing signal at all (un-curated model). Clients should fall back
+to "Cost unavailable" rather than assuming $0 — see the
+[catalogue doc](model-catalogue.md) for the curation workflow.
+
+**Important — thClaws does NOT emit `cost_usd` on the chat-
+completions response or callback payload.** Consumers compute cost
+locally using these pricing rates × the token counts shipped on the
+usage block (see [`/v1/chat/completions`](#post-v1chatcompletions)
+below). That keeps the wire surface OpenAI-compatible and lets
+orchestrators apply markup / FX / credits at their own billing edge.
 
 ### `POST /v1/chat/completions`
 
@@ -99,10 +162,38 @@ streaming (`stream: true` → Server-Sent Events).
   "usage": {
     "prompt_tokens": 328,
     "completion_tokens": 4,
-    "total_tokens": 332
+    "total_tokens": 332,
+    "cached_input_tokens": 256,
+    "cache_creation_input_tokens": 72,
+    "reasoning_output_tokens": 0
   }
 }
 ```
+
+The `usage` block is a SUPERSET of the standard OpenAI shape. The
+three extra fields (`cached_input_tokens`, `cache_creation_input_
+tokens`, `reasoning_output_tokens`) are dev-plan/24 additions —
+optional, omitted when the provider didn't surface them, and ignored
+by strict-OpenAI clients. Consumers compute cost via `pricing` rates
+× these counts; see [`/v1/models`](#get-v1models) and
+[`model-catalogue.md`](model-catalogue.md). Field semantics:
+
+- `cached_input_tokens` — subset of `prompt_tokens` that hit a
+  read-cache (Anthropic cache_read, OpenAI prompt_tokens_details
+  .cached_tokens). The remainder pays the standard `input_per_mtok`
+  rate.
+- `cache_creation_input_tokens` — new tokens WRITTEN to cache this
+  turn (Anthropic charges a write premium; OpenAI auto-manages and
+  leaves this absent).
+- `reasoning_output_tokens` — o1/o3 hidden reasoning tokens. ALREADY
+  INCLUDED in `completion_tokens` per OpenAI's convention; broken
+  out separately so consumers that bill reasoning at a distinct rate
+  (`reasoning_per_mtok`) can subtract.
+
+`thClaws does NOT include cost_usd on the response.` Cost computation
+is the consumer's responsibility — see [`paperclip-adapter` § cost
+compute](paperclip-adapter.md) if you're using thcompany's setup, or
+fetch `/v1/models` pricing and compute yourself.
 
 **Stream response (SSE)**
 
@@ -119,10 +210,16 @@ data: {... ,"choices":[{"index":0,"delta":{"content":"your project..."},
 
 data: {... ,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
        "usage":{"prompt_tokens":1234,"completion_tokens":567,
-                "total_tokens":1801}}
+                "total_tokens":1801,"cached_input_tokens":1024,
+                "cache_creation_input_tokens":48}}
 
 data: [DONE]
 ```
+
+The final chunk's `usage` block mirrors the non-stream response —
+same field set, same `cost_usd`-free policy. The extra token counts
+only appear in the terminal chunk; intermediate `chat.completion.chunk`
+events don't carry usage data.
 
 A `:keepalive` SSE comment is sent every 15s during long agent thinks
 so HTTP proxies don't drop the connection. Spec-compliant SSE parsers
@@ -360,9 +457,12 @@ User-Agent: thclaws/<version>
   "model":         "<resolved model>",
   "summary":       "<final assistant text, may be empty for tool-only outcomes>",
   "usage": {
-    "prompt_tokens":     <n>,
-    "completion_tokens": <n>,
-    "total_tokens":      <n>
+    "prompt_tokens":              <n>,
+    "completion_tokens":          <n>,
+    "total_tokens":               <n>,
+    "cached_input_tokens":        <n>,  // optional, omitted if absent
+    "cache_creation_input_tokens": <n>, // optional, omitted if absent
+    "reasoning_output_tokens":    <n>   // optional, omitted if absent
   },
   "tool_calls":   ["Read", "Bash", ...],
   "tool_denials": [],
@@ -377,6 +477,11 @@ Detailed per-event tool-use payloads (input blobs, output previews) are
 intentionally omitted from the terminal callback — they're available
 on the synchronous SSE path. The async payload is a summary, not a
 transcript.
+
+`No cost_usd field.` Same convention as the sync response — the
+receiver computes cost from `usage` × pricing fetched from `/v1/models`
+(or a locally-bundled snapshot — see the [paperclip-adapter cost
+compute](paperclip-adapter.md) for the reference implementation).
 
 ### Retry policy
 
@@ -497,3 +602,6 @@ This is **Chat Completions only** — by design.
 - [`paperclip-adapter.md`](paperclip-adapter.md) — for the
   Paperclip-specific integration path (an alternative to driving
   thClaws via the OpenAI API).
+- [`model-catalogue.md`](model-catalogue.md) — pricing schema, how
+  rates are sourced (LiteLLM sync), how to refresh, decision tree
+  for `compute_cost_usd`.

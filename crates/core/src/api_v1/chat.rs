@@ -138,6 +138,21 @@ pub struct UsageRow {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    // dev-plan/24: extra token-type counts for cost computation by
+    // downstream consumers. Each is Optional + skipped when None so
+    // strict-OpenAI clients see a usage block that's a SUPERSET of
+    // the standard shape (extra fields, never missing standard ones).
+    // Consumers (paperclip-adapter, thcompany) compute USD locally
+    // using the rate table from /v1/models. thClaws never emits cost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    /// o1/o3 hidden reasoning tokens. INCLUDED in `completion_tokens`
+    /// already per OpenAI's wire convention; surfaced separately so
+    /// consumers that price reasoning at a distinct rate can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u32>,
 }
 
 // ── handler ───────────────────────────────────────────────────────────
@@ -607,11 +622,11 @@ fn final_chunk(
         }],
     });
     if let Some(u) = usage {
-        body["usage"] = serde_json::json!({
-            "prompt_tokens": u.prompt_tokens,
-            "completion_tokens": u.completion_tokens,
-            "total_tokens": u.total_tokens,
-        });
+        // serde-driven so the optional cache/reasoning fields obey the
+        // same skip_serializing_if rules as the struct itself — keeps
+        // the JSON exactly the same shape as the non-stream response's
+        // usage block, no manual divergence to maintain.
+        body["usage"] = serde_json::to_value(&u).unwrap_or_else(|_| serde_json::Value::Null);
     }
     Event::default().data(body.to_string())
 }
@@ -725,6 +740,9 @@ fn usage_row(u: &Usage) -> UsageRow {
         prompt_tokens: u.input_tokens,
         completion_tokens: u.output_tokens,
         total_tokens: u.input_tokens + u.output_tokens,
+        cached_input_tokens: u.cache_read_input_tokens,
+        cache_creation_input_tokens: u.cache_creation_input_tokens,
+        reasoning_output_tokens: u.reasoning_output_tokens,
     }
 }
 

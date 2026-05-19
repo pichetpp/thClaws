@@ -22,6 +22,7 @@ import type {
 } from "@paperclipai/adapter-utils";
 import { runChat } from "./http-client.js";
 import { getLocalThclawsEndpoint } from "./spawn-lifecycle.js";
+import { tokensToCostUsd } from "./pricing.js";
 
 function asString(config: Record<string, unknown>, key: string, fallback: string): string {
   const v = config[key];
@@ -165,6 +166,21 @@ export async function execute(
   }
 
   if (result.ok) {
+    // dev-plan/24: compute cost locally from token counts × bundled
+    // pricing table. thClaws never emits cost_usd on the wire — this
+    // is the consumer's responsibility, and the bundled snapshot lets
+    // us compute even when the live thClaws version is older than
+    // this adapter.
+    const costUsd =
+      result.usage !== undefined
+        ? tokensToCostUsd(model, {
+            prompt_tokens: result.usage.inputTokens,
+            completion_tokens: result.usage.outputTokens,
+            cached_input_tokens: result.usage.cachedInputTokens,
+            cache_creation_tokens: result.usage.cacheCreationInputTokens,
+            reasoning_tokens: result.usage.reasoningOutputTokens,
+          })
+        : null;
     return {
       exitCode: 0,
       signal: null,
@@ -172,6 +188,7 @@ export async function execute(
       model,
       summary: result.summary,
       usage: result.usage,
+      ...(costUsd !== null ? { costUsd } : {}),
     };
   }
 
