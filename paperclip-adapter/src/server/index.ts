@@ -42,7 +42,10 @@ export function createServerAdapter(): ServerAdapterModule {
     supportsInstructionsBundle: true,
     instructionsPathKey: "instructionsFilePath",
     supportsLocalAgentJwt: true,
-    requiresMaterializedRuntimeSkills: false,
+    // dev-plan/25 Phase B: thcompany-managed skills are materialized
+    // into <workspaceDir>/.thclaws/skills/ before each /agent/run.
+    // The orchestrator gates skill writes on this flag.
+    requiresMaterializedRuntimeSkills: true,
   };
 }
 

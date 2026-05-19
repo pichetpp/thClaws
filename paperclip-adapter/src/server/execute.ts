@@ -1,28 +1,34 @@
 /**
- * Drive a thClaws subprocess via its OpenAI Chat Completions API.
+ * Drive thClaws as a sovereign agent via its `/agent/run` endpoint.
  *
- * v2 (dev-plan/21): instead of spawning `thclaws -p prompt` per turn
- * and parsing plain-text stdout, we spawn `thclaws --serve` once per
- * Paperclip process (lazy), then make OpenAI chat completion calls
- * over the local HTTP listener. This unlocks:
+ * Flow per `dev-plan/25-thclaws-as-agent.md`:
+ *   1. Resolve the per-agent workspace_dir from config.
+ *   2. Materialize thcompany-managed state (skills, AGENT.md, MCP
+ *      config) into that workspace dir.
+ *   3. Spawn / reuse the singleton `thclaws --serve` daemon.
+ *   4. POST `/agent/run` with `{workspace_dir, prompt, ...}` — the
+ *      daemon discovers skills + MCP from the workspace at request
+ *      time and runs the full agent loop with them in scope.
+ *   5. Parse native SSE events (text / tool_use_* / skill_invoked /
+ *      usage / result / error / [DONE]); emit to the orchestrator's
+ *      transcript via ctx.onLog.
  *
- *   - streaming text deltas (SSE)
- *   - tool-call events (`x_thclaws_tool_use`) rendered in transcript
- *   - usage tallies for billing
- *   - shared HTTP client code with the `thclaws_pod` adapter
- *
- * Why the change: thClaws's `-p --output-format stream-json` flag is
- * declared in the CLI but not wired through `run_print_mode`, so the
- * stream-json events we'd want to parse don't actually exist there.
- * `thclaws --serve` already emits them via its OpenAI-compatible SSE.
+ * The OpenAI-shaped /v1/chat/completions path is no longer used here
+ * — external clients (Cursor, Aider, n8n) still hit that endpoint
+ * directly. paperclip-adapter treats thClaws like claude-code: an
+ * agent peer with filesystem-shaped configuration.
  */
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
-import { runChat } from "./http-client.js";
-import { getLocalThclawsEndpoint } from "./spawn-lifecycle.js";
+import { runAgentRun, type XCallback } from "./http-client.js";
+import {
+  extractMaterializeInput,
+  materializeAgentWorkspace,
+} from "./materialize-workspace.js";
 import { tokensToCostUsd } from "./pricing.js";
+import { getLocalThclawsEndpoint } from "./spawn-lifecycle.js";
 
 function asString(config: Record<string, unknown>, key: string, fallback: string): string {
   const v = config[key];
@@ -58,30 +64,32 @@ export async function execute(
   const cwd = asString(config, "cwd", process.cwd());
   const model = asString(config, "model", "claude-sonnet-4-6");
   const systemPrompt = asOptionalString(config, "systemPrompt");
+  const sessionId = asOptionalString(config, "sessionId");
   const temperature = asOptionalNumber(config, "temperature");
   const maxTokens = asOptionalNumber(config, "maxTokens");
-  // `mode: "async"` opts into thClaws's x_callback extension — fire-
-  // and-forget at the wire level, with a single terminal webhook
-  // delivered to the orchestrator's PAPERCLIP_API_URL when the agentic
-  // loop finishes. Requires PAPERCLIP_API_URL + PAPERCLIP_API_KEY +
-  // PAPERCLIP_RUN_ID env (set by the orchestrator before invoking the
-  // adapter). Missing precondition ⇒ log + fall back to sync, never
-  // an error — async is opt-in, never load-bearing.
-  // See dev-plan/23-thclaws-async-callback.md.
   const mode = asString(config, "mode", "sync");
   const xCallback = mode === "async" ? deriveXCallback(ctx, model) : null;
-  // Paperclip's secret-resolution layer injects provider API keys
-  // (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.) into config.env per
-  // execute. They need to reach the thclaws --serve subprocess so
-  // its upstream provider routing finds them.
   const envOverrides = asEnvRecord(config, "env");
 
-  // Paperclip's heartbeat populates context with several markdown
-  // fields rather than a single `.prompt` string. Mirror the
-  // assembly thcompany's claude-local uses (joinPromptSections):
-  // wake reason → session handoff → task body → legacy .prompt.
+  const materializeInput = extractMaterializeInput(ctx);
+  if (!materializeInput) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorCode: "missing_workspace_dir",
+      errorFamily: null,
+      errorMessage:
+        "thclaws_local execute() requires `config.workspaceDir` (absolute path to the per-agent workspace). The orchestrator's adapter spec hasn't populated it.",
+      model,
+    };
+  }
+
+  // User prompt: same join order as before, just with task/wake/handoff
+  // sections folded into a single user message. The persistent
+  // instructions live in materializeInput.agentInstructions → AGENT.md.
   const ctxAny = ctx.context as Record<string, unknown>;
-  const sections = [
+  const promptSections = [
     asString(ctxAny, "wakePrompt", ""),
     asString(ctxAny, "paperclipSessionHandoffMarkdown", ""),
     asString(ctxAny, "paperclipTaskMarkdown", ""),
@@ -90,7 +98,7 @@ export async function execute(
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
-  if (sections.length === 0) {
+  if (promptSections.length === 0) {
     return {
       exitCode: 1,
       signal: null,
@@ -103,20 +111,48 @@ export async function execute(
     };
   }
 
-  const userPrompt = sections.join("\n\n");
+  const userPrompt = promptSections.join("\n\n");
 
   await ctx.onMeta?.({
     adapterType: "thclaws_local",
-    command: `${command} --serve (via local HTTP)`,
+    command: `${command} --serve (via /agent/run)`,
     cwd,
     prompt: userPrompt,
-    context: { model, transport: "local-http", streaming: true },
+    context: {
+      model,
+      transport: "local-http",
+      streaming: true,
+      workspaceDir: materializeInput.workspaceDir,
+    },
   });
 
-  // Lazy spawn the per-process thclaws --serve daemon. First call
-  // pays the spawn cost (~1-3s); subsequent calls share the endpoint.
-  // Per-call envOverrides only apply on the first spawn — singleton
-  // semantics. To rotate keys, restart the parent process.
+  // Materialize BEFORE spawn. The materializer is fast (a few file
+  // writes); doing it first means the daemon — once up — picks up the
+  // freshly-written .thclaws/skills/ on its scan during /agent/run.
+  let materialized;
+  try {
+    materialized = await materializeAgentWorkspace(materializeInput);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorCode: "materialize_failed",
+      errorFamily: null,
+      errorMessage: `Could not materialize workspace ${materializeInput.workspaceDir}: ${msg}`,
+      model,
+    };
+  }
+  if (materialized.skillsRemoved.length > 0) {
+    await ctx.onLog(
+      "stderr",
+      `[materialize] removed stale skills: ${materialized.skillsRemoved.join(", ")}\n`,
+    );
+  }
+
+  // Lazy spawn the daemon. Singleton per (command, cwd, env) tuple —
+  // see spawn-lifecycle.ts.
   let endpoint;
   try {
     endpoint = await getLocalThclawsEndpoint({ command, cwd, env: envOverrides });
@@ -133,12 +169,14 @@ export async function execute(
     };
   }
 
-  const result = await runChat({
+  const result = await runAgentRun({
     baseUrl: endpoint.baseUrl,
     bearerToken: endpoint.bearerToken,
+    workspaceDir: materializeInput.workspaceDir,
+    prompt: userPrompt,
     model,
     systemPrompt,
-    userPrompt,
+    sessionId,
     temperature,
     maxTokens,
     onLogStdout: (chunk) => ctx.onLog("stdout", chunk),
@@ -151,11 +189,6 @@ export async function execute(
       "stderr",
       `[async] thClaws accepted run ${result.acceptedRunId ?? "(unknown)"} — awaiting webhook callback at ${xCallback?.url}\n`,
     );
-    // `status: "running_async"` is an additive AdapterExecutionResult
-    // field introduced in dev-plan/23. The npm-published @paperclipai/
-    // adapter-utils we depend on here doesn't carry it yet — the local
-    // packages/adapter-utils source has been updated, so the next
-    // release will pick it up and this cast becomes unnecessary.
     return {
       exitCode: null,
       signal: null,
@@ -166,11 +199,6 @@ export async function execute(
   }
 
   if (result.ok) {
-    // dev-plan/24: compute cost locally from token counts × bundled
-    // pricing table. thClaws never emits cost_usd on the wire — this
-    // is the consumer's responsibility, and the bundled snapshot lets
-    // us compute even when the live thClaws version is older than
-    // this adapter.
     const costUsd =
       result.usage !== undefined
         ? tokensToCostUsd(model, {
@@ -205,17 +233,10 @@ export async function execute(
   };
 }
 
-/**
- * Build the x_callback envelope from PAPERCLIP_* values the orchestrator
- * passed in via `ctx.config.env`. Falls back to `process.env.*` for
- * standalone / desktop use where the orchestrator doesn't go through
- * the heartbeat env injection path. Returns null (and logs) if any
- * field is missing so the caller transparently falls back to sync.
- */
 function deriveXCallback(
   ctx: AdapterExecutionContext,
   model: string,
-): { url: string; apiKey: string; runId: string } | null {
+): XCallback | null {
   const configEnv = asEnvRecord(ctx.config as Record<string, unknown>, "env");
   const url = (configEnv.PAPERCLIP_API_URL ?? process.env.PAPERCLIP_API_URL ?? "").trim();
   const apiKey = (configEnv.PAPERCLIP_API_KEY ?? process.env.PAPERCLIP_API_KEY ?? "").trim();
@@ -231,10 +252,6 @@ function deriveXCallback(
     );
     return null;
   }
-  // Build the conventional callback URL. Orchestrators that want a
-  // different path can set PAPERCLIP_API_URL to the full URL including
-  // path; we only append the path if PAPERCLIP_API_URL looks like a
-  // bare origin (no path beyond /).
   let callbackUrl = url!;
   try {
     const parsed = new URL(callbackUrl);
@@ -243,8 +260,7 @@ function deriveXCallback(
       callbackUrl = parsed.toString();
     }
   } catch {
-    // If URL parsing fails downstream validation in thClaws will catch
-    // it. Don't add fallback handling that masks a real misconfiguration.
+    // surface invalid URL via thClaws's validation downstream
   }
   return { url: callbackUrl, apiKey: apiKey!, runId: runId! };
 }
