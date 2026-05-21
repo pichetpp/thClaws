@@ -29,6 +29,7 @@ pub mod commands;
 pub mod compaction;
 pub mod config;
 pub mod context;
+pub mod deploy_client;
 pub mod dotenv;
 pub mod endpoints;
 pub mod error;
