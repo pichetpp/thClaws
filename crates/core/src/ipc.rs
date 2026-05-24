@@ -295,6 +295,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let entry = crate::schedule::Schedule {
                 id: id.clone(),
                 cron,
+                // GUI schedule-add is recurring-only for now; one-shot
+                // (--at/--in) is CLI-only until the modal mirrors it.
+                run_at: None,
                 cwd: std::path::PathBuf::from(cwd),
                 prompt,
                 model,
