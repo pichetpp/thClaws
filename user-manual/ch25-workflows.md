@@ -1,6 +1,6 @@
 # Chapter 25 — Workflows
 
-Workflows are thClaws's **fourth orchestration tier**: Claude writes a
+Workflows are thClaws's **fourth orchestration tier**: the model writes a
 JavaScript script that fans work out across many subagents, and a
 sandboxed JS engine runs that script deterministically on your
 machine. Unlike subagents (Chapter 15), `/agent` side-channels, or
@@ -39,7 +39,7 @@ collaboration.
 
 What happens, in order:
 
-1. **Author phase.** Claude writes a JavaScript script using the
+1. **Author phase.** The model writes a JavaScript script using the
    `thclaws.*` API (the API is detailed in the model's system prompt,
    so the script you get back already knows what's available).
 2. **Review.** The script is printed with line numbers. You're
@@ -50,7 +50,7 @@ What happens, in order:
    - `a` — run the script as written.
    - `c` — drop the workflow.
    - `r` — give a one-line revision note ("use the read tool not bash
-     cat") and Claude rewrites the script with that feedback. Loop
+     cat") and the model rewrites the script with that feedback. Loop
      until you `a` or `c`.
 3. **Execute.** A workflow id (`wf-…`) prints, then each subagent
    invocation shows a progress line:
@@ -66,7 +66,7 @@ What happens, in order:
    ```
 
 If a worker errors, you see `✗ wN  …` for that line and the script
-typically catches and continues (depending on what Claude wrote).
+typically catches and continues (depending on what the model wrote).
 
 ## The `thclaws.*` API
 
@@ -292,6 +292,6 @@ global only exists inside the workflow sandbox.
 while. Subagent calls have no timeout in Tier 1; Ctrl-C cancels the
 whole run.
 
-**Re-author loop keeps producing the same script** — Claude may be
+**Re-author loop keeps producing the same script** — the model may be
 ignoring your revision note. Try cancelling and re-running with a
 sharper goal phrasing rather than relying on `r`-loops.

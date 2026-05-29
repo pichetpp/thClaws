@@ -1,6 +1,6 @@
 # บทที่ 25 — Workflows
 
-Workflows คือ **orchestration tier ที่สี่** ของ thClaws — Claude
+Workflows คือ **orchestration tier ที่สี่** ของ thClaws — model
 เขียนสคริปต์ JavaScript ที่กระจายงานไปยัง subagent หลายตัว แล้ว JS
 engine ในตัวสคริปต์รันแบบ deterministic บนเครื่องของคุณ ต่างจาก
 subagent (บทที่ 15), `/agent` side-channel, หรือ Agent Teams (บทที่
@@ -38,7 +38,7 @@ Workflows เป็น stateless fan-out ส่วน team เป็น stateful
 
 ลำดับเหตุการณ์:
 
-1. **Author phase** Claude เขียนสคริปต์ JavaScript ที่ใช้ API
+1. **Author phase** model เขียนสคริปต์ JavaScript ที่ใช้ API
    `thclaws.*` (รายละเอียด API อยู่ใน system prompt ของ model
    อยู่แล้ว ดังนั้นสคริปต์ที่ได้กลับมารู้ว่ามีอะไรให้ใช้บ้าง)
 2. **Review** สคริปต์ถูก print พร้อมเลขบรรทัด แล้วถาม:
@@ -48,7 +48,7 @@ Workflows เป็น stateless fan-out ส่วน team เป็น stateful
    - `a` — รันตามนี้
    - `c` — ยกเลิก
    - `r` — ใส่ note บรรทัดเดียวบอกว่าให้แก้อะไร ("ใช้ read tool ไม่
-     ใช่ bash cat") แล้ว Claude เขียนสคริปต์ใหม่ตาม feedback วน
+     ใช่ bash cat") แล้ว model เขียนสคริปต์ใหม่ตาม feedback วน
      จนกว่าจะกด `a` หรือ `c`
 3. **Execute** แสดง workflow id (`wf-…`) จากนั้นทุก subagent call
    จะมีบรรทัด progress:
@@ -64,7 +64,7 @@ Workflows เป็น stateless fan-out ส่วน team เป็น stateful
    ```
 
 ถ้า worker error จะเห็น `✗ wN  …` และสคริปต์มักจะ catch แล้วทำงาน
-ต่อ (แล้วแต่ Claude เขียน)
+ต่อ (แล้วแต่ model เขียน)
 
 ## API `thclaws.*`
 
@@ -282,6 +282,6 @@ auto-approve tool call ทุกตัวของ subagent (เหมือน
 **Workflow ค้างหลังบรรทัด `⠋ wN  …`** — worker ตัวนั้นกำลังใช้เวลา
 นาน Tier 1 ยังไม่มี timeout ต่อ subagent call กด Ctrl-C จะหยุดทั้ง run
 
-**Re-author loop ได้สคริปต์เดิมซ้ำ ๆ** — Claude อาจมอง revision
+**Re-author loop ได้สคริปต์เดิมซ้ำ ๆ** — model อาจมอง revision
 note ของคุณข้าม ลองยกเลิกแล้วรันใหม่โดยเขียน goal ให้ชัดขึ้น แทน
 การพึ่ง `r`-loop
