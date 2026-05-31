@@ -83,11 +83,17 @@ pub async fn run(
     let approver: Arc<dyn ApprovalSink> = Arc::new(AutoApprover);
 
     let agent_defs = crate::agent_defs::AgentDefsConfig::load();
+    // Workflow headless is one-shot — no mid-run mutators that would
+    // need to refresh this snapshot, so the Arc is owned solely by
+    // the factory (no worker writer side).
+    let factory_snapshot = Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+        system: system.clone(),
+        tools: tools.clone(),
+    }));
     let factory = Arc::new(ProductionAgentFactory {
         provider: provider.clone(),
-        base_tools: tools.clone(),
+        snapshot: factory_snapshot,
         model: config.model.clone(),
-        system: system.clone(),
         max_iterations: config.max_iterations,
         max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
         max_tokens: config.max_tokens,

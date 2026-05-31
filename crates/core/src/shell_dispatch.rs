@@ -4368,6 +4368,15 @@ async fn persist_and_register_mcp(
                     state.tool_registry.register(std::sync::Arc::new(tool));
                 }
                 state.mcp_clients.push(client);
+                // Refresh the system prompt FIRST so the new server's
+                // InitializeResult.instructions land in the
+                // `# MCP server instructions` section and the factory
+                // snapshot picks up the new tools — matches the
+                // McpReady path in shared_session.rs. Pre-fix this
+                // path only called rebuild_agent, so the new tools
+                // reached the parent but the system prompt's MCP
+                // section stayed stale until the next /reload.
+                state.rebuild_system_prompt();
                 if let Err(e) = state.rebuild_agent(true) {
                     emit(events_tx, format!("rebuild failed: {e}"));
                     return;

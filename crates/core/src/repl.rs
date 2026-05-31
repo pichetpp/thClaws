@@ -4238,6 +4238,8 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
 fn refresh_repl_system_prompt(
     agent: &mut Agent,
     system: &mut String,
+    factory_snapshot: &std::sync::Arc<std::sync::RwLock<crate::subagent::FactorySnapshot>>,
+    tool_registry: &crate::tools::ToolRegistry,
     config: &AppConfig,
     cwd: &std::path::Path,
     skill_store_handle: &Option<std::sync::Arc<std::sync::Mutex<crate::skills::SkillStore>>>,
@@ -4265,7 +4267,20 @@ fn refresh_repl_system_prompt(
         new_system.push_str(addendum);
     }
     agent.set_system(new_system.clone());
-    *system = new_system;
+    *system = new_system.clone();
+    // Propagate to the subagent factory's live snapshot. Pre-fix the
+    // factory captured system + base_tools at construction and never
+    // refreshed — subagents spawned after /mcp add etc. saw the
+    // startup-time prompt with no new MCP tools. Now the factory
+    // shares this Arc<RwLock<FactorySnapshot>> with us, so writing
+    // here is the only update needed for both system AND tools.
+    {
+        let mut snap = factory_snapshot
+            .write()
+            .expect("factory snapshot write lock");
+        snap.system = new_system;
+        snap.tools = tool_registry.clone();
+    }
 }
 
 /// Interactive REPL. Reads from stdin via `rustyline`, streams assistant
@@ -4561,17 +4576,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // filtering — Task became a privilege-escalation primitive
     // (model spawns subagent → subagent has tools the parent was
     // forbidden from using).
+    let factory_snapshot =
+        std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+            system: system.clone(),
+            tools: tool_registry.clone(),
+        }));
     {
         let plugin_agent_dirs = crate::plugins::plugin_agent_dirs();
         let mut agent_defs =
             crate::agent_defs::AgentDefsConfig::load_with_extra(&plugin_agent_dirs);
         agent_defs.apply_builtin_subagent_overrides(&config);
-        let base_tools = tool_registry.clone();
         let factory = Arc::new(ProductionAgentFactory {
             provider: provider.clone(),
-            base_tools,
+            snapshot: factory_snapshot.clone(),
             model: config.model.clone(),
-            system: system.clone(),
             max_iterations: config.max_iterations,
             max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
             max_tokens: config.max_tokens,
@@ -6519,6 +6537,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             refresh_repl_system_prompt(
                                 &mut agent,
                                 &mut system,
+                                &factory_snapshot,
+                                &tool_registry,
                                 &config,
                                 &cwd,
                                 &skill_store_handle,
@@ -6824,6 +6844,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 refresh_repl_system_prompt(
                                     &mut agent,
                                     &mut system,
+                                    &factory_snapshot,
+                                    &tool_registry,
                                     &config,
                                     &cwd,
                                     &skill_store_handle,
@@ -6909,6 +6931,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 refresh_repl_system_prompt(
                                     &mut agent,
                                     &mut system,
+                                    &factory_snapshot,
+                                    &tool_registry,
                                     &config,
                                     &cwd,
                                     &skill_store_handle,
@@ -7073,6 +7097,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     refresh_repl_system_prompt(
                         &mut agent,
                         &mut system,
+                        &factory_snapshot,
+                        &tool_registry,
                         &config,
                         &cwd,
                         &skill_store_handle,
@@ -7492,6 +7518,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 refresh_repl_system_prompt(
                                     &mut agent,
                                     &mut system,
+                                    &factory_snapshot,
+                                    &tool_registry,
                                     &config,
                                     &cwd,
                                     &skill_store_handle,
@@ -7962,6 +7990,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             refresh_repl_system_prompt(
                                 &mut agent,
                                 &mut system,
+                                &factory_snapshot,
+                                &tool_registry,
                                 &config,
                                 &cwd,
                                 &skill_store_handle,
@@ -7986,6 +8016,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         refresh_repl_system_prompt(
                             &mut agent,
                             &mut system,
+                            &factory_snapshot,
+                            &tool_registry,
                             &config,
                             &cwd,
                             &skill_store_handle,
@@ -12233,9 +12265,11 @@ mod tests {
         let approver: Arc<dyn ApprovalSink> = Arc::new(DenyApprover);
         let factory = crate::subagent::ProductionAgentFactory {
             provider: Arc::new(StubProvider),
-            base_tools: ToolRegistry::new(),
+            snapshot: Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+                system: String::new(),
+                tools: ToolRegistry::new(),
+            })),
             model: "test".into(),
-            system: String::new(),
             max_iterations: 1,
             max_depth: 3,
             max_tokens: 8192,
@@ -12295,8 +12329,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = AppConfig::default();
         let provider: Arc<dyn Provider> = Arc::new(StubProvider);
-        let mut agent = Agent::new(provider, ToolRegistry::new(), &cfg.model, "INITIAL_BASE");
+        let tool_registry = ToolRegistry::new();
+        let mut agent = Agent::new(provider, tool_registry.clone(), &cfg.model, "INITIAL_BASE");
         let mut system = String::from("INITIAL_BASE");
+        let factory_snapshot = Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+            system: system.clone(),
+            tools: tool_registry.clone(),
+        }));
         let addendum = "\n\n# Agent Role: TEST\nTEST_RULES\n";
 
         // Refresh — should rebuild base from build_full_system_prompt
@@ -12305,6 +12344,8 @@ mod tests {
         super::refresh_repl_system_prompt(
             &mut agent,
             &mut system,
+            &factory_snapshot,
+            &tool_registry,
             &cfg,
             tmp.path(),
             &None,
@@ -12322,11 +12363,22 @@ mod tests {
             system, agent_sys,
             "local `system` mirror must stay byte-identical to agent.system"
         );
+        // Factory snapshot must be byte-identical to the local mirror —
+        // that's the whole point of plumbing it through, so subagents
+        // spawned post-refresh see the same system the parent does.
+        let snap_sys = factory_snapshot.read().unwrap().system.clone();
+        assert_eq!(
+            snap_sys, system,
+            "factory snapshot must mirror agent.system after refresh"
+        );
+
         // Empty-addendum path: no extra bytes appended.
         let before_len = system.len();
         super::refresh_repl_system_prompt(
             &mut agent,
             &mut system,
+            &factory_snapshot,
+            &tool_registry,
             &cfg,
             tmp.path(),
             &None,

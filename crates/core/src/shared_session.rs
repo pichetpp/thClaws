@@ -671,6 +671,15 @@ pub struct WorkerState {
     /// channels inherit the same provider, base tools, system prompt,
     /// and approver as the main agent.
     pub agent_factory: std::sync::Arc<dyn crate::subagent::AgentFactory>,
+    /// Live snapshot of `system_prompt` + `tool_registry` shared with
+    /// the `agent_factory` above so subagents spawned via Task pick
+    /// up `/mcp add` / `/skill install` / `/kms use` and folder-
+    /// instructions / memory edits without a `/reload`. Pre-fix the
+    /// factory captured these at worker init and never refreshed —
+    /// `rebuild_system_prompt` updated `self.system_prompt` and the
+    /// live `self.agent`, but the factory kept seeing the startup
+    /// snapshot. See [`crate::subagent::FactorySnapshot`] docs.
+    pub factory_snapshot: std::sync::Arc<std::sync::RwLock<crate::subagent::FactorySnapshot>>,
     /// Loaded agent definitions (`.thclaws/agents/*.md` + plugin agent
     /// dirs). Side-channel `/agent` validates names against this list
     /// before spawning; the factory uses it to register a Task tool
@@ -795,6 +804,30 @@ impl WorkerState {
             &mcp_instructions,
         );
         self.agent.set_system(self.system_prompt.clone());
+        // Propagate to the subagent factory's live snapshot so a
+        // subagent spawned after this sees the same system the parent
+        // agent does. Pre-fix the factory captured system + base_tools
+        // at worker init and never refreshed.
+        self.sync_factory_snapshot();
+    }
+
+    /// Push the worker's current `system_prompt` + `tool_registry`
+    /// into the factory's shared snapshot. Call after any path that
+    /// mutates `tool_registry` (`/mcp add` register, `/mcp` disconnect
+    /// remove, KMS tool shape-shift) so subagents see the live set
+    /// of tools — Production AgentFactory's `base_tools` field used
+    /// to be a one-shot snapshot at worker init.
+    ///
+    /// Cheap: ToolRegistry clone is just cloning a HashMap of Arc'd
+    /// tools (refcount bumps, no tool work). The RwLock is held for
+    /// two field writes and nothing else.
+    pub fn sync_factory_snapshot(&self) {
+        let mut snap = self
+            .factory_snapshot
+            .write()
+            .expect("factory snapshot write lock");
+        snap.system = self.system_prompt.clone();
+        snap.tools = self.tool_registry.clone();
     }
 }
 
@@ -1333,13 +1366,16 @@ async fn run_worker(
         crate::agent_defs::AgentDefsConfig::load_with_extra(&plugin_agent_dirs);
     agent_defs_state.apply_builtin_subagent_overrides(&config);
     let agent_defs_state = agent_defs_state;
+    let factory_snapshot_state =
+        Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+            system: system.clone(),
+            tools: tools.clone(),
+        }));
     let factory_state: Arc<dyn crate::subagent::AgentFactory> = {
-        let base_tools = tools.clone();
         let factory = Arc::new(crate::subagent::ProductionAgentFactory {
             provider: provider.clone(),
-            base_tools,
+            snapshot: factory_snapshot_state.clone(),
             model: config.model.clone(),
-            system: system.clone(),
             max_iterations: config.max_iterations,
             max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
             max_tokens: config.max_tokens,
@@ -1549,6 +1585,7 @@ async fn run_worker(
         // would otherwise gate the loop forever on iteration 0.
         last_turn_made_tool_calls: true,
         agent_factory: factory_state,
+        factory_snapshot: factory_snapshot_state,
         agent_defs: agent_defs_state,
         line_session: None,
         line_pre_mode: None,
@@ -2854,6 +2891,11 @@ async fn run_worker(
                 // exit shortly after as their stdio is closed.
                 state.mcp_clients.clear();
                 crate::gui::clear_mcp_tool_counts();
+                // Push the now-trimmed registry into the factory
+                // snapshot so a subagent spawned between this remove
+                // and the first McpReady doesn't briefly see the
+                // old project's MCP tools.
+                state.sync_factory_snapshot();
 
                 // Spawn each MCP server in the new project — same
                 // `tokio::spawn` + ShellInput::McpReady fan-out as
