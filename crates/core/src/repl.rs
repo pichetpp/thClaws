@@ -5573,13 +5573,23 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 SlashCommand::Quit => break,
                 SlashCommand::Clear => {
                     agent.clear_history();
+                    // Rotate to a fresh session file — old conversation
+                    // stays on disk under its previous id. Mirrors what
+                    // GUI /clear (shell_dispatch.rs) and model-swap already
+                    // do; without it the next sync() would clamp
+                    // `last_saved_count` and silently skip the first
+                    // post-clear turn from disk.
+                    session = Session::new(&config.model, session.cwd.clone());
                     // ANSI: scrollback erase (\x1b[3J) + screen erase (\x1b[2J)
                     // + cursor home (\x1b[H). Matches what most terminals do
                     // for Cmd+K / `clear`. Makes the visible scrollback match
                     // the model's now-empty history.
                     print!("\x1b[3J\x1b[2J\x1b[H");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
-                    println!("{COLOR_DIM}history cleared{COLOR_RESET}");
+                    println!(
+                        "{COLOR_DIM}history cleared (new session {}){COLOR_RESET}",
+                        session.id
+                    );
                 }
                 SlashCommand::History => {
                     let h = agent.history_snapshot();

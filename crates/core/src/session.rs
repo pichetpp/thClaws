@@ -1783,6 +1783,23 @@ mod tests {
     }
 
     #[test]
+    fn sync_clamps_last_saved_count_to_message_len() {
+        // Repro of the /clear-then-save panic (PR #134): if upstream
+        // shrinks the message vec below `last_saved_count`, the next
+        // `append_to` would slice out of range. `sync` clamps so the
+        // shorter vec is treated as "nothing new since last save".
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let mut session = Session::new("m", "/tmp");
+        session.sync(sample_messages());
+        store.save(&mut session).unwrap();
+        assert_eq!(session.last_saved_count, 3);
+        session.sync(Vec::new());
+        assert_eq!(session.last_saved_count, 0);
+        store.save(&mut session).unwrap();
+    }
+
+    #[test]
     fn save_creates_parent_directories() {
         let dir = tempdir().unwrap();
         let deep = dir.path().join("a/b/c");
