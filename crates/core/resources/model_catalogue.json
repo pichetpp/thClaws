@@ -1492,7 +1492,9 @@
           "context": 1048576,
           "max_output": 65536,
           "source": "https://generativelanguage.googleapis.com/v1beta/models",
-          "verified_at": "2026-05-10"
+          "verified_at": "2026-06-02",
+          "input_per_mtok": 0.25,
+          "output_per_mtok": 1.5
         },
         "gemini-3.1-flash-lite-preview": {
           "context": 1048576,
