@@ -519,24 +519,27 @@ fn has_destructive_signal(cmd: &str) -> bool {
 /// command (`;`, newline, `&&`, `||`, `|`, `&`). Coarse but enough to
 /// isolate each verb for prefix-stripping.
 fn split_shell_segments(cmd: &str) -> Vec<String> {
+    // `char_indices()` yields (byte_pos, char) tuples where every
+    // `byte_pos` is on a UTF-8 char boundary, so `cmd[pos..]` is
+    // always a valid slice. The previous byte-arithmetic version
+    // panicked on any multi-byte UTF-8 (em-dash etc.) that LLM-
+    // generated commands inadvertently include — see issue #141.
+    //
+    // Order matters: check the two-char operators `&&` / `||` BEFORE
+    // the single-char `&` / `|` branch, else the single-char arm
+    // steals the first byte of the pair and `cur` ends up with a
+    // stray `&` between two segments.
     let mut segs = Vec::new();
     let mut cur = String::new();
-    let bytes = cmd.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if c == ';' || c == '\n' {
+    let mut chars = cmd.char_indices().peekable();
+    while let Some((pos, c)) = chars.next() {
+        if cmd[pos..].starts_with("&&") || cmd[pos..].starts_with("||") {
             segs.push(std::mem::take(&mut cur));
-            i += 1;
-        } else if cmd[i..].starts_with("&&") || cmd[i..].starts_with("||") {
+            chars.next();  // consume the second char of the pair
+        } else if c == ';' || c == '\n' || c == '|' || c == '&' {
             segs.push(std::mem::take(&mut cur));
-            i += 2;
-        } else if c == '|' || c == '&' {
-            segs.push(std::mem::take(&mut cur));
-            i += 1;
         } else {
             cur.push(c);
-            i += 1;
         }
     }
     segs.push(cur);
@@ -1131,6 +1134,49 @@ fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn split_shell_segments_handles_multibyte_utf8() {
+        // Regression for issue #141: the old byte-arithmetic version
+        // panicked here because `i += 1` walks into the middle of the
+        // 3-byte em-dash (U+2014, E2 80 94).
+        let cmd = "echo hello — world; ls";
+        let segs = split_shell_segments(cmd);
+        assert_eq!(segs, vec!["echo hello — world".to_string(), " ls".to_string()]);
+
+        // And a few more exotic Unicode points to be sure: a 4-byte
+        // emoji (😀, U+1F600, F0 9F 98 80) right next to an operator.
+        let cmd = "echo 😀 | grep .";
+        let segs = split_shell_segments(cmd);
+        assert_eq!(segs, vec!["echo 😀 ".to_string(), " grep .".to_string()]);
+
+        // Mixed: Thai script (3-byte each) split by `&&`.
+        let cmd = "echo สวัสดี && echo world";
+        let segs = split_shell_segments(cmd);
+        assert_eq!(segs, vec!["echo สวัสดี ".to_string(), " echo world".to_string()]);
+    }
+
+    #[test]
+    fn split_shell_segments_distinguishes_double_and_single_operators() {
+        // && and || vs single & and | — make sure the two-char check
+        // wins so neither operator gets corrupted.
+        assert_eq!(
+            split_shell_segments("a && b"),
+            vec!["a ".to_string(), " b".to_string()]
+        );
+        assert_eq!(
+            split_shell_segments("a || b"),
+            vec!["a ".to_string(), " b".to_string()]
+        );
+        assert_eq!(
+            split_shell_segments("a & b"),
+            vec!["a ".to_string(), " b".to_string()]
+        );
+        assert_eq!(
+            split_shell_segments("a | b"),
+            vec!["a ".to_string(), " b".to_string()]
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]
