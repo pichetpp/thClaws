@@ -287,6 +287,133 @@
         }
         return send("storage_set", { key, value });
       },
+      // Tier 3: explicit delete. set(key, null) used to be the
+      // convention; this is a clearer surface for shell authors.
+      delete(key) {
+        if (typeof key !== "string") {
+          return Promise.reject(
+            new TypeError("thclaws.storage.delete: key must be a string"),
+          );
+        }
+        return send("storage_delete", { key });
+      },
+    },
+
+    // ── dev-plan/39 Tier 3 — RPC + permissions surface ────────────
+    //
+    // Sugar over thclaws.tools.invoke that matches the dev-plan/39
+    // documented contract: `await thclaws.callTool("Bash", {cmd:"ls"})`.
+    // Identical wire format under the hood; the new name is what
+    // marketplace shells should target going forward.
+    callTool(name, args) {
+      if (typeof name !== "string" || !name) {
+        return Promise.reject(
+          new TypeError("thclaws.callTool: name must be a non-empty string"),
+        );
+      }
+      return send("tool_invoke", { name, args: args ?? null });
+    },
+
+    // Tier 3 stub. The shell asks for permission to take an action
+    // and the user inline-approves via a custom widget (vs the full-
+    // screen system modal). Engine wiring lands in Tier 3 follow-up;
+    // for now, returning a clear rejection lets shells code against
+    // the contract without crashing.
+    awaitApproval(request) {
+      return send("await_approval", request ?? {}).catch((e) => {
+        if (String(e).includes("doesn't implement")) {
+          throw new Error(
+            "thclaws.awaitApproval: not yet wired through engine — falls back to the system approval modal. Tier 3 follow-up.",
+          );
+        }
+        throw e;
+      });
+    },
+
+    // Tier 3 stub. Streams turn events as an AsyncIterable. Until the
+    // engine wires the per-event broadcast path, callers can keep
+    // using thclaws.run() + thclaws.on("text", …) — this method is
+    // here so marketplace shells coding to the new contract have a
+    // stable entry point.
+    streamTurn(prompt, opts) {
+      const queue = [];
+      const waiters = [];
+      let done = false;
+      let unsubText = null;
+      let unsubDone = null;
+      let unsubErr = null;
+      const push = (item) => {
+        if (waiters.length) waiters.shift()(item);
+        else queue.push(item);
+      };
+      unsubText = window.thclaws.on("text", (p) => push({ done: false, value: { type: "text", delta: p.delta } }));
+      unsubDone = window.thclaws.on("done", () => {
+        done = true;
+        push({ done: true, value: undefined });
+        if (unsubText) unsubText();
+        if (unsubErr) unsubErr();
+      });
+      unsubErr = window.thclaws.on("error", (p) => {
+        done = true;
+        push({ done: true, value: undefined, error: new Error(p?.message || "error") });
+      });
+      window.thclaws.run(prompt, opts).catch(() => {});
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              if (queue.length) return Promise.resolve(queue.shift());
+              if (done) return Promise.resolve({ done: true, value: undefined });
+              return new Promise((r) => waiters.push(r));
+            },
+            return() {
+              if (unsubText) unsubText();
+              if (unsubDone) unsubDone();
+              if (unsubErr) unsubErr();
+              return Promise.resolve({ done: true, value: undefined });
+            },
+          };
+        },
+      };
+    },
+
+    // Tier 3 stub. Uploads a blob to the workspace's per-user asset
+    // store + returns a `thclaws://localhost/file-asset/<rel>` URL.
+    // Until the engine accepts uploads, falls back to a clear error
+    // so shells can show "Upload not supported yet" inline.
+    uploadFile(blob, name) {
+      if (!(blob instanceof Blob)) {
+        return Promise.reject(new TypeError("thclaws.uploadFile: first arg must be a Blob"));
+      }
+      return send("upload_file", {
+        name: name || (blob.name || "upload.bin"),
+        mime: blob.type || "application/octet-stream",
+        // In Tier 3 follow-up the bridge will POST multipart to a
+        // dedicated /upload route; the WS path is a fallback for
+        // small payloads.
+      }).catch((e) => {
+        if (String(e).includes("doesn't implement")) {
+          throw new Error(
+            "thclaws.uploadFile: not yet wired through engine. Tier 3 follow-up.",
+          );
+        }
+        throw e;
+      });
+    },
+
+    // Tier 3: read-only access to the shell's declared permissions
+    // (from shell.json). Lets shell code disable UI for actions the
+    // user didn't grant rather than calling and getting denied.
+    permissions: {
+      list() {
+        return send("permissions_list", {});
+      },
+      has(action) {
+        return window.thclaws.permissions
+          .list()
+          .then((list) => Array.isArray(list) && list.includes(action))
+          .catch(() => false);
+      },
     },
   };
 

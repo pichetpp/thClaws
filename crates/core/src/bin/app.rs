@@ -311,6 +311,57 @@ enum Command {
         #[arg(long, global = true, value_name = "URL")]
         cloud_url: Option<String>,
     },
+    /// GUI Shell authoring (dev-plan/39 Tier 2) — scaffold a new shell
+    /// from a vendored template, preview locally with hot-reload, lint
+    /// the manifest, or pack into a single-file HTML for publish.
+    #[cfg(feature = "gui")]
+    Shell {
+        #[command(subcommand)]
+        cmd: ShellCmd,
+    },
+}
+
+#[cfg(feature = "gui")]
+#[derive(Subcommand)]
+enum ShellCmd {
+    /// Scaffold a new shell from a starter template.
+    /// Templates: chat-enhanced / grid / form / dashboard / kanban /
+    /// document / report.
+    New {
+        /// Template id (see `thclaws shell new --help` for the list).
+        template: String,
+        /// Destination folder. Created if missing; refused if non-empty
+        /// without --force.
+        dest: std::path::PathBuf,
+        /// Overwrite a non-empty destination.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Run the shell against a mock agent, with hot-reload on save.
+    /// Opens at http://localhost:<port>/ by default.
+    Preview {
+        /// Path to the shell folder (must contain shell.json).
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+        /// Port to bind. 0 = pick a free one.
+        #[arg(long, default_value_t = 8088)]
+        port: u16,
+    },
+    /// Lint a shell folder. Emits errors + warnings; exits 1 on any
+    /// error.
+    Check {
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+    },
+    /// Bundle a shell folder into a single-file HTML (inlines sibling
+    /// style.css and script.js if present).
+    Pack {
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+        /// Output file. Defaults to <path>/dist/index.html.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -641,6 +692,11 @@ async fn main() {
             let code = run_cloud_subcommand(cmd, cloud_url).await;
             std::process::exit(code);
         }
+        #[cfg(feature = "gui")]
+        Some(Command::Shell { cmd }) => {
+            let code = run_shell_subcommand(cmd).await;
+            std::process::exit(code);
+        }
         None => {}
     }
 
@@ -739,16 +795,20 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            // dev-plan/33 Tier 2 Mode B: resolve the bound shell from
-            // (a) explicit --gui-shell flag, or (b)
-            // settings.json::guiShell.serveDefault. None of either
-            // means "serve React frontend as before".
-            let resolved_shell_id = cli.gui_shell.clone().or_else(|| {
-                thclaws_core::config::AppConfig::load().ok().and_then(|c| {
-                    c.gui_shell
-                        .and_then(|s| s.serve_default().map(str::to_string))
-                })
-            });
+            // dev-plan/33 Tier 2 Mode B + dev-plan/39 Tier 1: resolve
+            // the bound shell from (a) explicit --gui-shell flag,
+            // (b) settings.json::guiShell.serveDefault, (c)
+            // manifest.json::default_shell at the working directory.
+            // None of those means "serve React frontend as before".
+            let settings_default = thclaws_core::config::AppConfig::load()
+                .ok()
+                .and_then(|c| c.gui_shell.and_then(|s| s.serve_default().map(str::to_string)));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let resolved_shell_id = thclaws_core::gui_shell::resolve_default_shell(
+                cli.gui_shell.as_deref(),
+                settings_default.as_deref(),
+                &cwd,
+            );
             let gui_shell_mode =
                 resolved_shell_id.map(|shell_id| thclaws_core::server::ShellServeMode {
                     shell_id,
@@ -1437,4 +1497,83 @@ fn warn_about_stale_binaries() {
         "\x1b[33m[thclaws] only the first one on PATH is invoked when you type `thclaws`. The other copies still take ~17 MB each.\nTo clean up:  {}\x1b[0m",
         RM_HINT
     );
+}
+
+#[cfg(feature = "gui")]
+async fn run_shell_subcommand(cmd: ShellCmd) -> i32 {
+    use thclaws_core::gui_shell::shell_cli;
+    match cmd {
+        ShellCmd::New { template, dest, force } => {
+            match shell_cli::shell_new(&template, &dest, force) {
+                Ok(files) => {
+                    eprintln!(
+                        "\x1b[32m✓ scaffolded {} into {}\x1b[0m",
+                        template,
+                        dest.display(),
+                    );
+                    for f in files {
+                        eprintln!("  + {}", f.display());
+                    }
+                    eprintln!(
+                        "\n   next: cd {} && thclaws shell preview .",
+                        dest.display()
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("\x1b[31m✗ {e}\x1b[0m");
+                    1
+                }
+            }
+        }
+        ShellCmd::Check { path } => match shell_cli::shell_check(&path) {
+            Ok(findings) => {
+                let mut errors = 0;
+                for (sev, msg) in &findings {
+                    let color = match sev {
+                        shell_cli::Severity::Error => "\x1b[31m",
+                        shell_cli::Severity::Warning => "\x1b[33m",
+                    };
+                    eprintln!("{}{:8}{}\x1b[0m {msg}", color, sev.label(), "");
+                    if *sev == shell_cli::Severity::Error {
+                        errors += 1;
+                    }
+                }
+                if findings.is_empty() {
+                    eprintln!("\x1b[32m✓ shell.json clean\x1b[0m");
+                }
+                if errors > 0 {
+                    1
+                } else {
+                    0
+                }
+            }
+            Err(e) => {
+                eprintln!("\x1b[31m✗ {e}\x1b[0m");
+                1
+            }
+        },
+        ShellCmd::Pack { path, out } => {
+            let out = out.unwrap_or_else(|| path.join("dist/index.html"));
+            match shell_cli::shell_pack(&path, &out) {
+                Ok(_) => {
+                    eprintln!("\x1b[32m✓ packed → {}\x1b[0m", out.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("\x1b[31m✗ {e}\x1b[0m");
+                    1
+                }
+            }
+        }
+        ShellCmd::Preview { path, port } => {
+            match thclaws_core::gui_shell::shell_preview::run_preview(&path, port).await {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("\x1b[31m✗ preview: {e}\x1b[0m");
+                    1
+                }
+            }
+        }
+    }
 }

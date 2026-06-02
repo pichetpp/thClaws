@@ -84,6 +84,29 @@ pub struct Preview {
     pub sample_prompts: Vec<String>,
 }
 
+/// Catalog-side metadata about an agent's GUI Shell (dev-plan/39 Tier 1).
+/// Distinct from `gui_shell::manifest::ShellManifest` which describes the
+/// shell ITSELF (entry, bridge version, runtime permissions). This block
+/// lives in the agent's `manifest.json` and tells the catalog how to
+/// market the shell (screenshots, copy) + hosted runners how to route to
+/// it. `screenshots` paths resolve inside the agent tarball.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogShellMeta {
+    /// Short marketing description shown next to screenshots. Falls
+    /// back to `manifest.description` when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Screenshot paths relative to the agent folder root (e.g.
+    /// `shells/dashboard/screenshots/01.png`). Catalog surfaces these as
+    /// the detail-page hero carousel when present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screenshots: Vec<String>,
+    /// Future-proof permission strings (dev-plan/39 Tier 3 enforces).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -113,6 +136,17 @@ pub struct Manifest {
     pub permissions: Permissions,
     #[serde(default)]
     pub preview: Preview,
+    /// Shell id (relative to the agent folder root, e.g.
+    /// `shells/dashboard`) that should be served at the workspace's
+    /// root URL instead of the default chat UI. None = chat at root
+    /// (current behavior). dev-plan/39 Tier 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_shell: Option<String>,
+    /// Catalog-facing shell metadata — screenshots, marketing copy,
+    /// declared permissions. dev-plan/39 Tier 1 (catalog surfacing) +
+    /// Tier 3 (permission enforcement).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<CatalogShellMeta>,
 }
 
 fn default_license() -> String {

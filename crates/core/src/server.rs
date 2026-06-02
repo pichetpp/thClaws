@@ -492,8 +492,22 @@ fn build_shell_router(
             ),
         )
         .route(&ws_url_path, get(ws_handler))
-        .route("/healthz", get(serve_health))
-        .with_state(state);
+        .route("/healthz", get(serve_health));
+
+    // dev-plan/39 Tier 1: keep classic chat reachable at /chat/ when a
+    // shell is bound at /. Only safe under no_auth — auth-gated shells
+    // would otherwise let users bypass the token by hitting /chat/. For
+    // hosted workspaces (the primary Tier 1 target) no_auth is always
+    // true because the workspace URL is auth-gated upstream by Caddy.
+    if mode.no_auth {
+        router = router
+            .route("/chat/", get(serve_index))
+            .route("/chat", get(serve_index))
+            .route("/chat/ws", get(ws_handler))
+            .route("/chat/upload", post(serve_upload));
+    }
+
+    let mut router = router.with_state(state);
 
     // /v1/* OpenAI-compat surface stays available regardless of Mode B —
     // it has its own auth (THCLAWS_API_TOKEN) independent of the shell

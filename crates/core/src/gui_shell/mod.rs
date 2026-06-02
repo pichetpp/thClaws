@@ -9,12 +9,16 @@
 
 pub mod manifest;
 pub mod registry;
+pub mod router;
 pub mod serve;
+pub mod shell_cli;
+pub mod shell_preview;
 pub mod storage;
 pub mod tokens;
 
 pub use manifest::ShellManifest;
 pub use registry::{EmbeddedShell, ShellRef, ShellRegistry, ShellSource};
+pub use router::resolve_default_shell;
 pub use tokens::ShellToken;
 
 /// Bridge runtime served at `thclaws://localhost/gui-shell-bridge.js`.

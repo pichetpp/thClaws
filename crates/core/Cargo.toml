@@ -48,6 +48,12 @@ tar = "0.4"
 # `tar` alone produces uncompressed archives; pairing with flate2 gives
 # us `.tar.gz` for catalog upload/download.
 flate2 = "1"
+# Bundles `assets/shell-templates/` into the binary so
+# `thclaws shell new <template>` works offline. dev-plan/39 Tier 2.
+include_dir = "0.7"
+# Adapter for piping tokio broadcast channels into a Stream (for SSE
+# in `thclaws shell preview`). dev-plan/39 Tier 2.
+tokio-stream = { version = "0.1", features = ["sync"] }
 walkdir = "2"
 getrandom = "0.2"
 shell-words = "1"
