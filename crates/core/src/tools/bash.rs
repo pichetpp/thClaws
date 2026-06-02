@@ -535,7 +535,7 @@ fn split_shell_segments(cmd: &str) -> Vec<String> {
     while let Some((pos, c)) = chars.next() {
         if cmd[pos..].starts_with("&&") || cmd[pos..].starts_with("||") {
             segs.push(std::mem::take(&mut cur));
-            chars.next();  // consume the second char of the pair
+            chars.next(); // consume the second char of the pair
         } else if c == ';' || c == '\n' || c == '|' || c == '&' {
             segs.push(std::mem::take(&mut cur));
         } else {
@@ -1142,7 +1142,10 @@ mod tests {
         // 3-byte em-dash (U+2014, E2 80 94).
         let cmd = "echo hello — world; ls";
         let segs = split_shell_segments(cmd);
-        assert_eq!(segs, vec!["echo hello — world".to_string(), " ls".to_string()]);
+        assert_eq!(
+            segs,
+            vec!["echo hello — world".to_string(), " ls".to_string()]
+        );
 
         // And a few more exotic Unicode points to be sure: a 4-byte
         // emoji (😀, U+1F600, F0 9F 98 80) right next to an operator.
@@ -1153,7 +1156,10 @@ mod tests {
         // Mixed: Thai script (3-byte each) split by `&&`.
         let cmd = "echo สวัสดี && echo world";
         let segs = split_shell_segments(cmd);
-        assert_eq!(segs, vec!["echo สวัสดี ".to_string(), " echo world".to_string()]);
+        assert_eq!(
+            segs,
+            vec!["echo สวัสดี ".to_string(), " echo world".to_string()]
+        );
     }
 
     #[test]
