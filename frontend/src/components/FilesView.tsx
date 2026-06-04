@@ -657,17 +657,19 @@ export function FilesView({ active }: Props) {
                   aria-current={isSelected ? "true" : undefined}
                   className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs text-left"
                   style={{
-                    color: isSelected ? "var(--accent)" : "var(--text-primary)",
-                    background: isSelected ? "var(--accent-dim, rgba(95,179,179,0.15))" : undefined,
-                    fontWeight: isSelected ? 600 : undefined,
-                    // Inset left bar — same idea as VS Code's
-                    // explorer active-file indicator. Reserves 2px
-                    // of border on every row so selection doesn't
-                    // shift sibling rows horizontally.
-                    borderLeft: isSelected
-                      ? "2px solid var(--accent)"
-                      : "2px solid transparent",
-                    paddingLeft: 6,
+                    // Text + icon colour stay theme-default for both
+                    // states — readability shouldn't depend on theme
+                    // contrast against an accent fill.
+                    color: "var(--text-primary)",
+                    // Selection mark is just a faint background fill
+                    // — same shape hover uses, slightly darker. Drops
+                    // the left bar / accent text / bold from the
+                    // previous pass; that combo read as a "click me"
+                    // CTA rather than a passive indicator.
+                    background: isSelected
+                      ? "var(--bg-tertiary, rgba(255,255,255,0.06))"
+                      : undefined,
+                    paddingLeft: 8,
                   }}
                   onMouseEnter={(e) => {
                     if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.05)";
@@ -682,13 +684,7 @@ export function FilesView({ active }: Props) {
                   {entry.is_dir ? (
                     <Folder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   ) : (
-                    <File
-                      size={13}
-                      style={{
-                        color: isSelected ? "var(--accent)" : "var(--text-secondary)",
-                        flexShrink: 0,
-                      }}
-                    />
+                    <File size={13} style={{ color: "var(--text-secondary)", flexShrink: 0 }} />
                   )}
                   <span className="truncate">{entry.name}</span>
                 </button>
