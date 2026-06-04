@@ -733,6 +733,14 @@ pub struct WorkerState {
     /// `/cost` slash command and pushed to the Cardputer display via
     /// `cost_bridge`. Zeroed by `/cost reset` or by a buddy-side reset.
     pub session_cost_usd: f64,
+    /// SHA-fingerprint of the last `.thclaws/settings.json` bytes that
+    /// drove a successful `ReloadConfig`. Used to dedup back-to-back
+    /// reloads from the slash command that wrote the file plus the
+    /// debounced file-watcher that picked the same write up 500ms
+    /// later — both fire `ReloadConfig`, both did the work, the user
+    /// saw "(provider reloaded: …)" twice. `None` until the first
+    /// successful reload.
+    pub last_settings_fingerprint: Option<u64>,
     /// Optional BLE bridge to a thClaws-Cost Cardputer. `Some` whenever
     /// the worker spawned a bridge at startup (default for both CLI and
     /// GUI modes when the `cost_bridge` feature is on); `None` when the
@@ -1701,6 +1709,7 @@ async fn run_worker(
         messenger_pre_mode: None,
         messenger_pre_approver: None,
         session_cost_usd: 0.0,
+        last_settings_fingerprint: None,
         #[cfg(feature = "cost_bridge")]
         cost_bridge: Some(crate::cost_bridge::spawn()),
     };
@@ -2730,6 +2739,27 @@ async fn run_worker(
                 // this, the worker keeps holding whatever provider it
                 // built at startup — usually the placeholder NoopProvider
                 // when the user launched without any keys configured.
+
+                // Dedup: `/model` and `/provider` slash commands write
+                // settings.json and dispatch ReloadConfig synchronously;
+                // the file-watcher then debounces the same write and
+                // dispatches a second ReloadConfig 500 ms later. Both
+                // events read identical bytes, do identical work, and —
+                // critically — emit two "(provider reloaded: …)" lines.
+                // Fingerprint the file content and skip a reload whose
+                // bytes match the previous successful reload. Manual
+                // edits to settings.json still go through (different
+                // bytes → different fingerprint).
+                let bytes = std::fs::read(crate::config::ProjectConfig::path()).ok();
+                let fp = bytes.as_ref().map(|b| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    b.hash(&mut h);
+                    h.finish()
+                });
+                if fp.is_some() && fp == state.last_settings_fingerprint {
+                    continue;
+                }
                 let prev_model = state.config.model.clone();
                 match crate::config::AppConfig::load() {
                     Ok(new_config) => {
@@ -2765,6 +2795,9 @@ async fn run_worker(
                             // header write.
                             state.session.model = state.config.model.clone();
                         }
+                        // Record the fingerprint so the watcher's
+                        // follow-up dispatch is recognised as a dup.
+                        state.last_settings_fingerprint = fp;
                         let provider_name = state.config.detect_provider().unwrap_or("unknown");
                         let payload = serde_json::json!({
                             "type": "provider_update",
