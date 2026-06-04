@@ -642,23 +642,58 @@ export function FilesView({ active }: Props) {
               Empty directory
             </div>
           ) : (
-            entries.map((entry) => (
-              <button
-                key={entry.name}
-                className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-white/5 text-left"
-                style={{ color: "var(--text-primary)" }}
-                onClick={() =>
-                  entry.is_dir ? navigate(entry.name) : onSidebarClick(entry.name)
-                }
-              >
-                {entry.is_dir ? (
-                  <Folder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
-                ) : (
-                  <File size={13} style={{ color: "var(--text-secondary)", flexShrink: 0 }} />
-                )}
-                <span className="truncate">{entry.name}</span>
-              </button>
-            ))
+            entries.map((entry) => {
+              // Same path composition as openFile() so the comparison
+              // matches whatever the preview pane currently points at.
+              // Directories never get the selection mark — they
+              // navigate instead of preview, so highlighting one
+              // would lie about which file is open.
+              const entryPath =
+                currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
+              const isSelected = !entry.is_dir && preview?.path === entryPath;
+              return (
+                <button
+                  key={entry.name}
+                  aria-current={isSelected ? "true" : undefined}
+                  className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs text-left"
+                  style={{
+                    color: isSelected ? "var(--accent)" : "var(--text-primary)",
+                    background: isSelected ? "var(--accent-dim, rgba(95,179,179,0.15))" : undefined,
+                    fontWeight: isSelected ? 600 : undefined,
+                    // Inset left bar — same idea as VS Code's
+                    // explorer active-file indicator. Reserves 2px
+                    // of border on every row so selection doesn't
+                    // shift sibling rows horizontally.
+                    borderLeft: isSelected
+                      ? "2px solid var(--accent)"
+                      : "2px solid transparent",
+                    paddingLeft: 6,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.05)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!isSelected) e.currentTarget.style.background = "";
+                  }}
+                  onClick={() =>
+                    entry.is_dir ? navigate(entry.name) : onSidebarClick(entry.name)
+                  }
+                >
+                  {entry.is_dir ? (
+                    <Folder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                  ) : (
+                    <File
+                      size={13}
+                      style={{
+                        color: isSelected ? "var(--accent)" : "var(--text-secondary)",
+                        flexShrink: 0,
+                      }}
+                    />
+                  )}
+                  <span className="truncate">{entry.name}</span>
+                </button>
+              );
+            })
           )}
         </div>
       </div>
