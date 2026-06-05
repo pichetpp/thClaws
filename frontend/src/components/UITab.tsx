@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { UIPicker } from "./UIPicker";
 import { UIView } from "./UIView";
+import { useBusyState } from "../hooks/useBusyState";
 
 // dev-plan/33 Tier 2 — single-instance container for the UI tab
 // (formerly "Shell" — renamed when the new PTY-backed `Shell` tab
@@ -28,6 +29,15 @@ export function UITab({ active, fullscreen = false }: UITabProps) {
   // we want the grid even if settings.json::guiShell.tabDefault is set
   // — otherwise they'd be looped straight back to the default.
   const [skipDefault, setSkipDefault] = useState(false);
+  // Also hide the breadcrumb while an agent turn is in flight, even
+  // outside full-screen. A click on "‹ shells" mid-batch swaps the
+  // iframe, which the user perceives as "the agent stopped" — but
+  // the engine kept running and the lost shell state confuses
+  // recovery. The chip pattern still surfaces the running session
+  // in the header; the breadcrumb only matters when the user is
+  // free to navigate.
+  const busy = useBusyState();
+  const hideBreadcrumb = fullscreen || busy.busy;
 
   if (selected === null) {
     return (
@@ -40,7 +50,7 @@ export function UITab({ active, fullscreen = false }: UITabProps) {
 
   return (
     <div className="w-full h-full flex flex-col">
-      {!fullscreen && (
+      {!hideBreadcrumb && (
         <div
           className="flex items-center gap-2 px-3 py-1.5 text-xs border-b"
           style={{
