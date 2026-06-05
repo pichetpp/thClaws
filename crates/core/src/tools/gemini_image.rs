@@ -104,11 +104,7 @@ fn resolve_aspect(input: &Value) -> &'static str {
     }
 }
 fn resolve_size(input: &Value) -> &'static str {
-    match input
-        .get("size")
-        .and_then(|v| v.as_str())
-        .unwrap_or("1K")
-    {
+    match input.get("size").and_then(|v| v.as_str()).unwrap_or("1K") {
         "512" => "512",
         "2K" => "2K",
         _ => "1K",
@@ -157,7 +153,10 @@ async fn call_gemini_image(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(Error::Tool(format!("gemini http {status}: {}", &body[..body.len().min(400)])));
+        return Err(Error::Tool(format!(
+            "gemini http {status}: {}",
+            &body[..body.len().min(400)]
+        )));
     }
     let v: Value = resp
         .json()
@@ -168,10 +167,7 @@ async fn call_gemini_image(
         .and_then(|p| p.as_array())
         .ok_or_else(|| Error::Tool("gemini response missing /candidates/0/content/parts".into()))?;
     for part in parts {
-        if let Some(data_b64) = part
-            .pointer("/inlineData/data")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(data_b64) = part.pointer("/inlineData/data").and_then(|v| v.as_str()) {
             return B64
                 .decode(data_b64)
                 .map_err(|e| Error::Tool(format!("base64 decode: {e}")));
@@ -187,10 +183,7 @@ async fn call_gemini_image(
 /// (sha-prefix in the filename makes collisions vanishingly unlikely).
 fn save_image(bytes: &[u8], ext: &str) -> Result<PathBuf> {
     let sha = Sha256::digest(bytes);
-    let sha_hex = format!(
-        "{:02x}{:02x}{:02x}{:02x}",
-        sha[0], sha[1], sha[2], sha[3]
-    );
+    let sha_hex = format!("{:02x}{:02x}{:02x}{:02x}", sha[0], sha[1], sha[2], sha[3]);
     // `chrono::Utc::now()` rather than `SystemTime` so the filename
     // stamp is human-readable. Local-time would be tempting but
     // produces non-monotonic sort order across DST transitions.
@@ -199,7 +192,8 @@ fn save_image(bytes: &[u8], ext: &str) -> Result<PathBuf> {
     let dir = std::path::Path::new("output");
     std::fs::create_dir_all(dir).map_err(|e| Error::Tool(format!("mkdir output: {e}")))?;
     let path = dir.join(&name);
-    std::fs::write(&path, bytes).map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))?;
+    std::fs::write(&path, bytes)
+        .map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))?;
     Ok(path)
 }
 
@@ -383,8 +377,8 @@ impl Tool for ImageToImageTool {
         // contract every file-touching tool uses.
         let abs = crate::sandbox::Sandbox::check(input_path_raw)
             .map_err(|e| Error::Tool(format!("input_path: {e}")))?;
-        let in_bytes = std::fs::read(&abs)
-            .map_err(|e| Error::Tool(format!("read {}: {e}", abs.display())))?;
+        let in_bytes =
+            std::fs::read(&abs).map_err(|e| Error::Tool(format!("read {}: {e}", abs.display())))?;
         let in_mime = match abs
             .extension()
             .and_then(|e| e.to_str())

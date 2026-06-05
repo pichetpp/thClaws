@@ -3189,27 +3189,28 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let raw_path =
                 crate::file_preview::ospath(msg.get("path").and_then(|v| v.as_str()).unwrap_or(""));
             let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-            let (ok, content_b64, filename, mime, error) =
-                match crate::sandbox::Sandbox::check(&raw_path) {
-                    Ok(path) => match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            let b64 = crate::file_preview::encode_bytes_b64(&bytes);
-                            let name = path
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("download")
-                                .to_string();
-                            let ext = path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("")
-                                .to_lowercase();
-                            // Generic MIME for download; the browser
-                            // honours `download` attr regardless of
-                            // mime, but a sensible value helps when
-                            // the user opens the file directly from
-                            // the download bar.
-                            let mime = match ext.as_str() {
+            let (ok, content_b64, filename, mime, error) = match crate::sandbox::Sandbox::check(
+                &raw_path,
+            ) {
+                Ok(path) => match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let b64 = crate::file_preview::encode_bytes_b64(&bytes);
+                        let name = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("download")
+                            .to_string();
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        // Generic MIME for download; the browser
+                        // honours `download` attr regardless of
+                        // mime, but a sensible value helps when
+                        // the user opens the file directly from
+                        // the download bar.
+                        let mime = match ext.as_str() {
                                 "png" => "image/png",
                                 "jpg" | "jpeg" => "image/jpeg",
                                 "gif" => "image/gif",
@@ -3230,12 +3231,24 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                                 _ => "application/octet-stream",
                             }
                             .to_string();
-                            (true, b64, name, mime, String::new())
-                        }
-                        Err(e) => (false, String::new(), String::new(), String::new(), format!("read: {e}")),
-                    },
-                    Err(e) => (false, String::new(), String::new(), String::new(), format!("access denied: {e}")),
-                };
+                        (true, b64, name, mime, String::new())
+                    }
+                    Err(e) => (
+                        false,
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        format!("read: {e}"),
+                    ),
+                },
+                Err(e) => (
+                    false,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    format!("access denied: {e}"),
+                ),
+            };
             let payload = serde_json::json!({
                 "type": "file_download_result",
                 "id": request_id,

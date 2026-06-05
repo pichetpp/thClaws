@@ -153,10 +153,7 @@ pub fn busy_count() -> usize {
 /// user-facing turn is in flight (even if side-channel turns are —
 /// the surface signal is the user's, not the engine's internals).
 pub fn busy_meta() -> Option<BusyMeta> {
-    BUSY_META
-        .lock()
-        .expect("BUSY_META poisoned")
-        .clone()
+    BUSY_META.lock().expect("BUSY_META poisoned").clone()
 }
 
 /// Update the `last_progress` field of the current user-facing turn.

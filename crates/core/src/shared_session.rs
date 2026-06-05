@@ -3447,7 +3447,16 @@ async fn handle_line(
                 let stream = Box::pin(state.agent.run_turn(prompt));
                 let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
                 let _ = lead_mb.write_status("lead", "working", None);
-                drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+                drive_turn_stream(
+                    stream,
+                    state,
+                    events_tx,
+                    cancel,
+                    &lead_mb,
+                    input_tx,
+                    Some(state.session.id.clone()),
+                )
+                .await;
                 // Post-turn: if the model called MarkGoalComplete /
                 // MarkGoalBlocked (or any path that mutated status to
                 // terminal), stop the loop so the next firing doesn't run.
@@ -3515,7 +3524,16 @@ async fn handle_line(
         let stream = Box::pin(state.agent.run_turn(rewritten));
         let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
         let _ = lead_mb.write_status("lead", "working", None);
-        drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+        drive_turn_stream(
+            stream,
+            state,
+            events_tx,
+            cancel,
+            &lead_mb,
+            input_tx,
+            Some(state.session.id.clone()),
+        )
+        .await;
         return;
     }
 
@@ -3548,7 +3566,16 @@ async fn handle_line(
         let stream = Box::pin(state.agent.run_turn(rewritten));
         let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
         let _ = lead_mb.write_status("lead", "working", None);
-        drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+        drive_turn_stream(
+            stream,
+            state,
+            events_tx,
+            cancel,
+            &lead_mb,
+            input_tx,
+            Some(state.session.id.clone()),
+        )
+        .await;
         return;
     }
 
@@ -3585,7 +3612,16 @@ async fn handle_line(
         let stream = Box::pin(state.agent.run_turn(rewritten));
         let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
         let _ = lead_mb.write_status("lead", "working", None);
-        drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+        drive_turn_stream(
+            stream,
+            state,
+            events_tx,
+            cancel,
+            &lead_mb,
+            input_tx,
+            Some(state.session.id.clone()),
+        )
+        .await;
         return;
     }
 
@@ -3616,7 +3652,16 @@ async fn handle_line(
         let stream = Box::pin(state.agent.run_turn(rewritten));
         let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
         let _ = lead_mb.write_status("lead", "working", None);
-        drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+        drive_turn_stream(
+            stream,
+            state,
+            events_tx,
+            cancel,
+            &lead_mb,
+            input_tx,
+            Some(state.session.id.clone()),
+        )
+        .await;
         return;
     }
 
@@ -3671,7 +3716,16 @@ async fn handle_line(
                 let stream = Box::pin(state.agent.run_turn(rewritten));
                 let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
                 let _ = lead_mb.write_status("lead", "working", None);
-                drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+                drive_turn_stream(
+                    stream,
+                    state,
+                    events_tx,
+                    cancel,
+                    &lead_mb,
+                    input_tx,
+                    Some(state.session.id.clone()),
+                )
+                .await;
                 return;
             }
 
@@ -3690,7 +3744,16 @@ async fn handle_line(
                 let stream = Box::pin(state.agent.run_turn(rewritten));
                 let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
                 let _ = lead_mb.write_status("lead", "working", None);
-                drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+                drive_turn_stream(
+                    stream,
+                    state,
+                    events_tx,
+                    cancel,
+                    &lead_mb,
+                    input_tx,
+                    Some(state.session.id.clone()),
+                )
+                .await;
                 return;
             }
         }
@@ -3712,7 +3775,16 @@ async fn handle_line(
     let _ = lead_mb.write_status("lead", "working", None);
 
     let stream = Box::pin(state.agent.run_turn(trimmed.to_string()));
-    drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+    drive_turn_stream(
+        stream,
+        state,
+        events_tx,
+        cancel,
+        &lead_mb,
+        input_tx,
+        Some(state.session.id.clone()),
+    )
+    .await;
 }
 
 /// Multipart variant of `handle_line` — used when the chat composer
@@ -3776,7 +3848,16 @@ async fn handle_line_with_images(
     }
 
     let stream = Box::pin(state.agent.run_turn_multipart(user_content));
-    drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx, Some(state.session.id.clone())).await;
+    drive_turn_stream(
+        stream,
+        state,
+        events_tx,
+        cancel,
+        &lead_mb,
+        input_tx,
+        Some(state.session.id.clone()),
+    )
+    .await;
 }
 
 /// Drive an agent run_turn stream to completion, emitting ViewEvents
@@ -3785,13 +3866,10 @@ async fn handle_line_with_images(
 /// Regex matching the `[i/N] subject — done|cached|failed` lines the
 /// image-generator / brand-presentation / research agent shells emit.
 /// Compiled once on first use; matches are cheap (~µs each).
-static PROGRESS_LINE_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"\[(\d+)/(\d+)\]\s+[^—\n]+?\s*—\s*(?:done|cached|failed[^\n]*)",
-        )
+static PROGRESS_LINE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\[(\d+)/(\d+)\]\s+[^—\n]+?\s*—\s*(?:done|cached|failed[^\n]*)")
         .expect("PROGRESS_LINE_RE compiles")
-    });
+});
 
 async fn drive_turn_stream(
     mut stream: std::pin::Pin<
