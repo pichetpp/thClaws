@@ -4049,8 +4049,7 @@ async fn drive_turn_stream_inner(
                     // (stable since 1.79) snaps the offset to the
                     // largest boundary ≤ target, so drain is always safe.
                     let target = progress_buf.len() - PROGRESS_BUF_CAP / 2;
-                    let safe = progress_buf
-                        .floor_char_boundary(target.min(progress_buf.len()));
+                    let safe = progress_buf.floor_char_boundary(target.min(progress_buf.len()));
                     progress_buf.drain(..safe);
                 }
                 if let Some(m) = PROGRESS_LINE_RE.find_iter(&progress_buf).last() {
@@ -5155,8 +5154,7 @@ mod tests {
         // Mirror the production idiom (post-fix):
         if progress_buf.len() > PROGRESS_BUF_CAP {
             let target = progress_buf.len() - PROGRESS_BUF_CAP / 2;
-            let safe = progress_buf
-                .floor_char_boundary(target.min(progress_buf.len()));
+            let safe = progress_buf.floor_char_boundary(target.min(progress_buf.len()));
             progress_buf.drain(..safe);
         }
         // After drain, len() must be well under the cap and every

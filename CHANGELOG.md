@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] — 2026-06-06
+
+UTF-8 char-boundary fix in the agent turn driver + defense-in-depth
+session flush on panic.
+
+### Fixed
+
+- **`progress_buf.drain` panic on multi-byte UTF-8 text
+  ([#148](https://github.com/thClaws/thClaws/issues/148)).**
+  `drive_turn_stream`'s progress-line buffer trimmed itself with a
+  raw byte offset (`len() - PROGRESS_BUF_CAP/2`) that could land
+  mid-codepoint when the model streamed Thai / CJK / emoji text
+  past 4096 bytes. `String::drain` then tripped its
+  `is_char_boundary(end)` assertion and the whole turn panicked.
+  Worse, the panic killed the future before the `Done` arm ran
+  `save_history`, so the in-progress turn — sometimes the whole
+  session — disappeared on restart. Snap the offset via
+  `str::floor_char_boundary` (stable 1.79+) before draining; the
+  trim is now safe regardless of what Unicode the model emits.
+  Thanks to @sc28249782 for the spot-on bug report including a
+  minimal repro and the exact fix.
+
+### Added
+
+- **`drive_turn_stream` catches panics + flushes the session.** As
+  defense in depth against any future panic in the event loop, the
+  renamed `drive_turn_stream_inner` now runs inside
+  `AssertUnwindSafe(...).catch_unwind().await`. On panic the wrapper
+  logs the cause to the lead-log, surfaces `ErrorText` to the user,
+  calls `save_history`, refreshes `SessionListRefresh`, emits
+  `TurnDone` (so the busy spinner clears), marks the lead mailbox
+  idle, then `resume_unwind`s. No public API change.
+
 ## [0.34.0] — 2026-06-04
 
 Live-sync fix for the KMS browser sidebar.
