@@ -510,8 +510,13 @@ mod tests {
         // The injected shell-id script must contain NO literal
         // `</script>` between its opening `<script>` and its own
         // closer; otherwise the HTML parser sees an early close.
-        let first_open = out_s.find("<script>window.__thclaws_shell_id=").expect("marker");
-        let first_close = out_s[first_open..].find("</script>").expect("close").saturating_add(first_open);
+        let first_open = out_s
+            .find("<script>window.__thclaws_shell_id=")
+            .expect("marker");
+        let first_close = out_s[first_open..]
+            .find("</script>")
+            .expect("close")
+            .saturating_add(first_open);
         let inner = &out_s[first_open + "<script>".len()..first_close];
         assert!(
             !inner.contains("</script>"),
