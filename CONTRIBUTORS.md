@@ -30,6 +30,21 @@ In rough order of first contribution.
   essentially as-is in v0.30.0. Exactly the kind of bug report that
   closes itself.
 
+### [@JonusNattapong](https://github.com/JonusNattapong) (Dek1milliontoken)
+- **PR [#153](https://github.com/thClaws/thClaws/pull/153)** — Reset
+  `cursorPos` on terminal line-clear events. Two paths cleared
+  `lineBuffer` without resetting the cursor (slash-popup Escape +
+  engine `terminal_clear`), so the caret drifted off the buffer.
+  Clean 2-line fix matching the existing Ctrl+C handler pattern.
+  Shipped in v0.42.0.
+- **PR [#157](https://github.com/thClaws/thClaws/pull/157)** —
+  Escape `</` in injected values to prevent HTML script breakout in
+  the gui-shell bridge. A malicious shell manifest could plant
+  `</script>` in its `id` and break out of the injected
+  `<script>` tag; the canonical `<\/` replacement neutralises it.
+  Defence-in-depth on hosted-cloud / `--serve` surfaces and any
+  future gui-shell marketplace.
+
 ### [@pok29dev](https://github.com/pok29dev)
 - **Issue [#156](https://github.com/thClaws/thClaws/issues/156)** —
   Reported the DashScope picker double-prefix bug

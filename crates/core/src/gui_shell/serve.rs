@@ -489,4 +489,59 @@ mod tests {
         assert!(msg.contains("session-explorer"), "lists installed: {msg}");
         assert!(msg.contains("does-not-exist"));
     }
+
+    // Regression for PR #157 (@JonusNattapong). JSON escaping doesn't
+    // touch `</`, but the HTML tokenizer scans for the literal byte
+    // sequence `</script>` regardless of JS-level escaping. A
+    // shell-manifest id containing `</script>` (a malicious gui-shell
+    // bundle could plant one) would close the injected `<script>` tag
+    // prematurely and break out. The fix: post-JSON `.replace("</",
+    // "<\\/")` everywhere the value enters a `<script>` body. `<\/`
+    // is invisible to the HTML tokenizer, valid JSON, and equal to
+    // `</` in JS at runtime.
+    #[test]
+    fn inject_inline_bridge_escapes_script_breakout_in_shell_id() {
+        let html = b"<html><head></head><body></body></html>";
+        let evil = "shell</script><script>alert('xss')</script>";
+        let out = inject_inline_bridge_with_id(html, evil);
+        let out_s = std::str::from_utf8(&out).expect("utf8");
+        // Find the injection block — between the first `<script>` we
+        // emitted and the closing `</script>` of the bridge runtime.
+        // The injected shell-id script must contain NO literal
+        // `</script>` between its opening `<script>` and its own
+        // closer; otherwise the HTML parser sees an early close.
+        let first_open = out_s.find("<script>window.__thclaws_shell_id=").expect("marker");
+        let first_close = out_s[first_open..].find("</script>").expect("close").saturating_add(first_open);
+        let inner = &out_s[first_open + "<script>".len()..first_close];
+        assert!(
+            !inner.contains("</script>"),
+            "shell-id script body contains an early </script>: {inner:?}"
+        );
+        // And the escaped form must be present — sanity check that the
+        // replacement actually happened, not that we accidentally
+        // stripped the attack string entirely.
+        assert!(
+            inner.contains("<\\/script>"),
+            "expected `<\\/script>` in escaped body, got {inner:?}"
+        );
+    }
+
+    #[test]
+    fn inject_mode_b_head_escapes_script_breakout_in_all_values() {
+        let html = b"<html><head></head><body></body></html>";
+        let evil_url = "ws://x/</script><script>1</script>";
+        let evil_id = "id</script>";
+        let evil_session = "sess</script>";
+        let out = inject_mode_b_head_with(html, evil_url, evil_id, evil_session);
+        let out_s = std::str::from_utf8(&out).expect("utf8");
+        let marker_open = out_s
+            .find("<script>window.__thclaws_shell_mode=")
+            .expect("marker");
+        let marker_close = out_s[marker_open..].find("</script>").expect("close") + marker_open;
+        let inner = &out_s[marker_open + "<script>".len()..marker_close];
+        assert!(
+            !inner.contains("</script>"),
+            "mode-b marker body contains an early </script>: {inner:?}"
+        );
+    }
 }

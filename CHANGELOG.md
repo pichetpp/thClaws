@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **gui-shell: escape `</` in injected values to prevent HTML script
+  breakout ([#157](https://github.com/thClaws/thClaws/pull/157)).**
+  `inject_inline_bridge_with_id` and `inject_mode_b_head_with`
+  splice JSON-serialized values (`shell_id`, `session_id`, `ws_url`)
+  into `<script>` tags. JSON-escaping handles quotes and backslashes
+  but does NOT escape `</`, and the HTML tokenizer scans for the
+  literal byte sequence `</script>` regardless of JS-level escaping.
+  A shell manifest containing `</script>` in its `id` could close
+  the injected `<script>` tag prematurely and break out. Fix: post-
+  JSON `.replace("</", "<\/")` on every injected value plus the
+  bridge runtime — `<\/` is invisible to the HTML tokenizer, valid
+  JSON, and byte-equal to `</` in JS at runtime. Real (if low-
+  severity) defence on the `--serve` and hosted-cloud surfaces; the
+  marketplace gui-shells story makes this matter more over time.
+  PR by @JonusNattapong.
+
 ## [0.44.0] — 2026-06-09
 
 DashScope routing fix — the model picker, the catalogue, and the
