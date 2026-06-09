@@ -301,9 +301,13 @@ pub fn serve_shell_index_inline(shell: &ShellRef) -> Response<Body> {
 /// includes everything, so `parts[0] === "gui-shell"` is false).
 pub fn inject_inline_bridge_with_id(html: &[u8], shell_id: &str) -> Vec<u8> {
     let bridge = super::BRIDGE_RUNTIME;
-    let id_json = serde_json::to_string(shell_id).unwrap_or_else(|_| "\"\"".into());
-    let injection =
-        format!("<script>window.__thclaws_shell_id={id_json};</script><script>{bridge}</script>");
+    let id_json = serde_json::to_string(shell_id)
+        .unwrap_or_else(|_| "\"\"".into())
+        .replace("</", "<\\/");
+    let bridge_safe = bridge.replace("</", "<\\/");
+    let injection = format!(
+        "<script>window.__thclaws_shell_id={id_json};</script><script>{bridge_safe}</script>"
+    );
     let lower = html.to_ascii_lowercase();
     if let Some(idx) = find_subslice(&lower, b"<head>") {
         let insert_at = idx + b"<head>".len();
@@ -362,9 +366,9 @@ pub fn inject_mode_b_head_with(
     // but with an extra inline <script> before the bridge.
     let marker = format!(
         "<script>window.__thclaws_shell_mode=\"ws\";window.__thclaws_shell_ws_url={};window.__thclaws_shell_id={};window.__thclaws_shell_session_id={};</script>",
-        serde_json::to_string(ws_url).unwrap_or_else(|_| "\"\"".into()),
-        serde_json::to_string(shell_id).unwrap_or_else(|_| "\"\"".into()),
-        serde_json::to_string(session_id).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(ws_url).unwrap_or_else(|_| "\"\"".into()).replace("</", "<\\/"),
+        serde_json::to_string(shell_id).unwrap_or_else(|_| "\"\"".into()).replace("</", "<\\/"),
+        serde_json::to_string(session_id).unwrap_or_else(|_| "\"\"".into()).replace("</", "<\\/"),
     );
     let bridge_src = format!(
         "<script src=\"{}/__bridge.js\"></script>",
