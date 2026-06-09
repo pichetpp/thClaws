@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] — 2026-06-09
+
+DashScope routing fix — the model picker, the catalogue, and the
+engine's prefix detection finally agree on `dashscope/<model>` as
+the canonical form.
+
+### Fixed
+
+- **DashScope model picker double-prefix bug
+  ([#156](https://github.com/thClaws/thClaws/issues/156)).** The
+  catalogue stored DashScope rows with a `dashscope/` prefix so
+  heterogeneous Alibaba-hosted families (qwen, deepseek, glm, kimi,
+  qwq) all route through one provider, but `ProviderKind::detect()`
+  had no `dashscope/` arm — it only matched bare `qwen*`/`qwq-*`.
+  Three knock-on bugs: `/model dashscope/qwen-max` failed with
+  "unknown model provider"; the sidebar picker double-prefixed to
+  `dashscope/dashscope/qwen-flash` when switching across providers;
+  `/provider dashscope` warned "no catalogue entry for 'qwen-max'"
+  because catalogue keys were prefixed but the default was bare.
+  Brought DashScope in line with the established prefix-routing
+  pattern (`zai/`, `qc/`, `ap/`, `oai/`, `lmstudio/`): added the
+  `dashscope/` arm to `detect()`, moved the default model to
+  `dashscope/qwen-max`, and `with_strip_model_prefix("dashscope/")`
+  on the provider strips the prefix before reaching Alibaba's
+  upstream. Bare `qwen-*`/`qwq-*` ids still route to DashScope for
+  backward compat with pre-prefix settings. Reported by @pok29dev
+  with the load-bearing pointer that `dashscope/<model>` was the
+  right canonical shape.
+
+### Changed
+
+- **Docs: `thclaws cloud …` CLI surface marked deprecated.** The
+  engine removed every `thclaws cloud …` shell subcommand back at
+  v0.36; ch27 of the user manual (English + Thai) had been showing
+  the old CLI all along. Rewritten to the in-session `/cloud` slash
+  flow. Settings → thClaws.cloud paste-in-GUI is the only auth
+  surface; every other op runs as a slash command inside an open
+  session.
+
+### Community
+
+- **@pok29dev added to [CONTRIBUTORS.md](CONTRIBUTORS.md)** for
+  the DashScope picker bug report (#156).
+
 ## [0.43.0] — 2026-06-09
 
 Catalog-policy reversal + Asian-provider pricing fill-in. The picker

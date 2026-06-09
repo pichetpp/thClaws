@@ -1406,7 +1406,10 @@ mod tests {
             Some(ProviderKind::DashScope),
             "bare qwen-* still routes to DashScope for backward compat",
         );
-        assert_eq!(ProviderKind::DashScope.default_model(), "dashscope/qwen-max");
+        assert_eq!(
+            ProviderKind::DashScope.default_model(),
+            "dashscope/qwen-max"
+        );
     }
 
     #[test]
