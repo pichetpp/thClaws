@@ -785,6 +785,20 @@ impl WorkerState {
             None
         };
         let provider = build_provider(&self.config)?;
+        // Settings-gated tools must track the CURRENT config. The
+        // agent-install path flips `imageToolsEnabled` mid-session and
+        // the settings watcher lands here — pre-fix the registry was a
+        // boot-time snapshot, so TextToImage answered "unknown tool"
+        // until a full engine restart.
+        if self.config.image_tools_enabled {
+            self.tool_registry
+                .register(std::sync::Arc::new(crate::tools::TextToImageTool));
+            self.tool_registry
+                .register(std::sync::Arc::new(crate::tools::ImageToImageTool));
+        } else {
+            self.tool_registry.remove("TextToImage");
+            self.tool_registry.remove("ImageToImage");
+        }
         let prev_perm = self.agent.permission_mode;
         let prev_thinking = self.agent.thinking_budget;
         let new_agent = Agent::new(

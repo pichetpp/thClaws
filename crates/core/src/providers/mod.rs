@@ -988,9 +988,8 @@ pub fn kind_has_credentials(kind: Option<ProviderKind>) -> bool {
 /// timeout` against a possibly-unreachable host).
 pub async fn build_all_models_payload() -> String {
     let cat = crate::model_catalogue::EffectiveCatalogue::load();
-    let free_only_or = crate::config::AppConfig::load()
-        .map(|c| c.openrouter_free_only)
-        .unwrap_or(false);
+    let app_cfg = crate::config::AppConfig::load().unwrap_or_default();
+    let free_only_or = app_cfg.openrouter_free_only;
     let ollama_live: Vec<String> = {
         let base = std::env::var("OLLAMA_BASE_URL")
             .unwrap_or_else(|_| crate::providers::ollama::DEFAULT_BASE_URL.to_string());
@@ -1032,11 +1031,19 @@ pub async fn build_all_models_payload() -> String {
         let mut model_ids: std::collections::BTreeMap<String, Option<u32>> =
             std::collections::BTreeMap::new();
         let is_openrouter = matches!(kind, ProviderKind::OpenRouter);
+        let hide_unpriced =
+            crate::providers::thclaws_gateway::hides_unpriced_models(&app_cfg, name);
         for (id, entry) in cat.list_models_for_provider(name) {
             if entry.chat == Some(false) {
                 continue;
             }
             if is_openrouter && free_only_or && entry.free != Some(true) {
+                continue;
+            }
+            // Strictly metered via gateway → unpriced rows 400, hide them.
+            if hide_unpriced
+                && (entry.input_per_mtok.is_none() || entry.output_per_mtok.is_none())
+            {
                 continue;
             }
             let canonical = crate::model_catalogue::canonical_model_id(name, &id);

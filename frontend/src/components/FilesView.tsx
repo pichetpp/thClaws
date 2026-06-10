@@ -936,12 +936,20 @@ export function FilesView({ active }: Props) {
                 // the document so relative `![alt](img/foo.png)` refs
                 // resolve via /file-asset/ instead of failing against
                 // srcDoc's opaque base URL.
+                // sandbox: `allow-same-origin` WITHOUT `allow-scripts`.
+                // The rendered markdown is static HTML — no JS needed —
+                // but its <img> subresources must carry the session
+                // cookie or the cloud ForwardAuth gate 302s them to
+                // login (sandboxed opaque origins send no credentials,
+                // so chapter figures showed as broken images). Without
+                // allow-scripts the same-origin grant is inert: nothing
+                // executes inside the frame.
                 <iframe
                   key={`md-${preview.path}-${previewVersion}`}
                   srcDoc={injectBaseHref(preview.content, preview.path)}
                   className="w-full flex-1 min-h-0 rounded border"
                   style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
-                  sandbox="allow-scripts"
+                  sandbox="allow-same-origin"
                   title={preview.path}
                 />
               ) : (

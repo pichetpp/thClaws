@@ -3571,6 +3571,31 @@ pub fn render_help() -> &'static str {
      ! <command>       Run a shell command directly (e.g. ! git status)"
 }
 
+/// Resolve `(api_key, chat-completions URL)` for an OpenAI-compatible
+/// provider: the thClaws Gateway overlay when enabled for this kind
+/// (gateway access key + `<gateway>/<segment>/chat/completions`),
+/// otherwise the env-overridable native upstream. Every cloud-routable
+/// compat provider (DashScope, ZAi, DeepSeek, …) MUST build through
+/// this — a `provider_segment` entry alone doesn't route anything.
+fn compat_endpoint(
+    config: &AppConfig,
+    kind: ProviderKind,
+    base_env: &str,
+    default_base: &str,
+    api_key: String,
+) -> (String, String) {
+    if let Some(o) = crate::providers::thclaws_gateway::for_kind(config, kind) {
+        return (o.access_key, format!("{}/chat/completions", o.base_url));
+    }
+    let base = std::env::var(base_env).unwrap_or_else(|_| default_base.to_string());
+    let url = if base.ends_with("/chat/completions") {
+        base
+    } else {
+        format!("{}/chat/completions", base.trim_end_matches('/'))
+    };
+    (api_key, url)
+}
+
 /// Build a Provider for the current `config.model`. Picks the impl based on the
 /// model prefix. Anthropic / OpenAI / Gemini read an env var for auth;
 /// Ollama uses a local endpoint with no auth (base URL overridable via
@@ -3683,13 +3708,26 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
         _ => {}
     }
 
-    let api_key = config.api_key_from_env().ok_or_else(|| {
-        let envar = kind.api_key_env().unwrap_or("<none>");
-        Error::Config(format!(
-            "no API key found for provider '{}' — set {envar}",
-            kind.name()
-        ))
-    })?;
+    let api_key = match config.api_key_from_env() {
+        Some(k) => k,
+        // Gateway overlay active for this provider: the gateway holds
+        // the real upstream credential and the native key is never
+        // sent, so its absence must not block the build. Hosted
+        // runners provisioned before the placeholder-env expansion
+        // (pre-v0.45.8) carry no per-provider placeholders at all —
+        // without this carve-out every compat provider on them dies
+        // here with "no API key" before the overlay is consulted.
+        None if crate::providers::thclaws_gateway::for_kind(config, kind).is_some() => {
+            String::from("gateway-placeholder")
+        }
+        None => {
+            let envar = kind.api_key_env().unwrap_or("<none>");
+            return Err(Error::Config(format!(
+                "no API key found for provider '{}' — set {envar}",
+                kind.name()
+            )));
+        }
+    };
     match kind {
         ProviderKind::AgenticPress => {
             // Hosted gateway — URL is fixed by the service, no env override.
@@ -3764,16 +3802,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // prefix is stripped here before the request reaches the
             // OpenAI-compat upstream so it sees the bare id it expects.
             // Bare `qwen-*` ids (legacy settings) flow through unchanged.
-            let base = std::env::var("DASHSCOPE_BASE_URL").unwrap_or_else(|_| {
-                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
-            });
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "DASHSCOPE_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("dashscope/"),
             ))
@@ -3785,16 +3822,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // short `qc/` prefix in our catalogue; the prefix is
             // stripped before the request reaches Alibaba's upstream
             // so it sees the bare `qwen-*` id it expects.
-            let base = std::env::var("QWENCLOUD_BASE_URL").unwrap_or_else(|_| {
-                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_string()
-            });
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "QWENCLOUD_BASE_URL",
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("qc/"),
             ))
@@ -3805,15 +3841,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // the OpenAI-compatible upstream. Power users with the
             // general BigModel SKU (https://open.bigmodel.cn/api/paas/v4)
             // can override via ZAI_BASE_URL.
-            let base = std::env::var("ZAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.z.ai/api/coding/paas/v4".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "ZAI_BASE_URL",
+                "https://api.z.ai/api/coding/paas/v4",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("zai/"),
             ))
@@ -3875,14 +3911,14 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // (deepseek-chat, deepseek-reasoner) are bare — no prefix to
             // strip. Override via DEEPSEEK_BASE_URL for proxies / self-
             // hosted deployments.
-            let base = std::env::var("DEEPSEEK_BASE_URL")
-                .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
-            Ok(Arc::new(OpenAIProvider::new(api_key).with_base_url(url)))
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "DEEPSEEK_BASE_URL",
+                "https://api.deepseek.com/v1",
+                api_key,
+            );
+            Ok(Arc::new(OpenAIProvider::new(key).with_base_url(url)))
         }
         ProviderKind::ThaiLLM => {
             // NSTDA / สวทช Thai LLM aggregator (thaillm.or.th). OpenAI-
@@ -3890,15 +3926,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // Pathumma, and THaLLE. Models use the `thaillm/<id>` form;
             // the prefix is stripped before the request reaches the
             // upstream. Override via THAILLM_BASE_URL for testing.
-            let base = std::env::var("THAILLM_BASE_URL")
-                .unwrap_or_else(|_| "http://thaillm.or.th/api/v1".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "THAILLM_BASE_URL",
+                "http://thaillm.or.th/api/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("thaillm/"),
             ))
@@ -3910,15 +3946,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // prefix is stripped before the request reaches the
             // upstream. Override via MINIMAX_BASE_URL for the China
             // endpoint (api.minimax.chat) or self-hosted proxies.
-            let base = std::env::var("MINIMAX_BASE_URL")
-                .unwrap_or_else(|_| "https://api.minimax.io/v1".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "MINIMAX_BASE_URL",
+                "https://api.minimax.io/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("minimax/"),
             ))
@@ -3935,15 +3971,15 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // and third-party-owned models like `nvidia/meta/<name>` go
             // out as `meta/<name>`. Override via NVIDIA_BASE_URL for
             // on-prem NIM deployments.
-            let base = std::env::var("NVIDIA_BASE_URL")
-                .unwrap_or_else(|_| "https://integrate.api.nvidia.com/v1".to_string());
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "NVIDIA_BASE_URL",
+                "https://integrate.api.nvidia.com/v1",
+                api_key,
+            );
             Ok(Arc::new(
-                OpenAIProvider::new(api_key)
+                OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("nvidia/"),
             ))
@@ -3955,11 +3991,18 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // (/messages), or Alibaba-compatible (/chat/completions).
             // Models use the `opencode-go/<id>` prefix. The base URL can
             // be overridden via OPENCODE_GO_BASE_URL for self-hosted proxies.
-            let base = std::env::var("OPENCODE_GO_BASE_URL")
-                .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string());
-            Ok(Arc::new(
-                OpencodeGoProvider::new(api_key).with_base_url(base),
-            ))
+            // Gateway overlay swaps base + key; the provider appends its
+            // own per-protocol path, which the gateway forwards verbatim.
+            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let (key, base) = match overlay {
+                Some(o) => (o.access_key, o.base_url),
+                None => (
+                    api_key,
+                    std::env::var("OPENCODE_GO_BASE_URL")
+                        .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string()),
+                ),
+            };
+            Ok(Arc::new(OpencodeGoProvider::new(key).with_base_url(base)))
         }
 
         ProviderKind::Ollama
@@ -3969,7 +4012,14 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
         | ProviderKind::ChatGptCodex => {
             unreachable!("handled above")
         }
-        ProviderKind::OllamaCloud => Ok(Arc::new(OllamaCloudProvider::new(api_key))),
+        ProviderKind::OllamaCloud => {
+            let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
+            let provider = match overlay {
+                Some(o) => OllamaCloudProvider::new(o.access_key).with_base_url(o.base_url),
+                None => OllamaCloudProvider::new(api_key),
+            };
+            Ok(Arc::new(provider))
+        }
     }
 }
 
@@ -4147,6 +4197,14 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     let cwd = std::env::current_dir()?;
 
     let mut tool_registry = ToolRegistry::with_builtins();
+    // Opt-in native Gemini image tools — same gating as the
+    // GUI/serve + HTTP-API registrations (settings flag; env-key
+    // presence is enforced by the tools' requires_env).
+    if config.image_tools_enabled {
+        tool_registry.register(Arc::new(crate::tools::TextToImageTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+    }
+
     // KMS tools always-on (pre-fix this was gated by
     // `!kms_active.is_empty()`, but /dream's side-channel agent
     // inherits this registry and needs KmsCreate/KmsWrite to
@@ -4446,6 +4504,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // Build the tool registry once, with built-ins + task tools + MCP tools.
     // Override WebSearch with the configured engine (with_builtins uses "auto").
     let mut tool_registry = ToolRegistry::with_builtins();
+    // Opt-in native Gemini image tools — same gating as the
+    // GUI/serve + HTTP-API registrations (settings flag; env-key
+    // presence is enforced by the tools' requires_env).
+    if config.image_tools_enabled {
+        tool_registry.register(Arc::new(crate::tools::TextToImageTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+    }
+
     // KMS tools always-on (pre-fix this was gated by
     // `!kms_active.is_empty()`, but /dream's side-channel agent
     // inherits this registry and needs KmsCreate/KmsWrite to
@@ -6069,27 +6135,60 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                 }
                 SlashCommand::Models => {
-                    // Build a fresh provider from current config and query it.
-                    match build_provider(&config) {
-                        Ok(p) => match p.list_models().await {
-                            Ok(models) if models.is_empty() => {
-                                println!("{COLOR_DIM}no models returned{COLOR_RESET}")
-                            }
-                            Ok(models) => {
-                                for m in models {
-                                    match m.display_name {
-                                        Some(dn) => {
-                                            println!("{COLOR_DIM}  {} — {}{COLOR_RESET}", m.id, dn)
+                    // Gateway-routed providers: the live `/models`
+                    // endpoint can't pass the metered proxy (no model
+                    // id to price), and strict metering 400s unpriced
+                    // models anyway — render the priced catalogue rows
+                    // instead, mirroring the GUI picker filter.
+                    let gw_provider = config
+                        .detect_provider_kind()
+                        .ok()
+                        .and_then(|k| {
+                            crate::providers::thclaws_gateway::for_kind(&config, k)
+                                .map(|_| crate::model_catalogue::provider_kind_name(k))
+                        });
+                    if let Some(provider_name) = gw_provider {
+                        let cat = crate::model_catalogue::EffectiveCatalogue::load();
+                        let mut rows = cat.list_models_for_provider(provider_name);
+                        rows.retain(|(_, e)| {
+                            e.chat != Some(false)
+                                && e.input_per_mtok.is_some()
+                                && e.output_per_mtok.is_some()
+                        });
+                        if rows.is_empty() {
+                            println!("{COLOR_DIM}no priced models in catalogue for {provider_name}{COLOR_RESET}");
+                        }
+                        for (id, _) in rows {
+                            let canonical =
+                                crate::model_catalogue::canonical_model_id(provider_name, &id);
+                            println!("{COLOR_DIM}  {canonical}{COLOR_RESET}");
+                        }
+                    } else {
+                        // Build a fresh provider from current config and query it.
+                        match build_provider(&config) {
+                            Ok(p) => match p.list_models().await {
+                                Ok(models) if models.is_empty() => {
+                                    println!("{COLOR_DIM}no models returned{COLOR_RESET}")
+                                }
+                                Ok(models) => {
+                                    for m in models {
+                                        match m.display_name {
+                                            Some(dn) => {
+                                                println!(
+                                                    "{COLOR_DIM}  {} — {}{COLOR_RESET}",
+                                                    m.id, dn
+                                                )
+                                            }
+                                            None => println!("{COLOR_DIM}  {}{COLOR_RESET}", m.id),
                                         }
-                                        None => println!("{COLOR_DIM}  {}{COLOR_RESET}", m.id),
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                println!("{COLOR_YELLOW}list models failed: {e}{COLOR_RESET}")
-                            }
-                        },
-                        Err(e) => println!("{COLOR_YELLOW}{e}{COLOR_RESET}"),
+                                Err(e) => {
+                                    println!("{COLOR_YELLOW}list models failed: {e}{COLOR_RESET}")
+                                }
+                            },
+                            Err(e) => println!("{COLOR_YELLOW}{e}{COLOR_RESET}"),
+                        }
                     }
                 }
                 SlashCommand::Save => {
@@ -12398,6 +12497,53 @@ mod tests {
         }
         if let Some(v) = saved_o {
             std::env::set_var("OPENAI_API_KEY", v);
+        }
+    }
+
+    // Regression: cloud runners ship placeholder provider keys and rely
+    // ENTIRELY on the gateway overlay. A compat provider whose arm
+    // forgets `compat_endpoint` silently calls the upstream with the
+    // placeholder → 401 (dev-plan: the book4 dashscope incident).
+    #[test]
+    fn compat_endpoint_routes_via_gateway_when_enabled() {
+        let _guard = crate::kms::test_env_lock();
+        let saved = std::env::var("THCLAWS_GATEWAY_API_KEY").ok();
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
+        std::env::remove_var("THCLAWS_GATEWAY_BASE_URL");
+
+        let mut cfg = AppConfig::default();
+        cfg.gateway_use_for = vec!["dashscope".into(), "zai".into()];
+
+        let (key, url) = compat_endpoint(
+            &cfg,
+            ProviderKind::DashScope,
+            "DASHSCOPE_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "placeholder".into(),
+        );
+        assert_eq!(key, "gw_v1_test");
+        assert_eq!(
+            url,
+            format!(
+                "{}/dashscope/chat/completions",
+                crate::providers::thclaws_gateway::GATEWAY_BASE_URL
+            )
+        );
+
+        // Provider not in gateway_use_for → native upstream + own key.
+        let (key, url) = compat_endpoint(
+            &cfg,
+            ProviderKind::DeepSeek,
+            "DEEPSEEK_BASE_URL",
+            "https://api.deepseek.com/v1",
+            "sk-native".into(),
+        );
+        assert_eq!(key, "sk-native");
+        assert_eq!(url, "https://api.deepseek.com/v1/chat/completions");
+
+        match saved {
+            Some(v) => std::env::set_var("THCLAWS_GATEWAY_API_KEY", v),
+            None => std::env::remove_var("THCLAWS_GATEWAY_API_KEY"),
         }
     }
 

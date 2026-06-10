@@ -223,6 +223,12 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
     // (SSO state is fetched by the navbar LoginButton.)
     send({ type: "line_status" });
     send({ type: "telegram_status" });
+    // The Sidebar unmounts in fullscreen (gui-shell tabs like
+    // book-studio) and remounts with empty state — `initial_state`'s
+    // session snapshot is long gone by then, so the history list
+    // rendered blank until some worker push refired sessions_list.
+    // Ask for a fresh list on every mount.
+    send({ type: "sessions_request" });
     return unsub;
   }, []);
 

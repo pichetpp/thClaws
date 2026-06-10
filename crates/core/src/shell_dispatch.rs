@@ -354,6 +354,16 @@ pub async fn dispatch(
                 rows.retain(|(_, e)| e.free == Some(true));
             }
 
+            // Gateway routing is strictly metered: unpriced models 400
+            // upstream, so don't offer them. No-op on desktop (overlay
+            // off — the user's own keys are not metered by us).
+            if crate::providers::thclaws_gateway::hides_unpriced_models(
+                &state.config,
+                provider_name,
+            ) {
+                rows.retain(|(_, e)| e.input_per_mtok.is_some() && e.output_per_mtok.is_some());
+            }
+
             // Ollama is per-machine, so the catalogue alone can't know what
             // the user has pulled — hit `/api/tags` too and union any new
             // ids (without context until `/model <id>` auto-scans them).
@@ -461,6 +471,15 @@ pub async fn dispatch(
                     models.retain(|(_, e)| e.chat != Some(false));
                     if prov == "openrouter" && state.config.openrouter_free_only {
                         models.retain(|(_, e)| e.free == Some(true));
+                    }
+                    // Strictly metered via gateway → hide unpriced rows.
+                    if crate::providers::thclaws_gateway::hides_unpriced_models(
+                        &state.config,
+                        prov,
+                    ) {
+                        models.retain(|(_, e)| {
+                            e.input_per_mtok.is_some() && e.output_per_mtok.is_some()
+                        });
                     }
                     if models.len() >= 3 {
                         let _ = crate::providers::ProviderKind::detect(&state.config.model);

@@ -700,7 +700,15 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     let mut last_text_for_done: Option<String> = None;
     let mut parsed_json: Option<serde_json::Value> = None;
     let mut succeeded = false;
-    let max_attempts = retry.max.max(1);
+    // Transient provider/stream errors (e.g. a dropped SSE during a
+    // parallel fan-out) retry up to this floor even when the script set
+    // no `retry:` — a single flaky stream shouldn't kill the worker.
+    // Deterministic failures (schema, token budget) still honor
+    // `retry.max`.
+    const TRANSIENT_RETRY_FLOOR: u32 = 3;
+    let deterministic_max = retry.max.max(1);
+    let max_attempts = deterministic_max.max(TRANSIENT_RETRY_FLOOR);
+    let mut attempts_used = 0u32;
     // Stop-button: a clone of the host's CancelToken (None in REPL/
     // headless today). Polled before each attempt and raced against
     // the in-flight `tool.call` via `tokio::select!`. When cancel
@@ -708,6 +716,7 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     // detect to render a friendlier "stopped" message.
     let cancel = workflow_cancel_clone();
     for attempt in 1..=max_attempts {
+        attempts_used = attempt;
         if let Some(tok) = cancel.as_ref() {
             if tok.is_cancelled() {
                 return Err(js_error(WORKFLOW_CANCELLED_MSG));
@@ -779,17 +788,21 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
                             last_failure = Some(format!(
                                 "worker exceeded token budget of {token_cap} (used {used})"
                             ));
-                            if attempt < max_attempts {
-                                if let Some(wid) = worker_id {
-                                    let prior_err = last_failure.clone().unwrap_or_default();
-                                    super::state::with_logger(|l| {
-                                        let _ = l.worker_retry(wid, attempt, &prior_err);
-                                    });
-                                }
-                                let delay = retry.delay_for_attempt(attempt);
-                                if !delay.is_zero() {
-                                    handle.block_on(tokio::time::sleep(delay));
-                                }
+                            // Budget overrun is deterministic — honor the
+                            // script's `retry.max`, don't spend the
+                            // transient floor re-running a too-chatty worker.
+                            if attempt >= deterministic_max {
+                                break;
+                            }
+                            if let Some(wid) = worker_id {
+                                let prior_err = last_failure.clone().unwrap_or_default();
+                                super::state::with_logger(|l| {
+                                    let _ = l.worker_retry(wid, attempt, &prior_err);
+                                });
+                            }
+                            let delay = retry.delay_for_attempt(attempt);
+                            if !delay.is_zero() {
+                                handle.block_on(tokio::time::sleep(delay));
                             }
                             continue;
                         }
@@ -834,6 +847,16 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
             }
         }
 
+        // Past the script's explicit retry budget, reserve the remaining
+        // attempts for transient provider/stream errors only — re-running
+        // a deterministic failure (schema mismatch) just burns tokens.
+        let is_transient = last_failure
+            .as_deref()
+            .map(super::is_transient_provider_error)
+            .unwrap_or(false);
+        if attempt >= deterministic_max && !is_transient {
+            break;
+        }
         if attempt < max_attempts {
             if let Some(wid) = worker_id {
                 let prior_err = last_failure.clone().unwrap_or_default();
@@ -895,7 +918,7 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     if !success {
         let err_msg = last_failure.unwrap_or_else(|| "unknown error".to_string());
         return Err(js_error(&format!(
-            "workflow subagent failed after {max_attempts} attempt(s): {err_msg}"
+            "workflow subagent failed after {attempts_used} attempt(s): {err_msg}"
         )));
     }
     let text = last_text_for_done.unwrap();
@@ -1866,6 +1889,121 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
         assert!(
             msg.contains("after 2 attempt") && msg.contains("schema"),
             "expected schema-exhaustion error in: {msg}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_provider_error_retries_without_script_opt_in() {
+        // A flaky stream error must retry even though the script set NO
+        // `retry:` — the transient floor covers it. This is the exact
+        // failure (`stream: error decoding response body`) that killed a
+        // real WorkflowRun.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        struct FlakyStream {
+            calls: Arc<AtomicU32>,
+        }
+        #[async_trait]
+        impl Tool for FlakyStream {
+            fn name(&self) -> &'static str {
+                "Task"
+            }
+            fn description(&self) -> &'static str {
+                "flaky stream mock"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            async fn call(&self, _input: Value) -> crate::Result<String> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if n < 2 {
+                    Err(crate::Error::Provider(
+                        "stream: error decoding response body".into(),
+                    ))
+                } else {
+                    Ok("recovered".into())
+                }
+            }
+        }
+        let calls = Arc::new(AtomicU32::new(0));
+        let mock: Arc<dyn Tool> = Arc::new(FlakyStream {
+            calls: calls.clone(),
+        });
+        // No `retry:` — relies on the transient floor.
+        let script = r#"thclaws.subagent({prompt: "go"})"#.to_string();
+        let result: std::result::Result<String, String> = tokio::task::spawn_blocking(move || {
+            set_task_tool(Some(mock));
+            let res = (|| -> std::result::Result<String, String> {
+                let mut sb = WorkflowSandbox::new().map_err(|e| e.to_string())?;
+                sb.run(&script).map_err(|e| e.to_string())
+            })();
+            set_task_tool(None);
+            res
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap(), "recovered");
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "transient error should have retried"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deterministic_failure_does_not_use_transient_floor() {
+        // A non-transient failure (schema mismatch) with no `retry:`
+        // (default max 1) must fail after exactly ONE attempt — the
+        // transient floor is reserved for flaky provider/stream errors.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        struct AlwaysBad {
+            calls: Arc<AtomicU32>,
+        }
+        #[async_trait]
+        impl Tool for AlwaysBad {
+            fn name(&self) -> &'static str {
+                "Task"
+            }
+            fn description(&self) -> &'static str {
+                "always-bad mock"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            async fn call(&self, _input: Value) -> crate::Result<String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(r#"{"wrong": "shape"}"#.into())
+            }
+        }
+        let calls = Arc::new(AtomicU32::new(0));
+        let mock: Arc<dyn Tool> = Arc::new(AlwaysBad {
+            calls: calls.clone(),
+        });
+        let script = r#"
+            try {
+              thclaws.subagent({prompt: "x", schema: {type: "object", required: ["ok"]}});
+              "should-not-reach";
+            } catch (e) { e.message; }
+        "#
+        .to_string();
+        let result: std::result::Result<String, String> = tokio::task::spawn_blocking(move || {
+            set_task_tool(Some(mock));
+            let res = (|| -> std::result::Result<String, String> {
+                let mut sb = WorkflowSandbox::new().map_err(|e| e.to_string())?;
+                sb.run(&script).map_err(|e| e.to_string())
+            })();
+            set_task_tool(None);
+            res
+        })
+        .await
+        .unwrap();
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("after 1 attempt"),
+            "deterministic failure must fail fast (1 attempt): {msg}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "schema failure must not consume the transient floor"
         );
     }
 

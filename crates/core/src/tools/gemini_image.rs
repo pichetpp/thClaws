@@ -66,6 +66,37 @@ fn resolve_key() -> Result<String> {
     ))
 }
 
+/// Resolve `(base_url, api_key)` for the Gemini image API. A real
+/// native key calls `generativelanguage` directly. When the key is
+/// absent or the hosted-runner placeholder (`gateway-placeholder`)
+/// and a thClaws Gateway access key is present, route through
+/// `<gateway>/google` — the gateway injects the real upstream key
+/// and meters the call against the `google/gemini-3.1-*-image`
+/// model_pricing rows. The auth header stays `x-goog-api-key`; the
+/// gateway accepts that scheme as the access-key carrier.
+fn resolve_endpoint() -> Result<(String, String)> {
+    if let Ok(key) = resolve_key() {
+        if key != "gateway-placeholder" {
+            return Ok((GEMINI_BASE.to_string(), key));
+        }
+    }
+    let gw_key = std::env::var("THCLAWS_GATEWAY_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(gw_key) = gw_key {
+        let base = std::env::var("THCLAWS_GATEWAY_BASE_URL")
+            .ok()
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                crate::providers::thclaws_gateway::GATEWAY_BASE_URL.to_string()
+            });
+        return Ok((format!("{base}/google"), gw_key));
+    }
+    resolve_key().map(|k| (GEMINI_BASE.to_string(), k))
+}
+
 /// Pick the Gemini image model from the input. Allows the user to
 /// say "flash" / "pro" as shortcuts, or pass the full model id, or
 /// omit for the default. Anything not in {flash, pro, full-id} is
@@ -117,6 +148,7 @@ fn resolve_size(input: &Value) -> &'static str {
 /// out at 120s (image gen averages 5–15s; this leaves headroom for
 /// pro-model + larger sizes).
 async fn call_gemini_image(
+    base_url: &str,
     api_key: &str,
     model: &str,
     parts: Vec<Value>,
@@ -135,7 +167,7 @@ async fn call_gemini_image(
     });
     let url = format!(
         "{}/v1beta/models/{}:generateContent",
-        GEMINI_BASE.trim_end_matches('/'),
+        base_url.trim_end_matches('/'),
         model
     );
     let client = Client::builder()
@@ -176,6 +208,22 @@ async fn call_gemini_image(
     Err(Error::Tool(
         "gemini returned no inlineData part — refusal or quota hit?".into(),
     ))
+}
+
+/// Detect the actual image format from magic bytes. Gemini's
+/// `inlineData` is not always PNG — flash frequently returns JPEG —
+/// and labeling JPEG bytes `image/png` makes Anthropic reject the
+/// tool-result image block ("media type … appears to be image/jpeg").
+fn sniff_ext(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if bytes.len() > 11 && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else {
+        "png"
+    }
 }
 
 /// Save image bytes under `output/img-<ts>-<sha8>.<ext>` and return
@@ -219,6 +267,7 @@ fn build_image_result(bytes: Vec<u8>, path: &std::path::Path) -> ToolResultConte
         .as_str()
     {
         "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
         _ => "image/png",
     };
     ToolResultContent::Blocks(vec![
@@ -299,10 +348,10 @@ impl Tool for TextToImageTool {
         let model = resolve_model(&input)?;
         let aspect = resolve_aspect(&input);
         let size = resolve_size(&input);
-        let key = resolve_key()?;
+        let (base, key) = resolve_endpoint()?;
         let parts = vec![json!({ "text": prompt })];
-        let bytes = call_gemini_image(&key, &model, parts, aspect, size).await?;
-        let path = save_image(&bytes, "png")?;
+        let bytes = call_gemini_image(&base, &key, &model, parts, aspect, size).await?;
+        let path = save_image(&bytes, sniff_ext(&bytes))?;
         Ok(build_image_result(bytes, &path))
     }
 }
@@ -370,7 +419,7 @@ impl Tool for ImageToImageTool {
         let model = resolve_model(&input)?;
         let aspect = resolve_aspect(&input);
         let size = resolve_size(&input);
-        let key = resolve_key()?;
+        let (base, key) = resolve_endpoint()?;
 
         // Sandbox-check the input path so the agent can't smuggle
         // an arbitrary system file into Gemini's context. Same
@@ -400,8 +449,8 @@ impl Tool for ImageToImageTool {
             }),
             json!({ "text": prompt }),
         ];
-        let out_bytes = call_gemini_image(&key, &model, parts, aspect, size).await?;
-        let out_path = save_image(&out_bytes, "png")?;
+        let out_bytes = call_gemini_image(&base, &key, &model, parts, aspect, size).await?;
+        let out_path = save_image(&out_bytes, sniff_ext(&out_bytes))?;
         Ok(build_image_result(out_bytes, &out_path))
     }
 }

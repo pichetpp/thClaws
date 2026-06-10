@@ -78,6 +78,12 @@ pub async fn run(
     tools.register(Arc::new(crate::tools::MemoryReadTool));
     tools.register(Arc::new(crate::tools::MemoryWriteTool));
     tools.register(Arc::new(crate::tools::MemoryAppendTool));
+    // Opt-in native Gemini image tools — workflow workers draft
+    // chapter figures (book-author) just like the lead session.
+    if config.image_tools_enabled {
+        tools.register(Arc::new(crate::tools::TextToImageTool));
+        tools.register(Arc::new(crate::tools::ImageToImageTool));
+    }
 
     let provider = crate::repl::build_provider(&config)?;
     let approver: Arc<dyn ApprovalSink> = Arc::new(AutoApprover);

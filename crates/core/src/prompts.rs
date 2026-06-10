@@ -308,10 +308,9 @@ fn append_repl_slash_shortcut_priming(system: &mut String) {
 pub(crate) fn services_prompt_section() -> String {
     let mut bullets: Vec<String> = Vec::new();
 
-    let hal_ok = std::env::var("HAL_API_KEY")
-        .ok()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
+    // Gateway-aware: in hosted gateway mode HAL is reachable with no
+    // local key, so the section advertises it there too.
+    let hal_ok = crate::tools::hal::hal_available();
     if hal_ok {
         bullets.push(
             "**HAL Public API** (key set). \
@@ -331,10 +330,14 @@ pub(crate) fn services_prompt_section() -> String {
         );
     }
 
-    let tavily_ok = std::env::var("TAVILY_API_KEY")
-        .ok()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
+    // In hosted gateway mode the search keys live on the gateway, not
+    // in the runner's env — Tavily is reachable even with no local key.
+    let gateway_mode = std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1");
+    let tavily_ok = gateway_mode
+        || std::env::var("TAVILY_API_KEY")
+            .ok()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
     let brave_ok = std::env::var("BRAVE_SEARCH_API_KEY")
         .ok()
         .map(|k| !k.trim().is_empty())

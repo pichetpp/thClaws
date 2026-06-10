@@ -97,7 +97,10 @@ impl Tool for WorkflowRunTool {
          REQUIRES USER APPROVAL on each invocation. Nested `WorkflowRun` \
          calls (from inside a script) are rejected. Use when a task is \
          decomposable into N parallel side-quests; for one-off side \
-         queries use the Subagent (`Task`) tool instead."
+         queries use the Subagent (`Task`) tool instead. To run a \
+         PRE-AUTHORED workflow file shipped with an agent (e.g. \
+         `.thclaws/workflows/draft-all-parallel.js`), pass `script_path` \
+         instead of `prompt` — the file executes verbatim, no authoring."
     }
 
     fn input_schema(&self) -> Value {
@@ -108,10 +111,18 @@ impl Tool for WorkflowRunTool {
                     "type": "string",
                     "description": "Natural-language goal for the workflow author. \
                                     Examples: 'summarise each .rs file under src/ in one line', \
-                                    'run pytest, parse failures, and open issues for the new ones'."
+                                    'run pytest, parse failures, and open issues for the new ones'. \
+                                    Ignored when script_path is given."
+                },
+                "script_path": {
+                    "type": "string",
+                    "description": "Workspace-relative path to a pre-authored workflow .js \
+                                    file to execute verbatim (skips the authoring step). \
+                                    Use for agent-shipped workflows, e.g. \
+                                    '.thclaws/workflows/draft-all-parallel.js'."
                 }
             },
-            "required": ["prompt"]
+            "required": []
         })
     }
 
@@ -120,7 +131,11 @@ impl Tool for WorkflowRunTool {
     }
 
     async fn call(&self, input: Value) -> Result<String> {
-        let prompt = req_str(&input, "prompt")?;
+        let script_path = input
+            .get("script_path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
         // Nested-call guard. The outer workflow's spawn_blocking has
         // set `WORKFLOW_USAGE_SINK`; running another sandbox inside
@@ -135,10 +150,23 @@ impl Tool for WorkflowRunTool {
             ));
         }
 
-        // Author the script via the same path `/workflow run` takes.
-        let script = crate::workflow::author(&*self.provider, &self.model, prompt, None)
-            .await
-            .map_err(|e| Error::Tool(format!("workflow author failed: {e}")))?;
+        // Pre-authored file (agent-shipped workflows) executes
+        // verbatim — mirrors `/workflow exec`. Sandbox: the path must
+        // resolve inside the workspace.
+        let script = if let Some(path) = script_path {
+            let cwd = std::env::current_dir()
+                .map_err(|e| Error::Tool(format!("cwd: {e}")))?;
+            let resolved = crate::sandbox::Sandbox::check_in(&cwd, path)
+                .map_err(|e| Error::Tool(format!("script_path {path:?}: {e}")))?;
+            std::fs::read_to_string(&resolved)
+                .map_err(|e| Error::Tool(format!("read {path:?}: {e}")))?
+        } else {
+            // Author the script via the same path `/workflow run` takes.
+            let prompt = req_str(&input, "prompt")?;
+            crate::workflow::author(&*self.provider, &self.model, prompt, None)
+                .await
+                .map_err(|e| Error::Tool(format!("workflow author failed: {e}")))?
+        };
 
         // Run in spawn_blocking so the Boa runtime doesn't block the
         // tokio executor. Thread-locals (task_tool + usage_sink) are

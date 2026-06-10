@@ -410,7 +410,18 @@ function renderProviderCard(
 
 /// Provider names that have an upstream route on the thClaws Gateway.
 /// Must match `crate::providers::thclaws_gateway::provider_segment`.
-const GATEWAY_PROVIDERS = new Set(["openai", "anthropic", "gemini", "openrouter"]);
+const GATEWAY_PROVIDERS = new Set([
+  "openai",
+  "anthropic",
+  "gemini",
+  "openrouter",
+  "dashscope",
+  "qwen-cloud",
+  "zai",
+  "deepseek",
+  "minimax",
+  "thaillm",
+]);
 
 /// OpenRouter-only inline toggle. When on, both the model picker
 /// and the `/models` slash command hide non-free rows. Persisted
@@ -447,6 +458,13 @@ const PROVIDER_TO_GATEWAY_SEGMENT: Record<string, string> = {
   anthropic: "anthropic",
   gemini: "google",
   openrouter: "openrouter",
+  // Compat providers: frontend id == gateway segment.
+  dashscope: "dashscope",
+  "qwen-cloud": "qwen-cloud",
+  zai: "zai",
+  deepseek: "deepseek",
+  minimax: "minimax",
+  thaillm: "thaillm",
 };
 
 type GatewaySettings = {

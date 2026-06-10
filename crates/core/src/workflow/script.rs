@@ -22,20 +22,44 @@ pub(crate) async fn author(
         _ => format!("Goal:\n{user_prompt}"),
     };
 
-    let req = StreamRequest {
-        model: model.to_string(),
-        system: Some(system),
-        messages: vec![Message::user(user_msg)],
-        tools: vec![],
-        max_tokens: 4096,
-        thinking_budget: None,
-        stream_chunk_timeout_override: None,
+    // The author call is a single streaming turn with no retry of its
+    // own — a transient provider error (e.g. a dropped SSE stream
+    // during a parallel WorkflowRun burst) used to fail the whole run
+    // before any stage executed. Retry transient failures a few times
+    // with exponential backoff; deterministic ones (auth, empty script)
+    // still fail fast.
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut attempt = 0u32;
+    let turn = loop {
+        attempt += 1;
+        let req = StreamRequest {
+            model: model.to_string(),
+            system: Some(system.clone()),
+            messages: vec![Message::user(user_msg.clone())],
+            tools: vec![],
+            max_tokens: 4096,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+        let attempt_res: Result<_, String> = async {
+            let stream = provider.stream(req).await.map_err(|e| e.to_string())?;
+            collect_turn(assemble(stream))
+                .await
+                .map_err(|e| e.to_string())
+        }
+        .await;
+        match attempt_res {
+            Ok(turn) => break turn,
+            Err(e) => {
+                if attempt < MAX_ATTEMPTS && super::is_transient_provider_error(&e) {
+                    let delay = std::time::Duration::from_secs(1u64 << (attempt - 1));
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
     };
-
-    let stream = provider.stream(req).await.map_err(|e| e.to_string())?;
-    let turn = collect_turn(assemble(stream))
-        .await
-        .map_err(|e| e.to_string())?;
 
     let script = strip_markdown_fence(&turn.text);
     if script.trim().is_empty() {
@@ -93,5 +117,59 @@ mod tests {
     fn trims_outer_whitespace() {
         let input = "\n\n```js\nlet x = 1;\n```\n\n";
         assert_eq!(strip_markdown_fence(input), "let x = 1;");
+    }
+
+    #[tokio::test]
+    async fn author_retries_transient_stream_error() {
+        use crate::providers::{EventStream, ProviderEvent, Usage};
+        use futures::stream;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        // Fails the first stream() with the exact transient error that
+        // killed a real WorkflowRun, then succeeds — author() must retry
+        // and return the script rather than propagating the failure.
+        struct FlakyAuthor {
+            calls: Arc<AtomicU32>,
+        }
+        #[async_trait::async_trait]
+        impl Provider for FlakyAuthor {
+            async fn stream(
+                &self,
+                _req: StreamRequest,
+            ) -> std::result::Result<EventStream, crate::error::Error> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if n < 2 {
+                    return Err(crate::error::Error::Provider(
+                        "stream: error decoding response body".into(),
+                    ));
+                }
+                let events = vec![
+                    Ok(ProviderEvent::TextDelta("'hi'".into())),
+                    Ok(ProviderEvent::MessageStop {
+                        stop_reason: None,
+                        usage: Some(Usage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                            ..Default::default()
+                        }),
+                    }),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            }
+        }
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let provider = FlakyAuthor {
+            calls: calls.clone(),
+        };
+        let script = author(&provider, "test-model", "say hi", None)
+            .await
+            .expect("author should retry the transient error and succeed");
+        assert_eq!(script, "'hi'");
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "author should have retried the transient stream error"
+        );
     }
 }

@@ -128,14 +128,53 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// True when the engine runs in hosted gateway mode — the runner routes
+/// LLM + keyed-service traffic through the cloud gateway with a
+/// `gw_v1_…` bearer instead of holding raw upstream keys.
+pub(crate) fn gateway_mode() -> bool {
+    std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+}
+
+/// Resolved cloud-gateway route (base URL + bearer). `Some` only in
+/// gateway mode with both envs present. Tools that proxy a keyed
+/// upstream (HAL, web search) use this to reach `{base}/<svc>/…` with
+/// the bearer; the gateway injects the real credential.
+pub(crate) struct GatewayRoute {
+    pub base: String,
+    pub token: String,
+}
+
+pub(crate) fn gateway_route() -> Option<GatewayRoute> {
+    if !gateway_mode() {
+        return None;
+    }
+    let base = std::env::var("THCLAWS_GATEWAY_BASE_URL")
+        .ok()?
+        .trim_end_matches('/')
+        .to_string();
+    let token = std::env::var("THCLAWS_GATEWAY_API_KEY").ok()?;
+    if base.is_empty() || token.is_empty() {
+        return None;
+    }
+    Some(GatewayRoute { base, token })
+}
+
+/// Env vars whose backing service the cloud gateway fronts. In gateway
+/// mode the runner holds no raw key for these (the gateway injects it),
+/// so a tool that `requires_env` one of them is still available.
+pub(crate) const GATEWAY_SERVED_ENVS: &[&str] = &["HAL_API_KEY"];
+
 /// Whether a tool's env-var requirements are currently satisfied.
 /// Reads `std::env` so live changes (`api_key_set` / `api_key_clear`
 /// followed by a `rebuild_agent`) take effect on the next turn
-/// without reconstructing the registry.
+/// without reconstructing the registry. In gateway mode a requirement
+/// on a gateway-served key counts as satisfied even with no local key.
 fn tool_is_available(t: &dyn Tool) -> bool {
-    t.requires_env()
-        .iter()
-        .all(|v| std::env::var(v).map(|val| !val.is_empty()).unwrap_or(false))
+    let gw = gateway_mode();
+    t.requires_env().iter().all(|v| {
+        std::env::var(v).map(|val| !val.is_empty()).unwrap_or(false)
+            || (gw && GATEWAY_SERVED_ENVS.contains(v))
+    })
 }
 
 /// A resolved MCP-Apps UI resource ready to be mounted in an iframe.

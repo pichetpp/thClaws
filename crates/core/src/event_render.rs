@@ -366,6 +366,25 @@ pub fn render_gui_shell_dispatch(ev: &ViewEvent) -> Option<String> {
             })
             .to_string(),
         ),
+        // Output of a `!bang` or pure-interceptor `/slash` command the
+        // shell ran via `window.thclaws.run(...)`. Without this arm a
+        // domain shell that fetches state with `run("!script ...")`
+        // (e.g. Book Studio's status poll) gets NOTHING back — the bang
+        // path emits `SlashOutput`, not `ToolCallResult`, so its 15s
+        // refresh + reload button were silently no-ops. Deliver it as a
+        // `tool_result` (the channel shells already parse), labelled
+        // "Bash" since bang commands run as bash.
+        ViewEvent::SlashOutput(text) => Some(
+            serde_json::json!({
+                "type": "gui_shell_event",
+                "event": "tool_result",
+                "payload": {
+                    "name": "Bash",
+                    "output": strip_ansi(text),
+                },
+            })
+            .to_string(),
+        ),
         _ => None,
     }
 }
@@ -778,6 +797,25 @@ mod chat_render_tests {
         assert_eq!(parsed["type"], "chat_error");
         // No JSON to extract → original text passes through unchanged.
         assert_eq!(parsed["text"], raw);
+    }
+
+    #[test]
+    fn gui_shell_slash_output_becomes_bash_tool_result() {
+        // Regression: a `!bang` status fetch (SlashOutput) used to map to
+        // None for gui shells, so Book Studio's status poll silently got
+        // nothing. It must arrive as a `tool_result` the shell can parse.
+        let out = render_gui_shell_dispatch(&ViewEvent::SlashOutput(
+            "[!] book.py status\n{\"next_action\": \"run_audit\"}".into(),
+        ))
+        .expect("SlashOutput should produce a gui_shell event");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["type"], "gui_shell_event");
+        assert_eq!(parsed["event"], "tool_result");
+        assert_eq!(parsed["payload"]["name"], "Bash");
+        assert!(parsed["payload"]["output"]
+            .as_str()
+            .unwrap()
+            .contains("next_action"));
     }
 
     /// Restored chat history is rendered into the terminal as one
