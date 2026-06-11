@@ -18,6 +18,10 @@
         bot's behaviour.
       </p>
       <button id="clear-btn" class="clear-btn" title="Clear conversation history">Clear</button>
+      <!-- Full-screen escape hatch: shown only when the host displays
+           this shell full-screen; tells the host to hide its fallback
+           chip (see thclaws.ui in gui-shell-bridge.js). -->
+      <button id="exit-fullscreen" class="clear-btn" title="Exit full screen (⌘⇧U)" hidden>⤢ Exit full screen</button>
     </header>
 
     <main class="transcript" id="transcript">

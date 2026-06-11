@@ -19,6 +19,12 @@
 //   thclaws.storage.set(key, value)  -> Promise<void>    // <shell-root>/state/<sessionId>.json
 //   thclaws.on(event, cb) events:    + "tool_call" + "tool_result"
 //   thclaws.tools.invoke(name, args) -> Promise<string>  // Task 18 (separate)
+//
+// Host UI integration (full-screen escape hatch):
+//   thclaws.ui.isFullscreen          — bool, host is showing us full-screen
+//   thclaws.ui.onFullscreen(cb)      -> unsubscribe()    // fires with current state
+//   thclaws.ui.exitFullscreen()      -> void             // ask host to leave full-screen
+//   thclaws.ui.claimExitControl()    -> void             // hide the host's fallback chip
 
 (() => {
   // Mode A URL: thclaws://localhost/gui-shell/<id>/<path>?session=<sid>
@@ -99,6 +105,12 @@
       return;
     }
     if (data.event) {
+      // Keep the convenience flag in sync before fanning out so a
+      // subscriber that reads thclaws.ui.isFullscreen sees the new
+      // value.
+      if (data.event === "fullscreen" && window.thclaws && window.thclaws.ui) {
+        window.thclaws.ui.isFullscreen = !!(data.payload && data.payload.active);
+      }
       const set = subscribers.get(data.event);
       if (set) {
         for (const cb of set) {
@@ -399,6 +411,68 @@
         }
         throw e;
       });
+    },
+
+    // Host UI integration — full-screen control. In full-screen UI
+    // mode the host hides all its chrome (tab bar, sidebar, status
+    // bar) so the shell owns the viewport. The host always keeps a
+    // keyboard escape (⌘⇧U / Ctrl⇧U) and a fallback exit affordance,
+    // but a well-built shell should render its OWN exit control as
+    // part of its chrome so the host's fallback never has to occlude
+    // shell content. The reference pattern:
+    //
+    //   thclaws.ui.onFullscreen((active) => {
+    //     myExitButton.hidden = !active;       // only meaningful in FS
+    //     if (active) thclaws.ui.claimExitControl();  // hide host chip
+    //   });
+    //   myExitButton.onclick = () => thclaws.ui.exitFullscreen();
+    //
+    // `claimExitControl()` tells the host to suppress its own fallback
+    // chip (the keyboard escape + a brief on-entry hint stay as the
+    // safety net). Only call it once you've actually rendered a
+    // working exit control of your own.
+    ui: {
+      // True while the host is showing this shell full-screen. Updated
+      // from the host's `fullscreen` events; starts false.
+      isFullscreen: false,
+
+      // Ask the host to leave full-screen UI mode (reveals the tab bar
+      // etc.). No-op in Mode B (standalone `--serve --gui-shell`, where
+      // the shell already owns the whole page and there's no chrome to
+      // restore).
+      exitFullscreen() {
+        if (isModeB) return;
+        parent.postMessage(
+          { ns: "thclaws-shell", type: "hotkey", key: "exit-fullscreen-ui" },
+          "*",
+        );
+      },
+
+      // Tell the host this shell renders its own exit control, so the
+      // host can hide its fallback chip. Safe to call repeatedly.
+      claimExitControl() {
+        if (isModeB) return;
+        parent.postMessage(
+          { ns: "thclaws-shell", type: "ui", key: "exit-control-claimed" },
+          "*",
+        );
+      },
+
+      // Subscribe to full-screen state changes. Fires immediately with
+      // the current state so callers don't miss the initial value.
+      // Returns an unsubscribe function.
+      onFullscreen(callback) {
+        if (typeof callback !== "function") {
+          throw new TypeError("thclaws.ui.onFullscreen: callback must be a function");
+        }
+        const unsub = window.thclaws.on("fullscreen", (p) =>
+          callback(!!(p && p.active)),
+        );
+        // Replay current state on the next tick so subscribers added
+        // before the first host event still get an initial call.
+        Promise.resolve().then(() => callback(window.thclaws.ui.isFullscreen));
+        return unsub;
+      },
     },
 
     // Tier 3: read-only access to the shell's declared permissions

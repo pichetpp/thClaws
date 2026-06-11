@@ -76,7 +76,7 @@ export function UITab({ active, fullscreen = false }: UITabProps) {
         </div>
       )}
       <div className="flex-1 min-h-0">
-        <UIView active={active} shellId={selected} />
+        <UIView active={active} shellId={selected} fullscreen={fullscreen} />
       </div>
     </div>
   );

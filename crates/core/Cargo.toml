@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.46.0"
+version = "0.47.0"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -73,7 +73,7 @@ printpdf = { version = "0.7", features = ["embedded_images"] }
 # Markdown parser used by PdfCreate to walk paragraphs, headings, lists,
 # emphasis, and code blocks before laying them out in the PDF. No HTML
 # features needed — we render directly to printpdf primitives.
-pulldown-cmark = { version = "0.10", default-features = false }
+pulldown-cmark = { version = "0.10", default-features = false, features = ["html"] }
 # Glyph advance metrics for PdfCreate line breaking — same version
 # already in-tree transitively via printpdf → owned_ttf_parser.
 ttf-parser = "0.19"

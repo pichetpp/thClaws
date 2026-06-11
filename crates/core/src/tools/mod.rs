@@ -18,6 +18,7 @@ pub mod docx_create;
 pub mod docx_edit;
 pub mod docx_read;
 pub mod edit;
+pub mod epub_create;
 pub mod gemini_image;
 pub mod glob;
 pub mod grep;
@@ -53,6 +54,7 @@ pub use docx_create::DocxCreateTool;
 pub use docx_edit::DocxEditTool;
 pub use docx_read::DocxReadTool;
 pub use edit::EditTool;
+pub use epub_create::EpubCreateTool;
 pub use gemini_image::{ImageToImageTool, TextToImageTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
@@ -236,6 +238,7 @@ impl ToolRegistry {
         r.register(Arc::new(PptxCreateTool));
         r.register(Arc::new(PptxEditTool));
         r.register(Arc::new(PptxReadTool));
+        r.register(Arc::new(EpubCreateTool));
         r.register(Arc::new(PdfCreateTool));
         r.register(Arc::new(PdfReadTool));
         r.register(Arc::new(WebFetchTool::new()));
@@ -437,6 +440,7 @@ mod tests {
                 "DocxRead",
                 "Edit",
                 "EnterPlanMode",
+                "EpubCreate",
                 "ExitPlanMode",
                 "Glob",
                 "Grep",

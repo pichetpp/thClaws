@@ -21,12 +21,35 @@ import { send, subscribe } from "../hooks/useIPC";
 interface UIViewProps {
   active: boolean;
   shellId: string;
+  /** Whether the host is currently showing this shell full-screen.
+   * Forwarded into the iframe as a `fullscreen` bridge event so the
+   * shell can render its own exit control (thclaws.ui.onFullscreen). */
+  fullscreen?: boolean;
 }
 
 const TIER1_SESSION_ID = "tier1";
 
-export function UIView({ active, shellId }: UIViewProps) {
+// Message types the bridge posts to the PARENT React app (not the
+// backend): hotkey re-emissions and UI-integration signals. UIView
+// must not forward these as `gui_shell_*` backend arms — App.tsx
+// handles them directly on the window.
+const PARENT_ONLY_TYPES = new Set(["ready", "hotkey", "ui"]);
+
+export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  // Push the current full-screen state into the iframe. Kept in a ref-
+  // free helper so both the fullscreen-change effect and the iframe's
+  // "ready" handler can call it (a shell that loads while already
+  // full-screen still gets its initial state).
+  const sendFullscreen = (value: boolean) => {
+    const target = iframeRef.current?.contentWindow;
+    if (!target) return;
+    target.postMessage(
+      { ns: "thclaws-shell-event", event: "fullscreen", payload: { active: value } },
+      "*",
+    );
+  };
 
   useEffect(() => {
     // iframe -> parent: forward to backend.
@@ -40,10 +63,14 @@ export function UIView({ active, shellId }: UIViewProps) {
         return;
       }
       if (data.type === "ready") {
-        // No-op for now; Tier 2 picker uses this to dismiss the
-        // "loading shell..." spinner. Logged for dev visibility.
+        // Replay current full-screen state to a freshly-loaded shell so
+        // thclaws.ui.onFullscreen() fires with the right initial value.
+        sendFullscreen(fullscreen);
         return;
       }
+      // Parent-only signals (hotkey / ui) are handled by App.tsx on the
+      // window — never a backend arm.
+      if (PARENT_ONLY_TYPES.has(data.type)) return;
       // type is "run" / "cancel" -> backend arms are gui_shell_run /
       // gui_shell_cancel.
       const payload = data.payload || {};
@@ -57,7 +84,14 @@ export function UIView({ active, shellId }: UIViewProps) {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [shellId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shellId, fullscreen]);
+
+  // Forward full-screen state changes into the iframe.
+  useEffect(() => {
+    sendFullscreen(fullscreen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullscreen]);
 
   useEffect(() => {
     // backend -> iframe: forward gui_shell_event dispatches.

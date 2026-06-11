@@ -572,7 +572,11 @@ pub(crate) fn documents_prompt_section() -> String {
          outline: `# Heading` starts a new slide, bullets become body. \
          Read extracts slide text.\n\
          - **PdfCreate** / **PdfRead** — PDF. Markdown in, supports \
-         tables, inline images, embedded fonts. A4 / Letter / Legal.\n\n\
+         tables, inline images, embedded fonts. A4 / Letter / Legal.\n\
+         - **EpubCreate** — reflowable EPUB 3 e-book. Markdown in, splits \
+         into chapters at headings, embeds images + Noto fonts, builds \
+         navigation. Use for e-books / long-form reading on e-readers \
+         (a PDF is fixed-layout; an EPUB reflows to the device).\n\n\
          Use these for the matching format every time. Do NOT call \
          generic `Read` on `.docx` / `.xlsx` / `.pptx` / `.pdf` — it \
          returns raw bytes the model can't parse; the dedicated `*Read` \

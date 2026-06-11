@@ -37,6 +37,18 @@ transportEl.textContent = `transport: ${thclaws.transport}  ·  session: ${thcla
 
 // ---- bridge wiring ----------------------------------------------------
 
+// Host full-screen exit control — render our own button so the host
+// hides its fallback chip (see thclaws.ui). Guarded for older engines.
+(() => {
+  const exitBtn = document.getElementById("exit-fullscreen");
+  if (!exitBtn || !thclaws.ui) return;
+  exitBtn.addEventListener("click", () => thclaws.ui.exitFullscreen());
+  thclaws.ui.onFullscreen((active) => {
+    exitBtn.hidden = !active;
+    if (active) thclaws.ui.claimExitControl();
+  });
+})();
+
 thclaws.on("text", (payload) => {
   const chunk = typeof payload === "string" ? payload : payload?.text ?? "";
   if (!chunk) return;

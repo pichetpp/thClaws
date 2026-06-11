@@ -68,29 +68,90 @@ const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
 // only then does the PTY spawn and the tabs become active.
 
 /**
- * Subtle top-right chip shown only in full-screen UI mode. Reminds
- * the user of the toggle hotkey so they're not stuck without chrome,
- * and offers a click target for when they've forgotten it. Pure CSS
- * fade so it doesn't pull attention from the shell.
+ * Host-owned escape hatch for full-screen UI mode. The host hides all
+ * its chrome in full-screen, so this guarantees the user can always
+ * get back out. It is deliberately NON-OCCLUDING:
+ *
+ *   - On entering full-screen, a brief auto-dismissing toast names the
+ *     keyboard escape (⌘⇧U / Ctrl⇧U) — discoverability without
+ *     permanently covering shell content.
+ *   - The clickable exit chip is hidden until the pointer enters the
+ *     top-right hot corner (like full-screen video controls), so it
+ *     never sits on top of the shell during normal use.
+ *   - If the shell declares it renders its own exit control
+ *     (`thclaws.ui.claimExitControl()` → `claimed`), the host chip is
+ *     suppressed entirely; the toast + keyboard escape remain as the
+ *     safety net.
+ *
+ * The keyboard escape lives in App's keydown handler and always works
+ * regardless of this component.
  */
-function FullscreenExitHint({ onExit }: { onExit: () => void }) {
+function FullscreenExitChrome({
+  onExit,
+  claimed,
+}: {
+  onExit: () => void;
+  claimed: boolean;
+}) {
   const isMac =
     typeof navigator !== "undefined" && navigator.platform.startsWith("Mac");
   const kbd = isMac ? "⌘⇧U" : "Ctrl⇧U";
+  // Toast shows on mount (= on entering full-screen) and fades after a
+  // few seconds.
+  const [toast, setToast] = useState(true);
+  // Chip only appears while the pointer is in the top-right hot corner.
+  const [nearCorner, setNearCorner] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setToast(false), 4000);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (claimed) return; // shell owns the control — no hot-corner chip
+    const onMove = (e: MouseEvent) => {
+      const inCorner =
+        e.clientX >= window.innerWidth - 120 && e.clientY <= 120;
+      setNearCorner(inCorner);
+    };
+    window.addEventListener("mousemove", onMove);
+    return () => window.removeEventListener("mousemove", onMove);
+  }, [claimed]);
+
   return (
-    <button
-      onClick={onExit}
-      title={`Exit full-screen UI (${kbd})`}
-      className="fixed top-2 right-2 z-50 px-2 py-1 rounded text-[10px] font-mono opacity-25 hover:opacity-100 transition-opacity"
-      style={{
-        background: "var(--bg-secondary)",
-        color: "var(--text-secondary)",
-        border: "1px solid var(--border)",
-        backdropFilter: "blur(4px)",
-      }}
-    >
-      {kbd}
-    </button>
+    <>
+      {toast && (
+        <div
+          className="fixed top-3 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 rounded-full text-[11px] font-medium pointer-events-none transition-opacity duration-500"
+          style={{
+            background: "var(--bg-secondary)",
+            color: "var(--text-secondary)",
+            border: "1px solid var(--border)",
+            backdropFilter: "blur(4px)",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.18)",
+          }}
+        >
+          Press <span className="font-mono">{kbd}</span> to exit full screen
+        </div>
+      )}
+      {!claimed && (
+        <button
+          onClick={onExit}
+          title={`Exit full-screen UI (${kbd})`}
+          className="fixed top-2 right-2 z-50 px-2 py-1 rounded text-[10px] font-mono transition-opacity duration-200"
+          style={{
+            background: "var(--bg-secondary)",
+            color: "var(--text-secondary)",
+            border: "1px solid var(--border)",
+            backdropFilter: "blur(4px)",
+            opacity: nearCorner ? 1 : 0,
+            pointerEvents: nearCorner ? "auto" : "none",
+          }}
+        >
+          {kbd}
+        </button>
+      )}
+    </>
   );
 }
 
@@ -469,14 +530,20 @@ export default function App() {
     // postMessage so this handler runs regardless of where focus lives.
     const onMessage = (e: MessageEvent) => {
       const data = e.data;
-      if (
-        !data ||
-        data.ns !== "thclaws-shell" ||
-        data.type !== "hotkey" ||
-        data.key !== "toggle-fullscreen-ui"
-      ) {
+      if (!data || data.ns !== "thclaws-shell") return;
+      // Shell declared it provides its own exit control → suppress the
+      // host's fallback chip (toast + keyboard escape still apply).
+      if (data.type === "ui" && data.key === "exit-control-claimed") {
+        setExitControlClaimed(true);
         return;
       }
+      if (data.type !== "hotkey") return;
+      // Explicit exit (shell's own exit button) vs toggle (⌘⇧U).
+      if (data.key === "exit-fullscreen-ui") {
+        setFullscreen(false);
+        return;
+      }
+      if (data.key !== "toggle-fullscreen-ui") return;
       setFullscreen((prev) => {
         if (!prev) setActiveTab("ui");
         return !prev;
@@ -501,6 +568,17 @@ export default function App() {
   // `thclaws --serve --gui-shell <id>`). Auto-enters when the backend
   // signals an initial UI tab; toggle with ⌘⇧U / Ctrl⇧U.
   const [fullscreen, setFullscreen] = useState(false);
+  // Set when the active GUI shell declares (via
+  // thclaws.ui.claimExitControl) that it renders its own exit control,
+  // so the host suppresses its fallback chip. Reset on leaving
+  // full-screen so a subsequent non-claiming shell gets the chip back.
+  const [exitControlClaimed, setExitControlClaimed] = useState(false);
+  // Drop the claim on leaving full-screen — the next shell (or the
+  // next full-screen session) must re-declare it. The reference shell
+  // re-claims in its `onFullscreen(active=true)` handler.
+  useEffect(() => {
+    if (!fullscreen) setExitControlClaimed(false);
+  }, [fullscreen]);
   const [showSettings, setShowSettings] = useState(false);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showLineConnect, setShowLineConnect] = useState(false);
@@ -672,7 +750,10 @@ export default function App() {
     <div className="flex flex-col h-screen">
       <FrontendReadyBeacon />
       {fullscreen && (
-        <FullscreenExitHint onExit={() => setFullscreen(false)} />
+        <FullscreenExitChrome
+          onExit={() => setFullscreen(false)}
+          claimed={exitControlClaimed}
+        />
       )}
       {/* Tab bar — hidden in full-screen UI mode */}
       {!fullscreen && (

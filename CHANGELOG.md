@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-06-11
+
+### Added
+- **EpubCreate** — new native tool rendering markdown to a reflowable
+  EPUB 3 e-book: chapter splitting at headings (each H1 → its own
+  spine item + navigation entry), markdown→XHTML (GFM tables,
+  strikethrough, task lists, footnotes), embedded images, optional
+  cover, EPUB 3 `nav.xhtml` + EPUB 2 `toc.ncx` fallback, and embedded
+  Noto Sans + Noto Sans Thai (`@font-face`) so Thai renders on readers
+  with no Thai font. Validated against the official EPUBCheck (3.3).
+- **GUI shell `thclaws.ui.*` bridge API** — full-screen integration for
+  shell authors: `exitFullscreen()`, `claimExitControl()`,
+  `onFullscreen(cb)`, `isFullscreen`. A shell can render its own
+  full-screen exit control and have the host suppress its fallback chip.
+
+### Changed
+- **Full-screen UI exit no longer occludes the shell.** The host's exit
+  affordance was a fixed top-right chip permanently covering the shell's
+  corner. Now: a brief auto-dismissing toast names the ⌘⇧U/Ctrl⇧U escape
+  on entry, and the clickable fallback chip is revealed only on
+  top-right hot-corner hover. The keyboard escape stays host-owned. All
+  built-in shells (chatbot, session-explorer) render their own header
+  exit button via the new API.
+
+### Fixed
+- pdf_create module docs: dropped the stale "no OpenType shaping" note —
+  v2 shapes every run through rustybuzz (GSUB/GPOS).
+
 ## [0.46.0] - 2026-06-11
 
 ### Added

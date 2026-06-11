@@ -10,6 +10,14 @@
 //!   (base char + combining marks) and Thai breaks avoid splitting
 //!   after lead vowels (เแโใไ) or before ๆ/ฯ/ำ — Thai has no spaces,
 //!   so space-only wrapping produced overflowing lines in v1.
+//! - **OpenType shaping** via rustybuzz (HarfBuzz): each same-font run
+//!   is shaped through `shape_run`, applying the font's GSUB (Thai
+//!   mark variants for tall/descender consonants) and GPOS (stacked-
+//!   mark raising — tone marks above upper vowels), so Thai combining
+//!   marks land at their correct anchors instead of font-default
+//!   positions. GPOS-offset glyphs are emitted individually with their
+//!   shaped advances/offsets rather than via printpdf's run-level text
+//!   API.
 //! - **Styled runs**: headings + `**bold**` use the Bold faces,
 //!   `*italic*` uses Noto Sans Italic (Thai has no italic — falls
 //!   back to regular), inline `code` renders dimmed + slightly small.
@@ -20,11 +28,6 @@
 //!   on a shaded background, centered images with italic captions
 //!   from alt text, per-page `n / N` footers, PDF outline bookmarks
 //!   for H1/H2, optional page break before each H1 (chapters).
-//!
-//! Known limitation: no OpenType shaping (GSUB/GPOS) — Thai combining
-//! marks render at their font-default anchors, so rare stacked mark
-//! pairs sit slightly low. Full shaping needs per-glyph positioning
-//! that printpdf's text API doesn't expose.
 
 use super::{req_str, Tool};
 use crate::error::{Error, Result};

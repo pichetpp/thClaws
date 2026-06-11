@@ -10,7 +10,10 @@
 <body>
   <div id="app">
     <aside>
-      <header>Sessions <span id="session-count"></span></header>
+      <header>Sessions <span id="session-count"></span>
+        <!-- Full-screen escape hatch; see thclaws.ui in the bridge. -->
+        <button id="exit-fullscreen" title="Exit full screen (⌘⇧U)" hidden style="margin-left:auto;font-size:11px;cursor:pointer;">⤢ Exit</button>
+      </header>
       <div id="session-list" class="empty">loading…</div>
     </aside>
     <main>
