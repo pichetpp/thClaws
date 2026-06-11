@@ -889,8 +889,15 @@ export function FilesView({ active }: Props) {
                 />
               </div>
             ) : isPdf ? (
+              // Stream off /file-asset/ like audio/video — Chrome
+              // refuses to run its PDF viewer inside a data: iframe
+              // (opaque origin ⇒ implicitly sandboxed; the viewer's
+              // internal about:srcdoc frame logs "Blocked script
+              // execution… 'allow-scripts'"), and a book PDF would
+              // round-trip 5MB+ of base64 through the WS anyway.
               <iframe
-                src={`data:application/pdf;base64,${preview.content}`}
+                key={`pdf-${preview.path}-${previewVersion}`}
+                src={assetUrl(preview.path)}
                 className="w-full flex-1 min-h-0 rounded border"
                 style={{ borderColor: "var(--border)", background: "#fff" }}
                 title={preview.path}

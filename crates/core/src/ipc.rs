@@ -3158,17 +3158,26 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         });
                         (ctx.dispatch)(payload.to_string());
                     } else if is_image || is_pdf {
-                        if let Ok(bytes) = std::fs::read(&path) {
-                            let b64 = crate::file_preview::encode_bytes_b64(&bytes);
-                            let payload = serde_json::json!({
-                                "type": "file_content",
-                                "path": raw_path,
-                                "content": b64,
-                                "mime": mime,
-                                "mode": mode,
-                            });
-                            (ctx.dispatch)(payload.to_string());
-                        }
+                        // PDFs render via an /file-asset iframe (Chrome
+                        // refuses its viewer in data: iframes) — don't
+                        // push megabytes of base64 through the WS for
+                        // bytes the frontend never reads.
+                        let b64 = if is_pdf {
+                            String::new()
+                        } else {
+                            match std::fs::read(&path) {
+                                Ok(bytes) => crate::file_preview::encode_bytes_b64(&bytes),
+                                Err(_) => String::new(),
+                            }
+                        };
+                        let payload = serde_json::json!({
+                            "type": "file_content",
+                            "path": raw_path,
+                            "content": b64,
+                            "mime": mime,
+                            "mode": mode,
+                        });
+                        (ctx.dispatch)(payload.to_string());
                     } else if is_office {
                         let extracted = if is_docx {
                             crate::tools::docx_read::extract_docx(&path)

@@ -215,6 +215,10 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
         "ttf" => "font/ttf",
         "otf" => "font/otf",
         "txt" | "md" => "text/plain; charset=utf-8",
+        // Inline-renderable in the browser's viewer — without this,
+        // octet-stream makes the Files-tab PDF iframe download instead
+        // of displaying.
+        "pdf" => "application/pdf",
         // Audio
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",

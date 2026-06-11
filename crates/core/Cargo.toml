@@ -74,6 +74,23 @@ printpdf = { version = "0.7", features = ["embedded_images"] }
 # emphasis, and code blocks before laying them out in the PDF. No HTML
 # features needed — we render directly to printpdf primitives.
 pulldown-cmark = { version = "0.10", default-features = false }
+# Glyph advance metrics for PdfCreate line breaking — same version
+# already in-tree transitively via printpdf → owned_ttf_parser.
+ttf-parser = "0.19"
+# OpenType shaping for PdfCreate — pure-Rust HarfBuzz port. Thai
+# stacked marks (tone over upper vowel, marks over tall consonants)
+# need GSUB variant glyphs + GPOS offsets; cmap-only text placement
+# renders them collided. No C dependency.
+rustybuzz = "0.14"
+# Thai line breaking for PdfCreate. Thai has no spaces — legal wrap
+# points are WORD boundaries, which need dictionary/LSTM segmentation
+# (UAX#14 complex-script). ICU4X's LineSegmenter with the bundled
+# auto (LSTM) data is the same approach browsers use.
+icu_segmenter = { version = "1.5", features = ["auto"] }
+# Post-process PdfCreate output: printpdf writes outline /Title as
+# Literal UTF-8 (viewers read PDFDocEncoding → Thai mojibake); we
+# re-encode titles as UTF-16BE+BOM. Same version printpdf uses.
+lopdf = "0.31"
 # DOCX generation backing DocxCreate. Markdown → Word XML via docx-rs's
 # document builder; renders runs/paragraphs/tables/headings/lists with
 # explicit fontTable references (Calibri for Latin, Noto Sans Thai for
