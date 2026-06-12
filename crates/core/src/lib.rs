@@ -51,6 +51,8 @@ pub mod error;
 // always-on by mistake; gate them behind the same `gui` feature so
 // the CLI-only thclaws-cli binary still builds.
 #[cfg(feature = "gui")]
+pub mod browser_cdp;
+#[cfg(feature = "gui")]
 pub mod event_render;
 pub mod external_url;
 #[cfg(feature = "gui")]
@@ -58,7 +60,6 @@ pub mod file_preview;
 pub mod goal_state;
 #[cfg(feature = "gui")]
 pub mod gui;
-#[cfg(feature = "gui")]
 pub mod gui_shell;
 pub mod hooks;
 pub mod instructions;

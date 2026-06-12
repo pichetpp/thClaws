@@ -1,0 +1,736 @@
+//! docs/browser Phase 2 slice 3 — engine-owned Chromium + CDP attachment.
+//!
+//! Inverts browser ownership: instead of letting the managed
+//! playwright-mcp server launch its own Chromium, the ENGINE launches
+//! Chromium with a DevTools port and hands playwright-mcp a
+//! `--cdp-endpoint` so the agent's tools drive the same browser. The
+//! engine then attaches its own CDP session as the human-facing wire:
+//!
+//!   - `Page.startScreencast` → live JPEG frames into the Browser tab
+//!     (replaces the ~1 fps click-through screenshots in takeover)
+//!   - `Input.dispatchMouseEvent` / `Input.insertText` /
+//!     `dispatchKeyEvent` → native-feeling click / type / scroll
+//!     (whole strings in one shot — no more per-character press_key)
+//!   - `Runtime.consoleAPICalled` / `exceptionThrown` → live console
+//!     lines in the activity feed
+//!
+//! Graceful fallback is the design invariant: if Chromium can't be
+//! found or launched, `ensure_chromium` returns `None`, playwright-mcp
+//! self-launches exactly as before, and the Browser tab keeps the
+//! screenshot + MCP-input path. Nothing regresses.
+//!
+//! Threading model: one private tokio runtime (1 worker) owns every
+//! CDP websocket task. Public API is synchronous and must be called
+//! from NON-tokio threads (the IPC layer's std::thread workers) — it
+//! `block_on`s the private runtime. The MCP bootstrap calls only
+//! `ensure_chromium`, which is plain blocking code, via
+//! `spawn_blocking`.
+
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+type Dispatch = Arc<dyn Fn(String) + Send + Sync>;
+
+// ── Singleton state ──────────────────────────────────────────────────
+
+struct CdpState {
+    /// `http://127.0.0.1:<port>` — what playwright-mcp's
+    /// `--cdp-endpoint` takes. Fixed at arm time (port reserved
+    /// up-front) so the MCP server can be spawned with the endpoint
+    /// BEFORE Chromium exists.
+    endpoint: String,
+    port: u16,
+    headless: bool,
+    /// Chromium is launched lazily — on the first browser tool call
+    /// or takeover/screencast start — so a headed desktop doesn't pop
+    /// a Chrome window at app start and an idle cloud pod doesn't pay
+    /// ~150 MB for a browser nobody used.
+    launched: bool,
+    /// `None` when we re-attached to a Chromium a previous engine
+    /// process launched (it survived the restart — sessions intact).
+    child: Option<std::process::Child>,
+}
+
+static STATE: OnceLock<Mutex<Option<CdpState>>> = OnceLock::new();
+static PAGE: OnceLock<Mutex<Option<Arc<PageSession>>>> = OnceLock::new();
+
+fn state() -> &'static Mutex<Option<CdpState>> {
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn page_slot() -> &'static Mutex<Option<Arc<PageSession>>> {
+    PAGE.get_or_init(|| Mutex::new(None))
+}
+
+fn rt() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("browser-cdp")
+            .enable_all()
+            .build()
+            .expect("browser-cdp runtime")
+    })
+}
+
+/// Whether CDP mode is armed (endpoint reserved; Chromium launches
+/// lazily on first use). The Browser tab uses this to decide
+/// screencast vs screenshot mode.
+pub fn cdp_active() -> bool {
+    state().lock().unwrap().is_some()
+}
+
+// ── Chromium discovery + launch ──────────────────────────────────────
+
+/// Find a Chromium/Chrome executable, in order of preference:
+/// 1. `THCLAWS_BROWSER_EXECUTABLE` (explicit override)
+/// 2. `PLAYWRIGHT_BROWSERS_PATH` classic layout (`chromium-<rev>/…`) —
+///    the cloud runner image (`/ms-playwright`)
+/// 3. the default playwright cache in the same classic layout
+/// 4. branded Chrome / Chromium at well-known OS paths (what
+///    playwright-mcp's default `chrome` channel uses on desktops)
+pub fn find_chromium() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("THCLAWS_BROWSER_EXECUTABLE") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
+        roots.push(PathBuf::from(p));
+    }
+    if let Some(home) = crate::util::home_dir() {
+        if cfg!(target_os = "macos") {
+            roots.push(home.join("Library/Caches/ms-playwright"));
+        } else {
+            roots.push(home.join(".cache/ms-playwright"));
+        }
+    }
+    for root in roots {
+        if let Some(exe) = newest_classic_chromium(&root) {
+            return Some(exe);
+        }
+    }
+
+    // Branded fallbacks.
+    let candidates: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ]
+    } else if cfg!(target_os = "windows") {
+        &[
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    } else {
+        &[
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+        ]
+    };
+    candidates.iter().map(PathBuf::from).find(|p| p.is_file())
+}
+
+/// Classic ms-playwright layout: `<root>/chromium-<rev>/<platform>/…`.
+/// Picks the highest revision that has a real executable.
+fn newest_classic_chromium(root: &std::path::Path) -> Option<PathBuf> {
+    let mut revs: Vec<(u64, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(rev) = name.strip_prefix("chromium-") {
+            if let Ok(n) = rev.parse::<u64>() {
+                revs.push((n, entry.path()));
+            }
+        }
+    }
+    revs.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+    for (_, dir) in revs {
+        let subpaths: &[&str] = if cfg!(target_os = "macos") {
+            &[
+                "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+                "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
+            ]
+        } else if cfg!(target_os = "windows") {
+            &["chrome-win/chrome.exe", "chrome-win64/chrome.exe"]
+        } else {
+            &["chrome-linux64/chrome", "chrome-linux/chrome"]
+        };
+        for sp in subpaths {
+            let exe = dir.join(sp);
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+/// Arm CDP mode at MCP bootstrap: decide the DevTools endpoint NOW
+/// (so playwright-mcp can be spawned with `--cdp-endpoint`), but defer
+/// the actual Chromium launch to [`ensure_up`] — first browser tool
+/// call or takeover. Re-attaches to a still-running Chromium from a
+/// previous engine process when possible. Returns `None` (one stderr
+/// note) when no Chromium executable exists → caller falls back to
+/// MCP self-launch.
+pub fn arm(headless: bool) -> Option<String> {
+    let mut guard = state().lock().unwrap();
+    if let Some(s) = guard.as_ref() {
+        return Some(s.endpoint.clone());
+    }
+
+    // A previous engine process may have left its Chromium running —
+    // the profile dir records the DevTools endpoint. If it still
+    // answers, RE-ATTACH instead of fighting the profile lock; the
+    // user's sessions survive the engine restart for free.
+    let profile = profile_dir();
+    let endpoint_file = profile.join("devtools-endpoint");
+    if let Ok(saved) = std::fs::read_to_string(&endpoint_file) {
+        let saved = saved.trim().to_string();
+        if endpoint_alive(&saved) {
+            eprintln!("\x1b[2m[browser-cdp] re-attached to running chromium at {saved}\x1b[0m");
+            let port = saved
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0);
+            *guard = Some(CdpState {
+                endpoint: saved.clone(),
+                port,
+                headless,
+                launched: true,
+                child: None,
+            });
+            return Some(saved);
+        }
+        let _ = std::fs::remove_file(&endpoint_file);
+    }
+
+    // Chromium must exist for CDP mode to be worth arming.
+    if find_chromium().is_none() {
+        eprintln!(
+            "\x1b[2m[browser-cdp] no chromium executable found — live view off, playwright-mcp will launch its own browser\x1b[0m"
+        );
+        return None;
+    }
+
+    // Reserve a free port by binding and immediately releasing it —
+    // tiny race window, acceptable: a collision surfaces as a launch
+    // failure and the takeover toggle retries.
+    let port = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l.local_addr().ok().map(|a| a.port()),
+        Err(_) => None,
+    }?;
+    let endpoint = format!("http://127.0.0.1:{port}");
+    *guard = Some(CdpState {
+        endpoint: endpoint.clone(),
+        port,
+        headless,
+        launched: false,
+        child: None,
+    });
+    Some(endpoint)
+}
+
+/// Launch Chromium if it isn't up yet (lazy half of [`arm`]).
+/// Blocking — call via `spawn_blocking` from async contexts. Cheap
+/// fast-path when already launched.
+pub fn ensure_up() -> Result<(), String> {
+    let (port, headless, endpoint) = {
+        let guard = state().lock().unwrap();
+        let s = guard.as_ref().ok_or("CDP mode not armed")?;
+        if s.launched {
+            return Ok(());
+        }
+        (s.port, s.headless, s.endpoint.clone())
+    };
+
+    let exe = find_chromium().ok_or("no chromium executable")?;
+    let profile = profile_dir();
+    let endpoint_file = profile.join("devtools-endpoint");
+
+    // Profile OUTSIDE the workspace on purpose: cookies/sessions must
+    // never ride along when a workspace folder is published as an
+    // agent or synced. Keyed by cwd so two workspaces don't share
+    // logins.
+    let _ = std::fs::create_dir_all(&profile);
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg(format!("--remote-debugging-port={port}"))
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if headless {
+        cmd.arg("--headless=new");
+    }
+    // Containerized chromium has no userns for its own sandbox — the
+    // pod is the sandbox (same reasoning as the runner image's
+    // playwright-mcp flags).
+    if std::env::var("THCLAWS_INSIDE_DOCKER").ok().as_deref() == Some("1")
+        || std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+    {
+        cmd.arg("--no-sandbox");
+    }
+    cmd.arg("about:blank");
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("launch {}: {e}", exe.display()))?;
+
+    // The port is ours, so poll the HTTP endpoint instead of parsing
+    // stderr — robust across chromium variants and locales.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !endpoint_alive(&endpoint) {
+        if std::time::Instant::now() > deadline {
+            return Err("timed out waiting for DevTools endpoint".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    eprintln!(
+        "\x1b[2m[browser-cdp] chromium up ({}) — devtools {endpoint}\x1b[0m",
+        if headless { "headless" } else { "headed" }
+    );
+    let _ = std::fs::write(&endpoint_file, &endpoint);
+    let mut guard = state().lock().unwrap();
+    if let Some(s) = guard.as_mut() {
+        s.launched = true;
+        s.child = Some(child);
+    }
+    Ok(())
+}
+
+/// Minimal blocking health probe of a DevTools HTTP endpoint
+/// (`GET /json/version`). std-only — no blocking reqwest feature.
+fn endpoint_alive(endpoint: &str) -> bool {
+    let Some(addr) = endpoint.strip_prefix("http://") else {
+        return false;
+    };
+    use std::io::{Read, Write};
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+        &match addr.parse() {
+            Ok(a) => a,
+            Err(_) => return false,
+        },
+        std::time::Duration::from_millis(800),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(800)));
+    // HTTP/1.1 + Connection: close — chromium's DevTools server
+    // ignores HTTP/1.0 requests entirely (verified empirically).
+    let req = format!("GET /json/version HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = String::new();
+    let _ = stream.read_to_string(&mut buf);
+    buf.contains("webSocketDebuggerUrl")
+}
+
+fn profile_dir() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    cwd.hash(&mut hasher);
+    let key = format!("{:016x}", hasher.finish());
+    crate::util::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cache/thclaws/browser-profile")
+        .join(key)
+}
+
+/// Kill the engine-owned chromium (used on shutdown paths; best-effort).
+pub fn shutdown() {
+    if let Some(mut s) = state().lock().unwrap().take() {
+        if let Some(child) = s.child.as_mut() {
+            let _ = child.kill();
+        }
+    }
+    *page_slot().lock().unwrap() = None;
+}
+
+// ── CDP page session ─────────────────────────────────────────────────
+
+/// One attached page target: a websocket with JSON-RPC-style calls
+/// (`id`/`method`/`params` → reply by id) plus a stream of events the
+/// reader task routes. Mirrors `McpClient`'s pending-map shape.
+struct PageSession {
+    writer: tokio::sync::Mutex<
+        futures::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            tokio_tungstenite::tungstenite::Message,
+        >,
+    >,
+    pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>,
+    next_id: AtomicU64,
+    screencast_on: AtomicBool,
+    alive: AtomicBool,
+}
+
+impl PageSession {
+    /// Fire-and-forget method send — no reply registration. MUST be
+    /// used from the reader task itself (e.g. screencast acks): a
+    /// reply-awaiting `call` there deadlocks, because the awaited
+    /// reply can only be routed by the very loop that's blocked.
+    async fn notify(&self, method: &str, params: Value) {
+        use futures::SinkExt;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let frame = json!({ "id": id, "method": method, "params": params }).to_string();
+        let _ = self
+            .writer
+            .lock()
+            .await
+            .send(tokio_tungstenite::tungstenite::Message::Text(frame.into()))
+            .await;
+    }
+
+    async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        use futures::SinkExt;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().unwrap().insert(id, tx);
+        let frame = json!({ "id": id, "method": method, "params": params }).to_string();
+        self.writer
+            .lock()
+            .await
+            .send(tokio_tungstenite::tungstenite::Message::Text(frame.into()))
+            .await
+            .map_err(|e| format!("cdp send: {e}"))?;
+        match tokio::time::timeout(std::time::Duration::from_secs(15), rx).await {
+            Ok(Ok(v)) => {
+                if let Some(err) = v.get("error") {
+                    Err(format!("cdp {method}: {err}"))
+                } else {
+                    Ok(v.get("result").cloned().unwrap_or(Value::Null))
+                }
+            }
+            _ => Err(format!("cdp {method}: timed out")),
+        }
+    }
+}
+
+/// Pick the most recently opened page target from `/json/list`.
+async fn page_ws_url(endpoint: &str) -> Result<String, String> {
+    let body = reqwest::get(format!("{endpoint}/json/list"))
+        .await
+        .map_err(|e| format!("cdp /json/list: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("cdp /json/list body: {e}"))?;
+    let targets: Vec<Value> =
+        serde_json::from_str(&body).map_err(|e| format!("cdp /json/list parse: {e}"))?;
+    targets
+        .iter()
+        .find(|t| t.get("type").and_then(Value::as_str) == Some("page"))
+        .and_then(|t| t.get("webSocketDebuggerUrl").and_then(Value::as_str))
+        .map(String::from)
+        .ok_or_else(|| "no page target".to_string())
+}
+
+/// Attach to the current page and start the live wire: screencast
+/// frames + console/exception events + navigation notices, all pushed
+/// through `dispatch` as frontend-ready JSON envelopes.
+async fn attach_and_start(endpoint: String, dispatch: Dispatch) -> Result<(), String> {
+    use futures::StreamExt;
+    let ws_url = page_ws_url(&endpoint).await?;
+    let (stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .map_err(|e| format!("cdp connect: {e}"))?;
+    let (writer, mut reader) = stream.split();
+
+    let session = Arc::new(PageSession {
+        writer: tokio::sync::Mutex::new(writer),
+        pending: Mutex::new(HashMap::new()),
+        next_id: AtomicU64::new(1),
+        screencast_on: AtomicBool::new(false),
+        alive: AtomicBool::new(true),
+    });
+
+    // Reader task: route replies by id; convert events into dispatches.
+    let s2 = session.clone();
+    let d2 = dispatch.clone();
+    rt().spawn(async move {
+        while let Some(Ok(msg)) = reader.next().await {
+            let tokio_tungstenite::tungstenite::Message::Text(text) = msg else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            if let Some(id) = v.get("id").and_then(Value::as_u64) {
+                if let Some(tx) = s2.pending.lock().unwrap().remove(&id) {
+                    let _ = tx.send(v);
+                }
+                continue;
+            }
+            match v.get("method").and_then(Value::as_str) {
+                Some("Page.screencastFrame") => {
+                    let p = v.get("params").cloned().unwrap_or(Value::Null);
+                    if let Some(data) = p.get("data").and_then(Value::as_str) {
+                        d2(json!({
+                            "type": "browser_frame",
+                            "data": data,
+                        })
+                        .to_string());
+                    }
+                    if let Some(sid) = p.get("sessionId") {
+                        // Ack AFTER forwarding — natural backpressure —
+                        // but fire-and-forget: awaiting the ack's REPLY
+                        // here would deadlock the reader (it's the only
+                        // task that can route replies).
+                        s2.notify("Page.screencastFrameAck", json!({ "sessionId": sid }))
+                            .await;
+                    }
+                }
+                Some("Runtime.consoleAPICalled") => {
+                    let p = v.get("params").cloned().unwrap_or(Value::Null);
+                    let level = p.get("type").and_then(Value::as_str).unwrap_or("log");
+                    let text: Vec<String> = p
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| {
+                                    x.get("value").map(|v| match v.as_str() {
+                                        Some(s) => s.to_string(),
+                                        None => v.to_string(),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    d2(json!({
+                        "type": "browser_console",
+                        "level": level,
+                        "text": text.join(" "),
+                    })
+                    .to_string());
+                }
+                Some("Runtime.exceptionThrown") => {
+                    let desc = v
+                        .pointer("/params/exceptionDetails/exception/description")
+                        .or_else(|| v.pointer("/params/exceptionDetails/text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("uncaught exception");
+                    d2(json!({
+                        "type": "browser_console",
+                        "level": "error",
+                        "text": desc,
+                    })
+                    .to_string());
+                }
+                Some("Page.frameNavigated") => {
+                    if let Some(url) = v.pointer("/params/frame/url").and_then(Value::as_str) {
+                        // Only top-level frames carry no parentId.
+                        if v.pointer("/params/frame/parentId").is_none() {
+                            d2(json!({ "type": "browser_nav", "url": url }).to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        s2.alive.store(false, Ordering::SeqCst);
+    });
+
+    session.call("Page.enable", json!({})).await?;
+    session.call("Runtime.enable", json!({})).await?;
+    session
+        .call(
+            "Page.startScreencast",
+            json!({
+                "format": "jpeg",
+                "quality": 60,
+                "maxWidth": 1366,
+                "maxHeight": 900,
+            }),
+        )
+        .await?;
+    session.screencast_on.store(true, Ordering::SeqCst);
+
+    *page_slot().lock().unwrap() = Some(session);
+    Ok(())
+}
+
+// ── Public sync API (call from non-tokio threads only) ───────────────
+
+/// Start (or restart) the live screencast, pushing frames + console
+/// events through `dispatch`. Re-attaches to the currently active
+/// page every time, so a takeover toggle recovers from closed tabs.
+pub fn screencast_start(dispatch: Dispatch) -> Result<(), String> {
+    ensure_up()?;
+    let endpoint = state()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.endpoint.clone())
+        .ok_or("engine-owned browser not running (CDP off)")?;
+    // Drop any previous session — its reader task ends when the ws does.
+    if let Some(old) = page_slot().lock().unwrap().take() {
+        let _ = rt().block_on(old.call("Page.stopScreencast", json!({})));
+    }
+    rt().block_on(attach_and_start(endpoint, dispatch))
+}
+
+pub fn screencast_stop() {
+    if let Some(s) = page_slot().lock().unwrap().take() {
+        let _ = rt().block_on(s.call("Page.stopScreencast", json!({})));
+    }
+}
+
+/// Native input on the live page. `kind`: click | move | wheel |
+/// text | key. Coordinates are page CSS pixels (the screencast frame's
+/// own space).
+pub fn input(kind: &str, args: &Value) -> Result<(), String> {
+    let session = page_slot()
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no live page session — start the screencast first")?;
+    if !session.alive.load(Ordering::SeqCst) {
+        return Err("live page session closed — toggle takeover to re-attach".into());
+    }
+    let get_f = |k: &str| args.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    rt().block_on(async {
+        match kind {
+            "click" => {
+                let (x, y) = (get_f("x"), get_f("y"));
+                let base = json!({
+                    "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1,
+                });
+                let mut press = base.clone();
+                press["type"] = json!("mousePressed");
+                session.call("Input.dispatchMouseEvent", press).await?;
+                let mut release = base;
+                release["type"] = json!("mouseReleased");
+                session.call("Input.dispatchMouseEvent", release).await?;
+            }
+            "move" => {
+                session
+                    .call(
+                        "Input.dispatchMouseEvent",
+                        json!({
+                            "type": "mouseMoved",
+                            "x": get_f("x"), "y": get_f("y"),
+                        }),
+                    )
+                    .await?;
+            }
+            "wheel" => {
+                session
+                    .call(
+                        "Input.dispatchMouseEvent",
+                        json!({
+                            "type": "mouseWheel",
+                            "x": get_f("x"), "y": get_f("y"),
+                            "deltaX": get_f("deltaX"), "deltaY": get_f("deltaY"),
+                        }),
+                    )
+                    .await?;
+            }
+            "text" => {
+                let text = args.get("text").and_then(Value::as_str).unwrap_or("");
+                if text.is_empty() || text.chars().count() > 2000 {
+                    return Err("text input needs 1-2000 characters".into());
+                }
+                session
+                    .call("Input.insertText", json!({ "text": text }))
+                    .await?;
+            }
+            "key" => {
+                let key = args.get("key").and_then(Value::as_str).unwrap_or("");
+                let (code, vk, text) = match key {
+                    "Enter" => ("Enter", 13, Some("\r")),
+                    "Tab" => ("Tab", 9, None),
+                    "Backspace" => ("Backspace", 8, None),
+                    "Escape" => ("Escape", 27, None),
+                    "Delete" => ("Delete", 46, None),
+                    "ArrowUp" => ("ArrowUp", 38, None),
+                    "ArrowDown" => ("ArrowDown", 40, None),
+                    "ArrowLeft" => ("ArrowLeft", 37, None),
+                    "ArrowRight" => ("ArrowRight", 39, None),
+                    other => return Err(format!("unsupported key: {other}")),
+                };
+                let mut down = json!({
+                    "type": "keyDown",
+                    "key": key, "code": code,
+                    "windowsVirtualKeyCode": vk,
+                    "nativeVirtualKeyCode": vk,
+                });
+                if let Some(t) = text {
+                    down["text"] = json!(t);
+                }
+                session.call("Input.dispatchKeyEvent", down).await?;
+                session
+                    .call(
+                        "Input.dispatchKeyEvent",
+                        json!({
+                            "type": "keyUp",
+                            "key": key, "code": code,
+                            "windowsVirtualKeyCode": vk,
+                            "nativeVirtualKeyCode": vk,
+                        }),
+                    )
+                    .await?;
+            }
+            other => return Err(format!("unsupported input kind: {other}")),
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classic_layout_discovery_picks_highest_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let sub = if cfg!(target_os = "macos") {
+            "chrome-mac/Chromium.app/Contents/MacOS"
+        } else if cfg!(target_os = "windows") {
+            "chrome-win64"
+        } else {
+            "chrome-linux64"
+        };
+        let exe_name = if cfg!(target_os = "macos") {
+            "Chromium"
+        } else if cfg!(target_os = "windows") {
+            "chrome.exe"
+        } else {
+            "chrome"
+        };
+        for rev in ["chromium-1100", "chromium-1226"] {
+            let dir = root.join(rev).join(sub);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(exe_name), b"x").unwrap();
+        }
+        let found = newest_classic_chromium(root).expect("found");
+        assert!(found.to_string_lossy().contains("chromium-1226"));
+    }
+
+    #[test]
+    fn profile_dir_is_outside_workspace() {
+        let p = profile_dir();
+        let cwd = std::env::current_dir().unwrap();
+        assert!(
+            !p.starts_with(&cwd),
+            "profile must not live in the workspace: {p:?}"
+        );
+        assert!(p.to_string_lossy().contains("browser-profile"));
+    }
+}

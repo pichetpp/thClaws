@@ -1450,6 +1450,36 @@ async fn run_worker(
         let approver_for_spawn = approver.clone();
         let input_tx_for_spawn = input_tx_self.clone();
         tokio::spawn(async move {
+            let mut server_cfg = server_cfg;
+            // docs/browser slice 3: for the engine-managed browser,
+            // launch Chromium OURSELVES (DevTools port) and attach
+            // playwright-mcp to it via --cdp-endpoint — the engine's
+            // own CDP session then drives the Browser tab's live view.
+            // Any failure falls back to MCP self-launch (current
+            // behavior); THCLAWS_BROWSER_CDP=0 is the kill switch.
+            if server_cfg.name == "browser"
+                && server_cfg.engine_managed
+                && std::env::var("THCLAWS_BROWSER_CDP").ok().as_deref() != Some("0")
+                && !server_cfg
+                    .args
+                    .iter()
+                    .any(|a| a.starts_with("--cdp-endpoint"))
+            {
+                let headless = server_cfg.args.iter().any(|a| a == "--headless");
+                // arm() reserves the endpoint without launching
+                // Chromium (lazy — first browser use launches it), but
+                // it may probe a saved endpoint for ~1s, so keep it
+                // off the async worker.
+                let endpoint =
+                    tokio::task::spawn_blocking(move || crate::browser_cdp::arm(headless))
+                        .await
+                        .ok()
+                        .flatten();
+                if let Some(endpoint) = endpoint {
+                    server_cfg.args.push("--cdp-endpoint".into());
+                    server_cfg.args.push(endpoint);
+                }
+            }
             let server_name = server_cfg.name.clone();
             match crate::mcp::McpClient::spawn_with_approver(server_cfg, Some(approver_for_spawn))
                 .await

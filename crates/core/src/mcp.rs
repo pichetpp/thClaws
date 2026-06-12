@@ -1113,6 +1113,83 @@ fn extract_text(result: &Value) -> String {
         .join("\n")
 }
 
+/// Per-result cap on image payload forwarded to the model. Same value
+/// as the Read tool's image cap; a viewport screenshot is ~30-300 KB,
+/// so this only trips on pathological full-page captures.
+const MAX_MCP_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Convert a `tools/call` result into multimodal blocks, preserving
+/// `{type:"image", data, mimeType}` parts in server order. Returns
+/// `None` when the result has no image blocks — callers fall back to
+/// the plain `extract_text` path so text-only tools behave exactly as
+/// before. Oversize images degrade to a text note rather than erroring
+/// (the tool DID succeed; we just decline to ship the bytes).
+fn mcp_content_to_blocks(result: &Value) -> Option<crate::types::ToolResultContent> {
+    use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
+    let content = result.get("content").and_then(Value::as_array)?;
+    if !content
+        .iter()
+        .any(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+    {
+        return None;
+    }
+    let mut blocks: Vec<ToolResultBlock> = Vec::new();
+    let mut image_budget = MAX_MCP_IMAGE_BYTES;
+    for b in content {
+        match b.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(t) = b.get("text").and_then(Value::as_str) {
+                    blocks.push(ToolResultBlock::Text {
+                        text: t.to_string(),
+                    });
+                }
+            }
+            Some("image") => {
+                let Some(data) = b.get("data").and_then(Value::as_str) else {
+                    continue;
+                };
+                // base64 → raw size ≈ 3/4 of the string length.
+                let approx_bytes = data.len() / 4 * 3;
+                if approx_bytes > image_budget {
+                    blocks.push(ToolResultBlock::Text {
+                        text: format!(
+                            "[image omitted: ~{} KB exceeds the {} KB tool-result image cap]",
+                            approx_bytes / 1024,
+                            MAX_MCP_IMAGE_BYTES / 1024
+                        ),
+                    });
+                    continue;
+                }
+                image_budget -= approx_bytes;
+                let media_type = b
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png")
+                    .to_string();
+                blocks.push(ToolResultBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type,
+                        data: data.to_string(),
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+    // Non-multimodal providers render via to_text(), which drops Image
+    // blocks — guarantee at least one text block so they never see an
+    // empty result.
+    if !blocks
+        .iter()
+        .any(|b| matches!(b, ToolResultBlock::Text { .. }))
+    {
+        blocks.push(ToolResultBlock::Text {
+            text: "(image attached)".to_string(),
+        });
+    }
+    Some(ToolResultContent::Blocks(blocks))
+}
+
 // ---------------------------------------------------------------------------
 // McpTool — adapter that implements the existing Tool trait.
 // ---------------------------------------------------------------------------
@@ -1211,6 +1288,21 @@ impl McpTool {
     }
 }
 
+impl McpTool {
+    /// docs/browser slice 3: the engine-owned Chromium launches
+    /// LAZILY — when CDP mode is armed, the browser MCP server was
+    /// spawned with `--cdp-endpoint` pointing at a port nothing
+    /// listens on yet. Raise Chromium before the first browser tool
+    /// call connects. No-op (one atomic load) once launched, and a
+    /// failure here just lets the tool call surface its own error.
+    async fn lazy_browser_up(&self) {
+        if self.client.name() != "browser" || !crate::browser_cdp::cdp_active() {
+            return;
+        }
+        let _ = tokio::task::spawn_blocking(crate::browser_cdp::ensure_up).await;
+    }
+}
+
 #[async_trait]
 impl Tool for McpTool {
     fn name(&self) -> &'static str {
@@ -1226,7 +1318,25 @@ impl Tool for McpTool {
     }
 
     async fn call(&self, input: Value) -> Result<String> {
+        self.lazy_browser_up().await;
         self.client.call_tool(self.bare_name(), input).await
+    }
+
+    /// Multimodal variant: preserves `{type:"image"}` content blocks so
+    /// vision models can actually SEE what an MCP tool returns — most
+    /// importantly `browser_take_screenshot`, whose image the plain
+    /// text path (`extract_text`) silently dropped, leaving the agent
+    /// blind to canvases/charts/visual layouts the accessibility
+    /// snapshot can't express. Text-only results keep the exact
+    /// `call()` behavior; non-multimodal providers still get the text
+    /// blocks via `ToolResultContent::to_text()`.
+    async fn call_multimodal(&self, input: Value) -> Result<crate::types::ToolResultContent> {
+        self.lazy_browser_up().await;
+        let result = self.client.call_tool_raw(self.bare_name(), input).await?;
+        match mcp_content_to_blocks(&result) {
+            Some(blocks) => Ok(blocks),
+            None => Ok(crate::types::ToolResultContent::Text(extract_text(&result))),
+        }
     }
 
     fn requires_approval(&self, _input: &Value) -> bool {
@@ -1741,6 +1851,46 @@ pub async fn reauth_server(
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    #[test]
+    fn mcp_content_to_blocks_preserves_images() {
+        use crate::types::{ToolResultBlock, ToolResultContent};
+        // text-only → None (caller keeps the plain-text path)
+        let text_only = serde_json::json!({"content":[{"type":"text","text":"hi"}]});
+        assert!(mcp_content_to_blocks(&text_only).is_none());
+
+        // image + text → Blocks in server order, mime preserved
+        let mixed = serde_json::json!({"content":[
+            {"type":"image","data":"aGVsbG8=","mimeType":"image/jpeg"},
+            {"type":"text","text":"viewport screenshot"},
+        ]});
+        let Some(ToolResultContent::Blocks(blocks)) = mcp_content_to_blocks(&mixed) else {
+            panic!("expected blocks");
+        };
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(
+            &blocks[0],
+            ToolResultBlock::Image { source: crate::types::ImageSource::Base64 { media_type, .. } }
+                if media_type == "image/jpeg"
+        ));
+        assert!(
+            matches!(&blocks[1], ToolResultBlock::Text { text } if text == "viewport screenshot")
+        );
+
+        // oversize image degrades to a text note + synthetic text block
+        let big = "A".repeat((5 * 1024 * 1024 / 3 * 4) + 8);
+        let oversize =
+            serde_json::json!({"content":[{"type":"image","data": big,"mimeType":"image/png"}]});
+        let Some(ToolResultContent::Blocks(blocks)) = mcp_content_to_blocks(&oversize) else {
+            panic!("expected blocks");
+        };
+        assert!(blocks
+            .iter()
+            .all(|b| matches!(b, ToolResultBlock::Text { .. })));
+        assert!(
+            matches!(&blocks[0], ToolResultBlock::Text { text } if text.contains("image omitted"))
+        );
+    }
 
     /// Security property of the allowlist bypass: `engine_managed` is
     /// `#[serde(skip)]`, so a malicious mcp.json declaring it cannot

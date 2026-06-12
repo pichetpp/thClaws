@@ -2096,8 +2096,73 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "headless": headless,
                 "command": format!("{} {}", server.command, server.args.join(" ")),
                 "command_found": command_found,
+                // slice 3: engine owns the chromium → live screencast
+                // + native CDP input are available.
+                "cdp": crate::browser_cdp::cdp_active(),
             });
             (ctx.dispatch)(payload.to_string());
+        }
+
+        // docs/browser slice 3 — live view. Start pushes `browser_frame`
+        // (JPEG base64) + `browser_console` + `browser_nav` envelopes
+        // through this client's dispatch until stop. Each start
+        // re-attaches to the currently active page, so toggling
+        // takeover recovers from closed tabs.
+        "browser_screencast_start" => {
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                let result = crate::browser_cdp::screencast_start(dispatch.clone());
+                let reply = match result {
+                    Ok(()) => serde_json::json!({
+                        "type": "browser_screencast", "ok": true, "active": true,
+                    }),
+                    Err(e) => serde_json::json!({
+                        "type": "browser_screencast", "ok": false, "active": false, "error": e,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
+        }
+
+        "browser_screencast_stop" => {
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                crate::browser_cdp::screencast_stop();
+                dispatch(
+                    serde_json::json!({
+                        "type": "browser_screencast", "ok": true, "active": false,
+                    })
+                    .to_string(),
+                );
+            });
+        }
+
+        // Native input on the live page (mouse/keyboard via the CDP
+        // Input domain — insertText types whole strings in one shot).
+        // Same trust posture as browser_input_call: UI-initiated,
+        // input + navigation only, no script-execution surface.
+        "browser_cdp_input" => {
+            let kind = msg
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = msg.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                let result = crate::browser_cdp::input(&kind, &args);
+                let reply = match result {
+                    Ok(()) => serde_json::json!({
+                        "type": "browser_input_result", "ok": true,
+                        "tool": format!("cdp_{kind}"),
+                    }),
+                    Err(e) => serde_json::json!({
+                        "type": "browser_input_result", "ok": false,
+                        "tool": format!("cdp_{kind}"), "error": e,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
         }
 
         // Browser-tab screenshot capture (docs/browser Phase 1). UI-

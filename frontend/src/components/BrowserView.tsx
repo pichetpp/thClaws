@@ -24,19 +24,20 @@ type BrowserStatus = {
   headless: boolean;
   command: string;
   command_found: boolean;
+  cdp: boolean;
 };
 
 type ActivityEntry = {
   id: number;
   at: string;
-  kind: "call" | "result";
+  kind: "call" | "result" | "console";
   tool: string;
   detail: string;
 };
 
 type ChatMsg = {
   id: number;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   text: string;
 };
 
@@ -61,6 +62,10 @@ export function BrowserView({ active }: { active: boolean }) {
   // clickable/typeable — every action routes through the allowlisted
   // `browser_input_call` arm and refreshes the screenshot.
   const [takeover, setTakeover] = useState(false);
+  // slice 3: live CDP screencast — frames stream in while takeover is
+  // on and the engine owns the browser; falls back to screenshots.
+  const [live, setLive] = useState(false);
+  const [pageUrl, setPageUrl] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [typeInput, setTypeInput] = useState("");
   const [inputErr, setInputErr] = useState("");
@@ -110,6 +115,10 @@ export function BrowserView({ active }: { active: boolean }) {
     if (!takeover) return;
     const pt = imgClickCoords(e);
     if (!pt) return;
+    if (liveRef.current) {
+      send({ type: "browser_cdp_input", kind: "click", args: { x: pt.x, y: pt.y } });
+      return;
+    }
     sendInput("browser_mouse_click_xy", {
       element: "user takeover click",
       x: pt.x,
@@ -117,11 +126,24 @@ export function BrowserView({ active }: { active: boolean }) {
     });
   }
 
+  function onShotMouseMove(e: React.MouseEvent<HTMLImageElement>) {
+    if (!takeoverRef.current) return;
+    const pt = imgClickCoords(e);
+    if (pt) hoverPos.current = pt;
+  }
+
   // Wheel → remote scroll, throttled by accumulating deltas. Attached
   // via ref with passive:false so the local pane doesn't also scroll.
   const wheelAcc = useRef({ x: 0, y: 0, timer: null as number | null });
   const takeoverRef = useRef(takeover);
   takeoverRef.current = takeover;
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const statusRef = useRef<BrowserStatus | null>(null);
+  statusRef.current = status;
+  // Last pointer position over the page image (page coordinates) —
+  // CDP wheel events want x/y context.
+  const hoverPos = useRef({ x: 0, y: 0 });
   const shotImgRef = useRef<HTMLImageElement | null>(null);
   useEffect(() => {
     const img = shotImgRef.current;
@@ -148,6 +170,7 @@ export function BrowserView({ active }: { active: boolean }) {
   }, [shot !== null]);
 
   function scheduleShot() {
+    if (liveRef.current) return; // screencast frames already flow
     if (!activeRef.current) {
       staleShot.current = true;
       return;
@@ -167,6 +190,7 @@ export function BrowserView({ active }: { active: boolean }) {
           headless: Boolean(msg.headless),
           command: typeof msg.command === "string" ? msg.command : "",
           command_found: Boolean(msg.command_found),
+          cdp: Boolean(msg.cdp),
         });
         return;
       }
@@ -185,6 +209,29 @@ export function BrowserView({ active }: { active: boolean }) {
         }
         return;
       }
+      if (msg.type === "browser_frame" && typeof msg.data === "string") {
+        setShot({
+          src: `data:image/jpeg;base64,${msg.data}`,
+          at: new Date().toLocaleTimeString([], { hour12: false }),
+        });
+        return;
+      }
+      if (msg.type === "browser_screencast") {
+        setLive(Boolean(msg.active));
+        if (!msg.ok && typeof msg.error === "string") setInputErr(msg.error);
+        return;
+      }
+      if (msg.type === "browser_console" && typeof msg.text === "string") {
+        const level = typeof msg.level === "string" ? msg.level : "log";
+        if (level === "error" || level === "warning") {
+          push("console", level, shorten(msg.text, 300));
+        }
+        return;
+      }
+      if (msg.type === "browser_nav" && typeof msg.url === "string") {
+        setPageUrl(msg.url);
+        return;
+      }
       if (msg.type === "browser_input_result") {
         if (msg.ok) {
           // The page just changed under user input — refresh promptly.
@@ -198,13 +245,41 @@ export function BrowserView({ active }: { active: boolean }) {
         setBusy(Boolean(msg.busy));
         return;
       }
-      // Sidebar chat transcript — same events the Chat tab renders.
+      // Sidebar chat transcript — the SAME shared conversation the
+      // Chat + Terminal tabs render. Session-level events (slash
+      // output, /clear, /load, /new) keep all three views in sync.
       if (msg.type === "chat_user_message" && typeof msg.text === "string") {
         pushChat("user", msg.text);
         return;
       }
       if (msg.type === "chat_text_delta" && typeof msg.text === "string") {
         appendAssistant(msg.text);
+        return;
+      }
+      if (msg.type === "chat_slash_output" && typeof msg.text === "string") {
+        pushChat("system", msg.text);
+        return;
+      }
+      if (msg.type === "chat_error" && typeof msg.text === "string") {
+        pushChat("system", `⚠ ${msg.text}`);
+        return;
+      }
+      if (msg.type === "new_session_ack") {
+        setChat([]);
+        return;
+      }
+      if (msg.type === "chat_history_replaced") {
+        const restored: ChatMsg[] = [];
+        if (Array.isArray(msg.messages)) {
+          for (const m of msg.messages as { role: string; content: string }[]) {
+            if (typeof m.content !== "string" || !m.content) continue;
+            if (m.role === "user") restored.push({ id: nextId.current++, role: "user", text: m.content });
+            else if (m.role === "assistant") restored.push({ id: nextId.current++, role: "assistant", text: m.content });
+            // tool/system entries stay in the full Chat tab; the
+            // sidebar keeps the compact user/assistant thread.
+          }
+        }
+        setChat(restored.slice(-MAX_CHAT));
         return;
       }
       if (msg.type === "chat_done") {
@@ -231,7 +306,7 @@ export function BrowserView({ active }: { active: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function push(kind: "call" | "result", tool: string, detail: string) {
+  function push(kind: ActivityEntry["kind"], tool: string, detail: string) {
     const at = new Date().toLocaleTimeString([], { hour12: false });
     setEntries((prev) => {
       const next = [...prev, { id: nextId.current++, at, kind, tool, detail }];
@@ -239,7 +314,7 @@ export function BrowserView({ active }: { active: boolean }) {
     });
   }
 
-  function pushChat(role: "user" | "assistant", text: string) {
+  function pushChat(role: ChatMsg["role"], text: string) {
     setChat((prev) => {
       const next = [...prev, { id: nextId.current++, role, text }];
       return next.length > MAX_CHAT ? next.slice(next.length - MAX_CHAT) : next;
@@ -272,6 +347,18 @@ export function BrowserView({ active }: { active: boolean }) {
     if (active && staleShot.current) requestShot();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
+
+  // slice 3: screencast lifecycle — run while takeover is on, the tab
+  // is visible, and the engine owns the browser (status.cdp).
+  useEffect(() => {
+    const want = takeover && active && Boolean(status?.cdp);
+    if (want && !live) {
+      send({ type: "browser_screencast_start" });
+    } else if (!want && live) {
+      send({ type: "browser_screencast_stop" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [takeover, active, status?.cdp]);
 
   useEffect(() => {
     if (active && listRef.current) {
@@ -388,6 +475,7 @@ export function BrowserView({ active }: { active: boolean }) {
                     outlineOffset: -2,
                   }}
                   onClick={onShotClick}
+                  onMouseMove={onShotMouseMove}
                   draggable={false}
                 />
                 <div
@@ -396,7 +484,9 @@ export function BrowserView({ active }: { active: boolean }) {
                 >
                   <span>
                     {takeover
-                      ? "takeover: click / scroll on the page, type below"
+                      ? live
+                        ? `● LIVE — click / scroll / type${pageUrl ? ` · ${shorten(pageUrl, 60)}` : ""}`
+                        : "takeover: click / scroll on the page, type below"
                       : "auto-captured after browser actions"}
                   </span>
                   <span>{shot.at}</span>
@@ -453,7 +543,11 @@ export function BrowserView({ active }: { active: boolean }) {
                     onChange={(e) => setTypeInput(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && typeInput) {
-                        sendInput("type_text", { text: typeInput });
+                        if (live) {
+                          send({ type: "browser_cdp_input", kind: "text", args: { text: typeInput } });
+                        } else {
+                          sendInput("type_text", { text: typeInput });
+                        }
                         setTypeInput("");
                       }
                     }}
@@ -468,7 +562,11 @@ export function BrowserView({ active }: { active: boolean }) {
                   {["Enter", "Tab", "Escape", "Backspace"].map((k) => (
                     <button
                       key={k}
-                      onClick={() => sendInput("browser_press_key", { key: k })}
+                      onClick={() =>
+                        live
+                          ? send({ type: "browser_cdp_input", kind: "key", args: { key: k } })
+                          : sendInput("browser_press_key", { key: k })
+                      }
                       className="text-[10px] px-1.5 py-1 rounded border font-mono"
                       style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
                       title={`Press ${k}`}
@@ -506,9 +604,18 @@ export function BrowserView({ active }: { active: boolean }) {
                 <span style={{ color: "var(--text-secondary)" }}>{e.at}</span>
                 <span
                   className="shrink-0"
-                  style={{ color: e.kind === "call" ? "var(--accent)" : "var(--text-secondary)" }}
+                  style={{
+                    color:
+                      e.kind === "call"
+                        ? "var(--accent)"
+                        : e.kind === "console"
+                          ? e.tool === "error"
+                            ? "#dc2626"
+                            : "#d97706"
+                          : "var(--text-secondary)",
+                  }}
                 >
-                  {e.kind === "call" ? "→" : "←"}
+                  {e.kind === "call" ? "→" : e.kind === "console" ? "◆" : "←"}
                 </span>
                 <span className="shrink-0 font-semibold" style={{ color: "var(--text-primary)" }}>
                   {e.tool}
@@ -552,7 +659,9 @@ export function BrowserView({ active }: { active: boolean }) {
               style={
                 m.role === "user"
                   ? { background: "var(--accent)", color: "white", alignSelf: "flex-end", maxWidth: "92%" }
-                  : { background: "var(--bg-primary)", color: "var(--text-primary)", alignSelf: "flex-start", maxWidth: "92%", border: "1px solid var(--border)" }
+                  : m.role === "system"
+                    ? { background: "transparent", color: "var(--text-secondary)", alignSelf: "stretch", maxWidth: "100%", fontFamily: "ui-monospace, monospace", fontSize: 11, whiteSpace: "pre-wrap" }
+                    : { background: "var(--bg-primary)", color: "var(--text-primary)", alignSelf: "flex-start", maxWidth: "92%", border: "1px solid var(--border)" }
               }
             >
               {m.text}

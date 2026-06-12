@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-06-12
+
+### Added
+- **Live browser view + native input (CDP, docs/browser slice 3).**
+  The engine now owns Chromium: at browser-MCP bootstrap it reserves a
+  DevTools endpoint and hands playwright-mcp `--cdp-endpoint`, so the
+  agent's tools and the human share ONE browser. Chromium itself
+  launches lazily — on the first browser tool call or takeover — so a
+  headed desktop doesn't pop a window at app start and an idle cloud
+  pod pays nothing. The engine's own CDP session powers the Browser
+  tab when takeover is on:
+  - `Page.startScreencast` → a true live view (JPEG stream,
+    ack-backpressured) instead of ~1 fps click-through screenshots
+  - `Input.dispatchMouseEvent` / `Input.insertText` /
+    `dispatchKeyEvent` → native click / scroll / whole-string typing
+  - `Runtime` console + exception events and top-frame navigations
+    stream into the activity feed / URL line
+  - the engine re-attaches to a still-running Chromium after a
+    restart (DevTools endpoint persisted next to the profile), so
+    logins survive engine restarts; profiles live OUTSIDE the
+    workspace so sessions can never leak into a published agent
+  - graceful fallback everywhere: no Chromium found / CDP launch
+    failure → playwright-mcp self-launches and the screenshot +
+    MCP-input takeover keeps working; `THCLAWS_BROWSER_CDP=0`
+    disables the whole mode
+
+### Added
+- **Vision models can now SEE MCP tool images** — most importantly
+  `browser_take_screenshot`. `McpTool` gained a `call_multimodal`
+  override that preserves `{type:"image"}` content blocks (the plain
+  text path silently dropped them), so the agent can read canvases,
+  charts, and visual layouts the accessibility snapshot can't express.
+  5 MB per-result image cap (oversize degrades to a text note);
+  text-only MCP results behave exactly as before; non-multimodal
+  providers still get the text blocks.
+
 ## [0.50.0] - 2026-06-12
 
 ### Added
