@@ -74,6 +74,32 @@ thclaws --telegram
 prints `connected as @yourbot`, and serves messages until Ctrl-C. It
 honours the same project `.thclaws/settings.json` as the REPL.
 
+**Approval prompts in headless mode.** By default the bot runs
+*gated* — every mutating tool call posts inline Approve/Deny buttons to
+your chat. On a small VPS where you'd rather the agent just run, switch
+to **auto** (no prompts) in any of these ways — all are honoured by
+`--telegram`:
+
+```bash
+thclaws --telegram --accept-all            # one-shot: this run, no prompts
+thclaws --telegram --permission-mode auto  # same thing, explicit
+```
+
+…or persist it so every launch is auto, by setting it in
+`.thclaws/settings.json` (the folder you start the bot from):
+
+```json
+{ "permissions": "auto" }
+```
+
+> Auto means the agent runs every tool without asking — only enable it
+> for a bot you trust to act unattended. `/permissions auto` typed in a
+> separate `thclaws --cli` session also writes this to
+> `.thclaws/settings.json`, so a later `thclaws --telegram` from the
+> **same folder** picks it up. (Very old builds didn't persist the CLI
+> command — if yours doesn't, edit `settings.json` directly or use
+> `--accept-all`.)
+
 > **Finding your user id:** message `@userinfobot` (or any "what's my
 > id" bot) on Telegram. `TELEGRAM_OWNER_ID` adds you to the allowlist
 > at startup so you can DM the bot immediately — headless mode has no
@@ -126,9 +152,11 @@ After you tap, the buttons disappear and the message is rewritten to
 show the verdict. No tap within **60 seconds** auto-denies. You can
 also just type `approve` / `deny` as a fallback.
 
-**To stop approvals routing to Telegram:** disconnect from the GUI
-(restores your pre-connect `auto` / `ask` mode), or set
-`/permissions auto`.
+**To stop approvals routing to Telegram:** in the GUI, disconnect
+(restores your pre-connect `auto` / `ask` mode). For a **headless**
+bot, set `auto` — `thclaws --telegram --accept-all`, or
+`"permissions": "auto"` in `.thclaws/settings.json` (see *Approval
+prompts in headless mode* above). Auto runs every tool with no prompt.
 
 ## Groups
 

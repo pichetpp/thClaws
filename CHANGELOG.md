@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-06-13
+
+### Added
+- **Browser cookies/logins persist across restarts.** The
+  engine-owned Chromium profile survives browser and (cloud) pod
+  restarts — on cloud the profile moves to the workspace PVC, and a CDP
+  cookie snapshot/restore (`Storage.getCookies`/`setCookies`) closes
+  chromium's ~30s on-disk-flush window so a login isn't lost to an
+  abrupt kill. The profile is stripped from agent publishing, so
+  cookies never leak into a shared agent.
+- **opencode-go**: `minimax-m3`, `qwen3.7-max`, `qwen3.7-plus` added to
+  the wire-format routing tables (thanks @modtanoii, #158).
+- Server-level integration tests for the `/upload?dir=` endpoint —
+  subdir routing, collision suffix, path-traversal rejection (thanks
+  @modtanoii, #159).
+
+### Fixed
+- **Headless Telegram now honours `auto` permissions (#160).**
+  `thclaws --telegram` hardcoded approval-routing (`telegramgated`), so
+  `--accept-all` / `--permission-mode auto` / `settings.json
+  permissions:auto` were all silently ignored and every tool call
+  demanded an inline-button tap — no-prompt auto was impossible. It now
+  resolves the mode from config; explicit `auto` runs with no prompts.
+  Also: the CLI REPL's `/permissions auto|ask` now persists to
+  `.thclaws/settings.json` (matching the GUI), so the setting survives
+  a restart.
+- `browser_cdp` is no longer behind the `gui` feature — it was
+  referenced unconditionally by `mcp.rs`/`config.rs`, breaking the
+  `thclaws-cli` build.
+
 ## [0.51.0] - 2026-06-12
 
 ### Added

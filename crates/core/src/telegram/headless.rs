@@ -127,6 +127,20 @@ impl TelegramMessageHandler for HeadlessAgentHandler {
     }
 }
 
+/// Permission mode for the headless bot. An explicit `auto` (from
+/// `--accept-all`, `--permission-mode auto`, or `settings.json`
+/// `permissions:auto`) means run with NO approval prompts — the right
+/// choice for an unattended bot. Everything else routes approvals to
+/// the chat as inline buttons (`TelegramGated`). Issue #160: this used
+/// to be hardcoded to TelegramGated, so `auto` was silently ignored.
+fn resolve_perm_mode(permissions: &str) -> PermissionMode {
+    if permissions.eq_ignore_ascii_case("auto") {
+        PermissionMode::Auto
+    } else {
+        PermissionMode::TelegramGated
+    }
+}
+
 /// Run the headless Telegram bot until Ctrl-C or a fatal error (bad
 /// token). Blocks for the process lifetime.
 pub async fn run(config: AppConfig) -> Result<()> {
@@ -218,7 +232,17 @@ pub async fn run(config: AppConfig) -> Result<()> {
     // 4. Agent with the Telegram approver + gated permission mode. Set
     //    the process-global mode too — the agent loop consults
     //    `current_mode()` at each tool gate.
-    crate::permissions::set_current_mode(PermissionMode::TelegramGated);
+    //
+    //    Respect an explicit `auto`: when the operator chose auto via
+    //    `--accept-all`, `--permission-mode auto`, or
+    //    `settings.json::permissions:auto`, run with NO prompts. A
+    //    headless bot on a small VPS can't pop a GUI to approve, and
+    //    forcing TelegramGated regardless meant `auto` was silently
+    //    ignored and every tool call still demanded an inline-button
+    //    tap (issue #160). Otherwise default to TelegramGated so
+    //    approvals route to the chat as buttons.
+    let perm_mode = resolve_perm_mode(&config.permissions);
+    crate::permissions::set_current_mode(perm_mode);
 
     // Tier 2: a ProductionAgentFactory + AgentDefs registry so a
     // forum-topic-routed `agentId` can spin up (and reuse) a per-AgentDef
@@ -242,7 +266,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
         max_tokens: config.max_tokens,
         agent_defs: agent_defs.clone(),
         approver: approver.clone() as Arc<dyn ApprovalSink>,
-        permission_mode: PermissionMode::TelegramGated,
+        permission_mode: perm_mode,
         cancel: Some(cancel.clone()),
         hooks: None,
     });
@@ -250,7 +274,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let default_agent = Agent::new(provider, tools, config.model.clone(), system)
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
-        .with_permission_mode(PermissionMode::TelegramGated)
+        .with_permission_mode(perm_mode)
         .with_approver(approver.clone() as Arc<dyn ApprovalSink>);
 
     let handler: Arc<dyn TelegramMessageHandler> = Arc::new(HeadlessAgentHandler {
@@ -292,5 +316,21 @@ pub async fn run(config: AppConfig) -> Result<()> {
             eprintln!("\x1b[31m[telegram] session ended: {e}\x1b[0m");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_disables_prompts_else_telegram_gated() {
+        // Issue #160: an explicit auto must NOT be overridden by the
+        // headless bot's default approval-routing.
+        assert_eq!(resolve_perm_mode("auto"), PermissionMode::Auto);
+        assert_eq!(resolve_perm_mode("AUTO"), PermissionMode::Auto);
+        assert_eq!(resolve_perm_mode("ask"), PermissionMode::TelegramGated);
+        assert_eq!(resolve_perm_mode(""), PermissionMode::TelegramGated);
+        assert_eq!(resolve_perm_mode("plan"), PermissionMode::TelegramGated);
     }
 }

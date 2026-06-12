@@ -73,6 +73,30 @@ thclaws --telegram
 desktop) พิมพ์ `connected as @yourbot` แล้วเสิร์ฟ message จนกด
 Ctrl-C ใช้ `.thclaws/settings.json` ของโปรเจกต์เดียวกับ REPL
 
+**การ approve tool call ในโหมด headless** ค่าเริ่มต้น bot จะรันแบบ
+*gated* — ทุก tool call ที่แก้ไขข้อมูลจะส่งปุ่ม Approve/Deny เข้ามาใน
+แชต ถ้า VPS เล็กและอยากให้ agent รันเองไม่ต้องคอยกด ให้สลับเป็น
+**auto** (ไม่ถาม) ได้หลายวิธี ซึ่ง `--telegram` รองรับทั้งหมด:
+
+```bash
+thclaws --telegram --accept-all            # ครั้งเดียว: รันรอบนี้แบบไม่ถาม
+thclaws --telegram --permission-mode auto  # เหมือนกัน แต่ระบุชัด
+```
+
+…หรือตั้งให้ถาวรทุกครั้งที่รัน โดยใส่ใน `.thclaws/settings.json`
+(โฟลเดอร์ที่คุณสั่งรัน bot):
+
+```json
+{ "permissions": "auto" }
+```
+
+> auto = agent รันทุก tool โดยไม่ถาม เปิดเฉพาะ bot ที่คุณไว้ใจให้ทำงาน
+> เองได้ การพิมพ์ `/permissions auto` ใน `thclaws --cli` อีกหน้าต่างก็
+> เขียนค่านี้ลง `.thclaws/settings.json` ด้วย ดังนั้น `thclaws
+> --telegram` ที่รันจาก**โฟลเดอร์เดียวกัน**ภายหลังจะใช้ค่านี้ (build
+> เก่ามากๆ อาจไม่เซฟคำสั่งจาก CLI — ถ้าของคุณไม่เซฟ ให้แก้
+> `settings.json` ตรงๆ หรือใช้ `--accept-all`)
+
 > **หา user id ของตัวเอง:** ทัก `@userinfobot` (หรือ bot "what's my
 > id" ตัวไหนก็ได้) บน Telegram `TELEGRAM_OWNER_ID` จะเพิ่มคุณเข้า
 > allowlist ตั้งแต่ตอน start ทำให้ DM bot ได้ทันที — headless ไม่มี
@@ -124,8 +148,11 @@ Tap a button (auto-denies in 60s).
 ภายใน **60 วินาที** จะ auto-deny พิมพ์ `approve` / `deny` แทนการแตะ
 ก็ได้
 
-**อยากเลิกให้ approval route ไป Telegram:** disconnect จาก GUI (คืน
-ค่า mode `auto` / `ask` ก่อน connect) หรือสั่ง `/permissions auto`
+**อยากเลิกให้ approval route ไป Telegram:** บน GUI ให้ disconnect (คืน
+ค่า mode `auto` / `ask` ก่อน connect) ส่วน bot แบบ **headless** ให้ตั้ง
+`auto` — `thclaws --telegram --accept-all` หรือใส่ `"permissions":
+"auto"` ใน `.thclaws/settings.json` (ดูหัวข้อ *การ approve tool call
+ในโหมด headless* ด้านบน) โหมด auto จะรันทุก tool โดยไม่ถาม
 
 ## กลุ่ม (group)
 

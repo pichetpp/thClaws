@@ -4195,6 +4195,21 @@ async fn load_mcp_servers(
 
 /// Non-interactive mode: run a single prompt and print the result to stdout.
 /// Matches the Python `--print` flag behavior.
+/// Persist a CLI `/permissions <mode>` choice to `.thclaws/settings.json`
+/// so it survives the session — matching the GUI/serve behavior
+/// (`shell_dispatch::persist_permission_mode`). Before this, a CLI
+/// `/permissions auto` only changed the in-memory mode, so the
+/// documented "set auto in CLI, then run `--telegram`" flow silently
+/// reverted on restart (issue #160). Returns a short status note.
+fn persist_permission_mode_cli(mode: &str) -> &'static str {
+    let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+    project.set_permissions_mode(mode);
+    match project.save() {
+        Ok(()) => "saved to .thclaws/settings.json",
+        Err(_) => "warning: could not save to .thclaws/settings.json",
+    }
+}
+
 pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
@@ -7505,14 +7520,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 crate::permissions::set_current_mode_and_broadcast(
                                     PermissionMode::Auto,
                                 );
-                                println!("{COLOR_DIM}permissions → auto (no prompts){COLOR_RESET}");
+                                let note = persist_permission_mode_cli("auto");
+                                println!("{COLOR_DIM}permissions → auto (no prompts) ({note}){COLOR_RESET}");
                             }
                             "ask" | "default" => {
                                 agent.permission_mode = PermissionMode::Ask;
                                 crate::permissions::set_current_mode_and_broadcast(
                                     PermissionMode::Ask,
                                 );
-                                println!("{COLOR_DIM}permissions → ask{COLOR_RESET}");
+                                let note = persist_permission_mode_cli("ask");
+                                println!("{COLOR_DIM}permissions → ask ({note}){COLOR_RESET}");
                             }
                             "linegated" | "line" => {
                                 // LINE bridge state lives in the

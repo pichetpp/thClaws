@@ -419,7 +419,12 @@ async fn restore_cookies(endpoint: &str) -> Result<(), String> {
     if cookies.as_array().map(|a| a.is_empty()).unwrap_or(true) {
         return Ok(());
     }
-    browser_call(endpoint, "Storage.setCookies", json!({ "cookies": cookies })).await?;
+    browser_call(
+        endpoint,
+        "Storage.setCookies",
+        json!({ "cookies": cookies }),
+    )
+    .await?;
     Ok(())
 }
 
