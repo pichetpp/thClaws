@@ -2592,6 +2592,7 @@ pub async fn dispatch(
                 // time (mcp::connect_http) so secrets stay out of mcp.json.
                 headers: headers.into_iter().collect(),
                 trusted: false,
+                engine_managed: false,
             };
             persist_and_register_mcp(state, events_tx, cfg, user).await;
         }
@@ -2618,6 +2619,7 @@ pub async fn dispatch(
                 url: String::new(),
                 headers: Default::default(),
                 trusted: false,
+                engine_managed: false,
             };
             persist_and_register_mcp(state, events_tx, cfg, user).await;
         }

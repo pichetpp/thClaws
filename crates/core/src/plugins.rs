@@ -142,6 +142,7 @@ impl McpServerEntry {
             url: self.url.clone(),
             headers: self.headers.clone(),
             trusted: true,
+            engine_managed: false,
         }
     }
 }

@@ -600,6 +600,15 @@ pub struct SharedSessionHandle {
     /// HOME-relative defaults. `None` for single-tenant `--serve`,
     /// desktop GUI, and CLI — those use the legacy paths unchanged.
     pub session_roots: Option<crate::multi_tenant::SessionRoots>,
+    /// docs/browser Phase 1: the engine-managed Playwright MCP client
+    /// (server name `browser`), once connected. Lets the IPC layer
+    /// drive UI-initiated, read-only calls (the Browser tab's
+    /// screenshot capture) directly on the client without routing
+    /// through the agent loop or the worker's input queue (which only
+    /// drains between turns). `None` until `McpReady` for `browser`
+    /// fires, and always `None` when `browserEnabled` is off.
+    pub browser_mcp:
+        std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::mcp::McpClient>>>>,
 }
 
 impl SharedSessionHandle {
@@ -954,6 +963,12 @@ pub fn spawn_with_roots(
     let injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     let workflow_approver = crate::workflow::WorkflowApprover::new();
+    // docs/browser Phase 1: slot the worker fills when the engine-
+    // managed `browser` MCP server connects, read by the IPC layer
+    // for UI-initiated screenshot captures.
+    let browser_mcp: std::sync::Arc<
+        std::sync::RwLock<Option<std::sync::Arc<crate::mcp::McpClient>>>,
+    > = std::sync::Arc::new(std::sync::RwLock::new(None));
 
     let events_tx_for_thread = events_tx.clone();
     let cancel_for_thread = cancel.clone();
@@ -962,6 +977,7 @@ pub fn spawn_with_roots(
     let injection_queue_for_worker = injection_queue.clone();
     let workflow_approver_for_worker = workflow_approver.clone();
     let session_roots_for_worker = session_roots.clone();
+    let browser_mcp_for_worker = browser_mcp.clone();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -975,6 +991,7 @@ pub fn spawn_with_roots(
                 injection_queue_for_worker,
                 workflow_approver_for_worker,
                 session_roots_for_worker,
+                browser_mcp_for_worker,
             ));
         }));
         if let Err(payload) = result {
@@ -998,6 +1015,7 @@ pub fn spawn_with_roots(
         injection_queue,
         workflow_approver,
         session_roots,
+        browser_mcp,
     }
 }
 
@@ -1144,6 +1162,7 @@ async fn run_worker(
     injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
     workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
     session_roots: Option<crate::multi_tenant::SessionRoots>,
+    browser_mcp: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::mcp::McpClient>>>>,
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = AppConfig::load().unwrap_or_default();
@@ -2032,6 +2051,12 @@ async fn run_worker(
                 for info in tool_infos {
                     let tool = crate::mcp::McpTool::new(client.clone(), info);
                     state.tool_registry.register(std::sync::Arc::new(tool));
+                }
+                // docs/browser Phase 1: expose the engine-managed
+                // browser client to the IPC layer (Browser-tab
+                // screenshot capture bypasses the agent loop).
+                if server_name == "browser" {
+                    *browser_mcp.write().unwrap() = Some(client.clone());
                 }
                 state.mcp_clients.push(client);
                 // Re-assemble the system prompt FIRST so the new

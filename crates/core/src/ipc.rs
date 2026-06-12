@@ -2074,6 +2074,108 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Browser tab status (docs/browser Phase 1). Reports the
+        // engine-managed Playwright MCP config so the tab can show
+        // enabled/headed state + a setup hint when npx is missing.
+        // Live activity is derived client-side from the existing
+        // chat_tool_call/chat_tool_result stream (names `browser.*`).
+        "browser_status_get" => {
+            let cfg = crate::config::AppConfig::load().ok();
+            let enabled = cfg.as_ref().map(|c| c.browser_enabled).unwrap_or(false);
+            let server = crate::config::AppConfig::browser_mcp_config(
+                cfg.as_ref().and_then(|c| c.browser_headless),
+            );
+            let headless = server.args.iter().any(|a| a == "--headless");
+            // Resolve the launch command on PATH (or as an absolute
+            // path) — `npx` on desktop, the image-preinstalled
+            // `mcp-server-playwright` when THCLAWS_BROWSER_MCP_CMD is
+            // set (cloud runners).
+            let cmd_path = std::path::Path::new(&server.command);
+            let command_found = if cmd_path.is_absolute() {
+                cmd_path.is_file()
+            } else {
+                std::env::var_os("PATH")
+                    .map(|p| {
+                        std::env::split_paths(&p).any(|d| {
+                            d.join(&server.command).is_file()
+                                || d.join(format!("{}.cmd", server.command)).is_file()
+                        })
+                    })
+                    .unwrap_or(false)
+            };
+            let payload = serde_json::json!({
+                "type": "browser_status",
+                "enabled": enabled,
+                "headless": headless,
+                "command": format!("{} {}", server.command, server.args.join(" ")),
+                "command_found": command_found,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        // Browser-tab screenshot capture (docs/browser Phase 1). UI-
+        // initiated + read-only, so it runs DIRECTLY on the managed
+        // `browser` MCP client — not through the agent loop (no tokens)
+        // and not through the worker input queue (which only drains
+        // between turns; this works mid-run). Uses call_tool_raw
+        // because the regular text path drops image content blocks.
+        "browser_screenshot_get" => {
+            let slot = ctx.shared.browser_mcp.clone();
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                let outcome: std::result::Result<(String, String), String> = (|| {
+                    let client = slot
+                        .read()
+                        .unwrap()
+                        .clone()
+                        .ok_or("browser MCP not connected yet")?;
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| format!("tokio runtime build: {e}"))?;
+                    let result = rt
+                        .block_on(
+                            client.call_tool_raw("browser_take_screenshot", serde_json::json!({})),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let content = result
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let img = content
+                        .iter()
+                        .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("image"))
+                        .ok_or("screenshot returned no image block")?;
+                    let data = img
+                        .get("data")
+                        .and_then(|d| d.as_str())
+                        .ok_or("image block missing data")?
+                        .to_string();
+                    let mime = img
+                        .get("mimeType")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("image/png")
+                        .to_string();
+                    Ok((data, mime))
+                })();
+                let reply = match outcome {
+                    Ok((data, mime)) => serde_json::json!({
+                        "type": "browser_screenshot",
+                        "ok": true,
+                        "data": data,
+                        "mime": mime,
+                    }),
+                    Err(e) => serde_json::json!({
+                        "type": "browser_screenshot",
+                        "ok": false,
+                        "error": e,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
+        }
+
         "team_enabled_set" => {
             let enabled = msg
                 .get("enabled")

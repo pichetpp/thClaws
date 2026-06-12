@@ -217,6 +217,23 @@ pub struct AppConfig {
     #[serde(default)]
     pub image_tools_enabled: bool,
 
+    /// Engine-managed browser automation (docs/browser, Phase 0+1).
+    /// When `true`, `AppConfig::load()` injects the official Playwright
+    /// MCP server (`npx @playwright/mcp@latest`) as a synthetic
+    /// engine-managed stdio config named `browser` — the agent gets
+    /// `browser.*` tools (navigate / click / snapshot / …) with no
+    /// `/mcp add` or first-spawn approval. Off by default: it spawns
+    /// Node + downloads Chromium on first use. Requires `npx` on PATH.
+    #[serde(default, alias = "browserEnabled")]
+    pub browser_enabled: bool,
+
+    /// Force headed/headless for the managed browser. `None` (default)
+    /// = auto: headless on cloud runners (`THCLAWS_USES_GATEWAY=1`) and
+    /// displayless Linux; headed elsewhere (the desktop "browse next to
+    /// the agent" workflow).
+    #[serde(default, alias = "browserHeadless")]
+    pub browser_headless: Option<bool>,
+
     /// Per-provider gateway routing. Each entry is a provider name
     /// (lowercase, matches the gateway path segment): `openai`,
     /// `anthropic`, `google`, `openrouter`. When the active model's
@@ -364,6 +381,8 @@ impl Default for AppConfig {
             claude_md_compat: false,
             openrouter_free_only: false,
             image_tools_enabled: false,
+            browser_enabled: false,
+            browser_headless: None,
             gateway_use_for: Vec::new(),
             extract_save_skill_models: None,
             translator_subagent_model: None,
@@ -543,6 +562,14 @@ pub struct ProjectConfig {
     /// image_tools_enabled` for the design.
     #[serde(rename = "imageToolsEnabled")]
     pub image_tools_enabled: Option<bool>,
+    /// Engine-managed Playwright browser automation. See
+    /// [`AppConfig::browser_enabled`].
+    #[serde(rename = "browserEnabled")]
+    pub browser_enabled: Option<bool>,
+    /// Headed/headless override for the managed browser. See
+    /// [`AppConfig::browser_headless`].
+    #[serde(rename = "browserHeadless")]
+    pub browser_headless: Option<bool>,
     /// Print the assistant's raw text to stderr after each turn (dim, fenced
     /// block). Same effect as `THCLAWS_SHOW_RAW=1`. The env var wins if set.
     /// Useful when debugging model output / formatting issues.
@@ -668,6 +695,8 @@ impl Default for ProjectConfig {
             team_enabled: Some(false),
             shell_tab_enabled: Some(false),
             image_tools_enabled: Some(false),
+            browser_enabled: None,
+            browser_headless: None,
             show_raw_response: None,
             kms: None,
             auto_learn: None,
@@ -971,6 +1000,12 @@ impl ProjectConfig {
         if let Some(b) = self.image_tools_enabled {
             config.image_tools_enabled = b;
         }
+        if let Some(b) = self.browser_enabled {
+            config.browser_enabled = b;
+        }
+        if let Some(b) = self.browser_headless {
+            config.browser_headless = Some(b);
+        }
         if let Some(ref providers) = self.gateway_use_for {
             config.gateway_use_for = providers
                 .iter()
@@ -1136,6 +1171,7 @@ impl ProjectConfig {
                         url,
                         headers,
                         trusted,
+                        engine_managed: false,
                     });
                 }
                 // Stdio transport: needs a command.
@@ -1171,6 +1207,7 @@ impl ProjectConfig {
                     url: String::new(),
                     headers: std::collections::HashMap::new(),
                     trusted,
+                    engine_managed: false,
                 })
             })
             .collect();
@@ -1350,6 +1387,22 @@ impl AppConfig {
             config.mcp_servers.extend(project_mcp);
         }
 
+        // Engine-managed browser automation (docs/browser, Phase 0+1):
+        // `browserEnabled` injects the official Playwright MCP server as
+        // a synthetic stdio config. Engine-chosen — not from a cloned
+        // repo's mcp.json — so it skips the first-spawn allowlist prompt
+        // (`engine_managed` is #[serde(skip)]; JSON can never set it).
+        // A user/project server already named `browser` wins, and the
+        // enterprise external-MCP policy still applies.
+        if config.browser_enabled
+            && !crate::policy::external_mcp_disallowed()
+            && !config.mcp_servers.iter().any(|s| s.name == "browser")
+        {
+            config
+                .mcp_servers
+                .push(Self::browser_mcp_config(config.browser_headless));
+        }
+
         // CLI `--model` / `--set-model` override (set by app.rs once at
         // startup). Applied last so it wins over user, project, and the
         // Claude Code fallback — matches the precedence the module docs
@@ -1360,6 +1413,58 @@ impl AppConfig {
         }
 
         Ok(config)
+    }
+
+    /// The synthetic engine-managed Playwright MCP server config that
+    /// `browserEnabled` injects. Headed/headless: explicit override
+    /// wins; otherwise auto — headless on cloud runners
+    /// (`THCLAWS_USES_GATEWAY=1`) and displayless Linux, headed
+    /// elsewhere (the desktop "browse next to the agent" workflow).
+    ///
+    /// Launch command: `THCLAWS_BROWSER_MCP_CMD` overrides the whole
+    /// command line (docs/browser Phase 2 — the cloud runner image
+    /// sets `mcp-server-playwright --no-sandbox`, the preinstalled
+    /// server, so pod cold starts never hit the npm registry); the
+    /// desktop default is `npx -y @playwright/mcp@latest`.
+    /// `--headless` is appended when resolved headless and not
+    /// already present.
+    pub fn browser_mcp_config(headless_override: Option<bool>) -> crate::mcp::McpServerConfig {
+        let headless = headless_override.unwrap_or_else(|| {
+            std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+                || (cfg!(target_os = "linux")
+                    && std::env::var_os("DISPLAY").is_none()
+                    && std::env::var_os("WAYLAND_DISPLAY").is_none())
+        });
+        let (command, mut args) = match std::env::var("THCLAWS_BROWSER_MCP_CMD")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| shell_words::split(&s).ok())
+            .filter(|words| !words.is_empty())
+        {
+            Some(mut words) => {
+                let cmd = words.remove(0);
+                (cmd, words)
+            }
+            None => (
+                "npx".to_string(),
+                vec!["-y".to_string(), "@playwright/mcp@latest".to_string()],
+            ),
+        };
+        if headless && !args.iter().any(|a| a == "--headless") {
+            args.push("--headless".into());
+        }
+        crate::mcp::McpServerConfig {
+            name: "browser".into(),
+            transport: "stdio".into(),
+            command,
+            args,
+            env: std::collections::HashMap::new(),
+            url: String::new(),
+            headers: std::collections::HashMap::new(),
+            trusted: false,
+            engine_managed: true,
+        }
     }
 
     /// User-level config path: `~/.config/thclaws/settings.json`.

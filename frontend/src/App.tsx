@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal, MessageSquare, FolderTree, Users, FolderOpen, Folder, Settings, Sparkles, Layout, Maximize2 } from "lucide-react";
+import { Terminal, MessageSquare, FolderTree, Users, FolderOpen, Folder, Settings, Sparkles, Layout, Maximize2, Globe } from "lucide-react";
 import { TerminalView } from "./components/TerminalView";
 import { ChatView } from "./components/ChatView";
 import { FilesView } from "./components/FilesView";
 import { TeamView } from "./components/TeamView";
 import { UITab } from "./components/UITab";
 import { ShellTab } from "./components/ShellTab";
+import { BrowserView } from "./components/BrowserView";
 import { LoginButton } from "./components/LoginButton";
 import { RunningChip } from "./components/RunningChip";
 import { useBusyState } from "./hooks/useBusyState";
@@ -35,7 +36,7 @@ import { ContextWarningBanner } from "./components/ContextWarningBanner";
 import { useEditingShortcuts } from "./hooks/useEditingShortcuts";
 import { send, subscribe } from "./hooks/useIPC";
 
-type Tab = "terminal" | "chat" | "files" | "team" | "ui" | "shell";
+type Tab = "terminal" | "chat" | "files" | "team" | "ui" | "shell" | "browser";
 
 // Fires `frontend_ready` once on mount. Mounted only after both
 // startup modals (working-directory + secrets-backend) dismiss, so
@@ -60,6 +61,9 @@ const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   // PTY-backed live shell. Spawns `$SHELL` (or fallback) and pipes
   // stdio through xterm.js.
   { id: "shell", label: "Shell", icon: <Layout size={14} /> },
+  // docs/browser Phase 1: status + activity for the engine-managed
+  // Playwright MCP browser. Shown only when `browserEnabled` is set.
+  { id: "browser", label: "Browser", icon: <Globe size={14} /> },
 ];
 
 // ── Startup modal ────────────────────────────────────────────────────
@@ -655,6 +659,9 @@ export default function App() {
   // permission gating, so it stays hidden until the project flips
   // `shellTabEnabled: true` in .thclaws/settings.json.
   const [shellTabEnabled, setShellTabEnabled] = useState(false);
+  // Engine-managed Playwright browser (docs/browser Phase 1). The tab
+  // only appears when `browserEnabled` is set in settings.json.
+  const [browserEnabled, setBrowserEnabled] = useState(false);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -669,6 +676,11 @@ export default function App() {
         typeof msg.enabled === "boolean"
       ) {
         setShellTabEnabled(msg.enabled as boolean);
+      } else if (
+        msg.type === "browser_status" &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setBrowserEnabled(msg.enabled as boolean);
       } else if (msg.type === "settings_changed") {
         // Backend re-loaded .thclaws/settings.json (file watcher or
         // explicit `settings_reload` IPC). Re-fetch every settings-
@@ -677,6 +689,7 @@ export default function App() {
         // through this same subscribe above.
         send({ type: "team_enabled_get" });
         send({ type: "shell_tab_enabled_get" });
+        send({ type: "browser_status_get" });
       } else if (
         msg.type === "initial_state" &&
         typeof msg.team_enabled === "boolean"
@@ -692,6 +705,7 @@ export default function App() {
     });
     send({ type: "team_enabled_get" });
     send({ type: "shell_tab_enabled_get" });
+    send({ type: "browser_status_get" });
     return unsub;
   }, []);
 
@@ -701,10 +715,13 @@ export default function App() {
       ? ("chat" as Tab)
       : !shellTabEnabled && activeTab === "shell"
         ? ("chat" as Tab)
-        : activeTab;
+        : !browserEnabled && activeTab === "browser"
+          ? ("chat" as Tab)
+          : activeTab;
 
   let TABS = teamEnabled ? ALL_TABS : ALL_TABS.filter((t) => t.id !== "team");
   if (!shellTabEnabled) TABS = TABS.filter((t) => t.id !== "shell");
+  if (!browserEnabled) TABS = TABS.filter((t) => t.id !== "browser");
 
   if (!started) {
     return (
@@ -844,6 +861,7 @@ export default function App() {
                 {id === "team" && <TeamView />}
                 {id === "ui" && <UITab active={isActive} fullscreen={fullscreen} />}
                 {id === "shell" && <ShellTab active={isActive} />}
+                {id === "browser" && <BrowserView active={isActive} />}
               </div>
             );
           })}

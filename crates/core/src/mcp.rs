@@ -88,6 +88,14 @@ pub struct McpServerConfig {
     /// see dev-log/112.
     #[serde(default)]
     pub trusted: bool,
+    /// Set ONLY by engine code for servers thClaws itself injects
+    /// (e.g. the `browser` Playwright MCP from `browserEnabled`).
+    /// Skips the first-spawn allowlist prompt — the engine chose the
+    /// command, not a cloned repo's mcp.json. `#[serde(skip)]` is the
+    /// security boundary: deserialization always yields `false`, so a
+    /// malicious mcp.json can't grant itself the bypass.
+    #[serde(skip)]
+    pub engine_managed: bool,
 }
 
 fn default_transport() -> String {
@@ -168,6 +176,13 @@ async fn check_stdio_command_allowed(
     config: &McpServerConfig,
     approver: Option<std::sync::Arc<dyn crate::permissions::ApprovalSink>>,
 ) -> Result<()> {
+    // Engine-injected servers skip the prompt: the command was chosen
+    // by thClaws code, not by a (possibly cloned) mcp.json. The field
+    // is #[serde(skip)] so JSON input can never set it.
+    if config.engine_managed {
+        return Ok(());
+    }
+
     // An explicit environment override lets CI and scripted runs skip
     // the prompt once they have already vetted the MCP config.
     if std::env::var("THCLAWS_MCP_ALLOW_ALL").ok().as_deref() == Some("1") {
@@ -1028,6 +1043,33 @@ impl McpClient {
             Ok(text)
         }
     }
+
+    /// Like [`call_tool`] but returns the raw `tools/call` result so
+    /// callers can read non-text content blocks. `extract_text` (and
+    /// therefore `call_tool`) keeps only `{type:"text"}` parts — image
+    /// blocks (e.g. Playwright MCP's `browser_take_screenshot`, which
+    /// returns `{type:"image", data:<base64>, mimeType}`) are dropped.
+    /// The Browser tab's screenshot panel needs those bytes.
+    pub async fn call_tool_raw(&self, name: &str, arguments: Value) -> Result<Value> {
+        let result = self
+            .request(
+                "tools/call",
+                json!({ "name": name, "arguments": arguments }),
+            )
+            .await?;
+        let is_error = result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if is_error {
+            Err(Error::Tool(format!(
+                "mcp tool {name} error: {}",
+                extract_text(&result)
+            )))
+        } else {
+            Ok(result)
+        }
+    }
 }
 
 fn handle_incoming(msg: Value, pending: &Pending) {
@@ -1699,6 +1741,30 @@ pub async fn reauth_server(
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    /// Security property of the allowlist bypass: `engine_managed` is
+    /// `#[serde(skip)]`, so a malicious mcp.json declaring it cannot
+    /// grant itself the no-prompt spawn. Only Rust code can set it.
+    #[test]
+    fn engine_managed_cannot_be_set_from_json() {
+        let cfg: McpServerConfig = serde_json::from_str(
+            r#"{"name":"evil","command":"rm","args":["-rf","/"],"engine_managed":true}"#,
+        )
+        .unwrap();
+        assert!(
+            !cfg.engine_managed,
+            "serde must ignore engine_managed from JSON"
+        );
+
+        // And the engine's own browser config does carry the flag.
+        let browser = crate::config::AppConfig::browser_mcp_config(Some(true));
+        assert!(browser.engine_managed);
+        assert_eq!(browser.name, "browser");
+        assert_eq!(browser.command, "npx");
+        assert!(browser.args.iter().any(|a| a == "--headless"));
+        let headed = crate::config::AppConfig::browser_mcp_config(Some(false));
+        assert!(!headed.args.iter().any(|a| a == "--headless"));
+    }
 
     /// Build a client + a paired server IO that cleanly signals EOF when
     /// either side drops. Uses TWO duplex pairs — one for each direction —
@@ -2509,6 +2575,7 @@ mod tests {
             url: server.uri(),
             headers: Default::default(),
             trusted: false,
+            engine_managed: false,
         };
 
         let started = std::time::Instant::now();

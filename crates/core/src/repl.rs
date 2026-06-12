@@ -3208,6 +3208,7 @@ pub async fn install_mcp_from_marketplace(
             url: entry.url.clone(),
             headers: Default::default(),
             trusted: true,
+            engine_managed: false,
         }
     } else {
         crate::mcp::McpServerConfig {
@@ -3219,6 +3220,7 @@ pub async fn install_mcp_from_marketplace(
             url: String::new(),
             headers: Default::default(),
             trusted: true,
+            engine_managed: false,
         }
     };
     let saved_to =
@@ -7048,6 +7050,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         // secret out of mcp.json.
                         headers: headers.iter().cloned().collect(),
                         trusted: false,
+                        engine_managed: false,
                     };
                     // 1. Persist to disk.
                     let saved_to = match crate::config::save_mcp_server(&cfg, user) {
@@ -7146,6 +7149,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         url: String::new(),
                         headers: Default::default(),
                         trusted: false,
+                        engine_managed: false,
                     };
                     let saved_to = match crate::config::save_mcp_server(&cfg, user) {
                         Ok(p) => p,

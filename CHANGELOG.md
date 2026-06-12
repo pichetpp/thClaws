@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-06-12
+
+### Added
+- **Cloud browser automation (docs/browser Phase 2, slice 1).** The
+  runner image now ships a working browser stack: `@playwright/mcp`
+  preinstalled (no npm-registry hit per pod cold start), chromium
+  installed to a shared `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`
+  readable by the runtime user (previously root-only — the existing
+  playwright install was unusable from pods), and
+  `THCLAWS_BROWSER_MCP_CMD=mcp-server-playwright --no-sandbox` so the
+  engine launches the image-pinned server. Engine honours that env as
+  a full launch-command override (desktop default stays
+  `npx -y @playwright/mcp@latest`); `--headless` is auto-appended on
+  displayless environments. With `browserEnabled` in a cloud
+  workspace's settings, the Browser tab's screenshot panel becomes the
+  headless browser's window. Live interactive takeover (CDP screencast
+  + remote input) is the next slice.
+- **Engine-managed browser automation (Playwright MCP, Phase 0+1).**
+  `"browserEnabled": true` in settings.json injects the official
+  `@playwright/mcp` server as an engine-managed MCP config — the agent
+  gains 23 `browser__*` tools (navigate / click / type / snapshot /
+  network / …) with no `/mcp add` and no first-spawn prompt (the
+  `engine_managed` flag is serde-skipped, so a cloned repo's mcp.json
+  can never claim the bypass). Headed by default on desktop — a real
+  Chromium window beside the app, browse normally and let the agent
+  take over — headless automatically on cloud runners / displayless
+  Linux (`browserHeadless` overrides). New **Browser tab** (visible
+  only when enabled) shows the managed-server status, an npx setup
+  hint, and a live feed of every browser tool call + result. Requires
+  Node.js (`npx`) on PATH.
+- **Browser tab: chat sidebar + live page screenshots.** A compact
+  agent chat docked in the tab (same conversation as Chat — direct the
+  takeover without switching tabs), and a screenshot panel that
+  auto-captures ~1s after each browser action (plus a manual 📷
+  button). Captures run directly on the managed MCP client over a new
+  `browser_screenshot_get` IPC arm — no agent loop, no tokens, works
+  mid-turn — via `McpClient::call_tool_raw`, which preserves the image
+  content blocks the text path drops.
+
 ## [0.48.0] - 2026-06-11
 
 ### Added
