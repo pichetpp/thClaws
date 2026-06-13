@@ -15,7 +15,7 @@ A native-Rust AI agent workspace that codes, automates, remembers, and coordinat
 [![Platform](https://img.shields.io/badge/platform-macOS%20·%20Windows%20·%20Linux-lightgrey.svg)](#installation)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-[Website](https://thclaws.ai) · [Download](https://thclaws.ai/downloads.html) · [Manual](https://thclaws.ai/manual) · [Discussions](https://github.com/thClaws/thClaws/discussions) · [Contribute](#contribute)
+[Website](https://thclaws.ai) · [Download](https://thclaws.ai/downloads.html) · [Manual](https://thclaws.ai/manual) · [Discussions](https://github.com/thClaws/thClaws/discussions) · [Contribute](#contribute) · [Supporters](SUPPORTERS.md)
 
 </div>
 
