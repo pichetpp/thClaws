@@ -48,6 +48,12 @@ const LATIN_BOLD_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSans-B
 const LATIN_ITAL_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSans-Italic.ttf");
 const THAI_REG_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSansThai-Regular.ttf");
 const THAI_BOLD_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSansThai-Bold.ttf");
+// Serif counterparts — selected via the `font: "serif"` option.
+const LATIN_REG_SERIF_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSerif-Regular.ttf");
+const LATIN_BOLD_SERIF_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSerif-Bold.ttf");
+const LATIN_ITAL_SERIF_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSerif-Italic.ttf");
+const THAI_REG_SERIF_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSerifThai-Regular.ttf");
+const THAI_BOLD_SERIF_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSerifThai-Bold.ttf");
 
 const PT_TO_MM: f32 = 0.3528;
 const DEFAULT_FONT_SIZE_PT: f32 = 11.0;
@@ -66,7 +72,8 @@ impl Tool for PdfCreateTool {
 
     fn description(&self) -> &'static str {
         "Render markdown to a typographically sound PDF. Embedded Noto Sans \
-         Regular/Bold/Italic + Noto Sans Thai Regular/Bold — Thai text \
+         Regular/Bold/Italic + Noto Sans Thai Regular/Bold (or set \
+         `font: \"serif\"` for Noto Serif + Noto Serif Thai) — Thai text \
          wraps at proper cluster boundaries and headings/bold render in \
          real bold. Supports headings H1-H6 (H1/H2 become PDF outline \
          bookmarks), paragraphs, **bold** / *italic* / `code`, ordered + \
@@ -92,6 +99,7 @@ impl Tool for PdfCreateTool {
                 "content_path": {"type": "string", "description": "Path to a markdown file to render. Preferred for large documents (books) — the file is read directly, and relative image paths inside it resolve against its directory."},
                 "title":     {"type": "string", "description": "PDF document title (metadata). Optional — defaults to the file stem."},
                 "font_size": {"type": "integer", "description": "Body font size in points. Default 11.", "minimum": 6, "maximum": 72},
+                "font": {"type": "string", "enum": ["sans", "serif"], "description": "Typeface family. 'sans' (default) = Noto Sans + Noto Sans Thai; 'serif' = Noto Serif + Noto Serif Thai. Both embed the fonts with correct Thai cluster shaping."},
                 "page_size": {"type": "string", "enum": ["A4", "Letter", "Legal"], "description": "Default A4."},
                 "page_break_h1": {"type": "boolean", "description": "Start every H1 on a new page (book chapters). Default false."},
                 "outline_depth": {"type": "integer", "enum": [0, 1, 2], "description": "PDF sidebar bookmarks: 0 = none, 1 = H1 only (default — chapter list), 2 = H1+H2. The PDF outline is flat, so depth 2 gets noisy on long documents."}
@@ -148,6 +156,11 @@ impl Tool for PdfCreateTool {
             .map(|n| n as f32)
             .unwrap_or(DEFAULT_FONT_SIZE_PT);
 
+        let family = match input.get("font").and_then(|v| v.as_str()) {
+            Some("serif") => Family::Serif,
+            _ => Family::Sans,
+        };
+
         let (page_w_mm, page_h_mm) = match input.get("page_size").and_then(|v| v.as_str()) {
             Some("Letter") => (215.9, 279.4),
             Some("Legal") => (215.9, 355.6),
@@ -184,6 +197,7 @@ impl Tool for PdfCreateTool {
                 page_break_h1,
                 outline_depth,
                 &image_base,
+                family,
             )
         })
         .await
@@ -246,36 +260,75 @@ struct FaceSet {
     hb: [rustybuzz::Face<'static>; FONT_COUNT],
 }
 
-const FONT_BYTES: [&[u8]; FONT_COUNT] = [
+const SANS_BYTES: [&[u8]; FONT_COUNT] = [
     LATIN_REG_BYTES,
     LATIN_BOLD_BYTES,
     LATIN_ITAL_BYTES,
     THAI_REG_BYTES,
     THAI_BOLD_BYTES,
 ];
+const SERIF_BYTES: [&[u8]; FONT_COUNT] = [
+    LATIN_REG_SERIF_BYTES,
+    LATIN_BOLD_SERIF_BYTES,
+    LATIN_ITAL_SERIF_BYTES,
+    THAI_REG_SERIF_BYTES,
+    THAI_BOLD_SERIF_BYTES,
+];
+
+/// Typeface family for one render. Selected per `PdfCreate` call via the
+/// `font` option. Ambient through a thread-local rather than threaded
+/// through every shape/measure call site: `render_pdf` runs synchronously
+/// on one blocking thread and sets it once at the top, so the value is
+/// stable for the whole render. Defaults to `Sans` so direct `shape_run`
+/// callers (tests) keep the original behavior.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Sans,
+    Serif,
+}
+
+thread_local! {
+    static RENDER_FAMILY: std::cell::Cell<Family> = const { std::cell::Cell::new(Family::Sans) };
+}
+
+fn family_bytes(family: Family) -> &'static [&'static [u8]; FONT_COUNT] {
+    match family {
+        Family::Sans => &SANS_BYTES,
+        Family::Serif => &SERIF_BYTES,
+    }
+}
+
+fn build_faces(bytes: &'static [&'static [u8]; FONT_COUNT]) -> Option<FaceSet> {
+    Some(FaceSet {
+        faces: [
+            ttf_parser::Face::parse(bytes[0], 0).ok()?,
+            ttf_parser::Face::parse(bytes[1], 0).ok()?,
+            ttf_parser::Face::parse(bytes[2], 0).ok()?,
+            ttf_parser::Face::parse(bytes[3], 0).ok()?,
+            ttf_parser::Face::parse(bytes[4], 0).ok()?,
+        ],
+        hb: [
+            rustybuzz::Face::from_slice(bytes[0], 0)?,
+            rustybuzz::Face::from_slice(bytes[1], 0)?,
+            rustybuzz::Face::from_slice(bytes[2], 0)?,
+            rustybuzz::Face::from_slice(bytes[3], 0)?,
+            rustybuzz::Face::from_slice(bytes[4], 0)?,
+        ],
+    })
+}
 
 fn faces() -> Option<&'static FaceSet> {
-    static FACES: OnceLock<Option<FaceSet>> = OnceLock::new();
-    FACES
-        .get_or_init(|| {
-            Some(FaceSet {
-                faces: [
-                    ttf_parser::Face::parse(LATIN_REG_BYTES, 0).ok()?,
-                    ttf_parser::Face::parse(LATIN_BOLD_BYTES, 0).ok()?,
-                    ttf_parser::Face::parse(LATIN_ITAL_BYTES, 0).ok()?,
-                    ttf_parser::Face::parse(THAI_REG_BYTES, 0).ok()?,
-                    ttf_parser::Face::parse(THAI_BOLD_BYTES, 0).ok()?,
-                ],
-                hb: [
-                    rustybuzz::Face::from_slice(FONT_BYTES[0], 0)?,
-                    rustybuzz::Face::from_slice(FONT_BYTES[1], 0)?,
-                    rustybuzz::Face::from_slice(FONT_BYTES[2], 0)?,
-                    rustybuzz::Face::from_slice(FONT_BYTES[3], 0)?,
-                    rustybuzz::Face::from_slice(FONT_BYTES[4], 0)?,
-                ],
-            })
-        })
-        .as_ref()
+    // Each family's FaceSet is parsed once and cached for the process.
+    match RENDER_FAMILY.with(|c| c.get()) {
+        Family::Sans => {
+            static F: OnceLock<Option<FaceSet>> = OnceLock::new();
+            F.get_or_init(|| build_faces(&SANS_BYTES)).as_ref()
+        }
+        Family::Serif => {
+            static F: OnceLock<Option<FaceSet>> = OnceLock::new();
+            F.get_or_init(|| build_faces(&SERIF_BYTES)).as_ref()
+        }
+    }
 }
 
 /// One glyph out of the shaper, in mm at the target size.
@@ -1251,21 +1304,29 @@ fn render_pdf(
     page_break_h1: bool,
     outline_depth: u8,
     image_base: &Path,
+    family: Family,
 ) -> Result<usize> {
+    // Set the ambient family BEFORE any faces()/shaping call below so
+    // metrics, shaping and embedding all use the same typeface.
+    RENDER_FAMILY.with(|c| c.set(family));
+
     let (doc, first_page, first_layer) =
         PdfDocument::new(title, Mm(page_w_mm), Mm(page_h_mm), "Layer 1");
 
+    // Embed the selected family's five faces in FontId order
+    // (LatinReg, LatinBold, LatinItal, ThaiReg, ThaiBold).
+    let fb = family_bytes(family);
     let fonts = [
-        doc.add_external_font(LATIN_REG_BYTES)
-            .map_err(|e| Error::Tool(format!("embed Noto Sans: {e}")))?,
-        doc.add_external_font(LATIN_BOLD_BYTES)
-            .map_err(|e| Error::Tool(format!("embed Noto Sans Bold: {e}")))?,
-        doc.add_external_font(LATIN_ITAL_BYTES)
-            .map_err(|e| Error::Tool(format!("embed Noto Sans Italic: {e}")))?,
-        doc.add_external_font(THAI_REG_BYTES)
-            .map_err(|e| Error::Tool(format!("embed Noto Sans Thai: {e}")))?,
-        doc.add_external_font(THAI_BOLD_BYTES)
-            .map_err(|e| Error::Tool(format!("embed Noto Sans Thai Bold: {e}")))?,
+        doc.add_external_font(fb[0])
+            .map_err(|e| Error::Tool(format!("embed regular: {e}")))?,
+        doc.add_external_font(fb[1])
+            .map_err(|e| Error::Tool(format!("embed bold: {e}")))?,
+        doc.add_external_font(fb[2])
+            .map_err(|e| Error::Tool(format!("embed italic: {e}")))?,
+        doc.add_external_font(fb[3])
+            .map_err(|e| Error::Tool(format!("embed Thai: {e}")))?,
+        doc.add_external_font(fb[4])
+            .map_err(|e| Error::Tool(format!("embed Thai bold: {e}")))?,
     ];
 
     let mut r = PdfRenderer {

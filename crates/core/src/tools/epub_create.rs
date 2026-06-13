@@ -42,6 +42,12 @@ const FONT_LATIN_BOLD: &[u8] = include_bytes!("../../resources/fonts/NotoSans-Bo
 const FONT_LATIN_ITAL: &[u8] = include_bytes!("../../resources/fonts/NotoSans-Italic.ttf");
 const FONT_THAI_REG: &[u8] = include_bytes!("../../resources/fonts/NotoSansThai-Regular.ttf");
 const FONT_THAI_BOLD: &[u8] = include_bytes!("../../resources/fonts/NotoSansThai-Bold.ttf");
+// Serif counterparts — selected via the `font: "serif"` option.
+const FONT_LATIN_REG_SERIF: &[u8] = include_bytes!("../../resources/fonts/NotoSerif-Regular.ttf");
+const FONT_LATIN_BOLD_SERIF: &[u8] = include_bytes!("../../resources/fonts/NotoSerif-Bold.ttf");
+const FONT_LATIN_ITAL_SERIF: &[u8] = include_bytes!("../../resources/fonts/NotoSerif-Italic.ttf");
+const FONT_THAI_REG_SERIF: &[u8] = include_bytes!("../../resources/fonts/NotoSerifThai-Regular.ttf");
+const FONT_THAI_BOLD_SERIF: &[u8] = include_bytes!("../../resources/fonts/NotoSerifThai-Bold.ttf");
 
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -63,7 +69,8 @@ impl Tool for EpubCreateTool {
          task lists, footnotes), embeds `![alt](path)` images into the \
          container, and builds an EPUB 3 nav document plus a toc.ncx \
          fallback for older readers. Embeds Noto Sans + Noto Sans Thai \
-         (via @font-face) by default so Thai renders correctly even on \
+         (via @font-face) by default — or set `font: \"serif\"` for Noto \
+         Serif + Noto Serif Thai — so Thai renders correctly even on \
          readers with no Thai font. Pass `content` inline for small books \
          or `content_path` to render a markdown FILE without copying it \
          through the conversation (relative image paths then resolve \
@@ -84,7 +91,8 @@ impl Tool for EpubCreateTool {
                 "language":     {"type": "string", "description": "BCP-47 language code (e.g. \"en\", \"th\"). Default \"en\"."},
                 "cover":        {"type": "string", "description": "Path to a cover image (PNG/JPEG). Optional — becomes the EPUB cover."},
                 "chapter_split": {"type": "integer", "enum": [0, 1, 2], "description": "Split into chapter files at this heading level: 0 = single document, 1 = split at each H1 (default), 2 = split at H1+H2."},
-                "embed_fonts":  {"type": "boolean", "description": "Embed Noto Sans + Noto Sans Thai so Thai renders without a system font. Default true."}
+                "font":         {"type": "string", "enum": ["sans", "serif"], "description": "Typeface family for the embedded fonts. 'sans' (default) = Noto Sans + Noto Sans Thai; 'serif' = Noto Serif + Noto Serif Thai. Only applies when embed_fonts is true."},
+                "embed_fonts":  {"type": "boolean", "description": "Embed the chosen font family (see `font`) so Thai renders without a system font. Default true."}
             },
             "required": ["path"]
         })
@@ -160,6 +168,8 @@ impl Tool for EpubCreateTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        let serif = input.get("font").and_then(|v| v.as_str()) == Some("serif");
+
         // Resolve the cover path (if any) up front so a bad path fails
         // before we start writing.
         let cover_path = match input.get("cover").and_then(|v| v.as_str()) {
@@ -184,6 +194,7 @@ impl Tool for EpubCreateTool {
             cover_path,
             chapter_split,
             embed_fonts,
+            serif,
             content,
             image_base,
         };
@@ -211,6 +222,7 @@ struct EpubSpec {
     cover_path: Option<PathBuf>,
     chapter_split: u8,
     embed_fonts: bool,
+    serif: bool,
     content: String,
     image_base: PathBuf,
 }
@@ -306,12 +318,12 @@ fn render_epub(spec: EpubSpec) -> Result<(usize, usize)> {
 
     // Stylesheet.
     zip.start_file("OEBPS/style.css", deflated).map_err(zerr)?;
-    zip.write_all(stylesheet(spec.embed_fonts).as_bytes())
+    zip.write_all(stylesheet(spec.embed_fonts, spec.serif).as_bytes())
         .map_err(werr)?;
 
     // Embedded fonts.
     if spec.embed_fonts {
-        for (name, bytes) in font_files() {
+        for (name, bytes) in font_files(spec.serif) {
             zip.start_file(format!("OEBPS/fonts/{name}"), deflated)
                 .map_err(zerr)?;
             zip.write_all(bytes).map_err(werr)?;
@@ -733,7 +745,7 @@ fn content_opf(
         ));
     }
     if spec.embed_fonts {
-        for (id, name) in font_manifest_ids() {
+        for (id, name) in font_manifest_ids(spec.serif) {
             manifest.push_str(&format!(
                 "    <item id=\"{id}\" href=\"fonts/{name}\" media-type=\"font/ttf\"/>\n",
             ));
@@ -764,22 +776,30 @@ fn content_opf(
     )
 }
 
-fn stylesheet(embed_fonts: bool) -> String {
+fn stylesheet(embed_fonts: bool, serif: bool) -> String {
     let mut css = String::new();
     if embed_fonts {
-        css.push_str(
+        css.push_str(if serif {
+            r#"@font-face { font-family: "Noto Serif"; font-weight: normal; font-style: normal; src: url("fonts/NotoSerif-Regular.ttf"); }
+@font-face { font-family: "Noto Serif"; font-weight: bold; font-style: normal; src: url("fonts/NotoSerif-Bold.ttf"); }
+@font-face { font-family: "Noto Serif"; font-weight: normal; font-style: italic; src: url("fonts/NotoSerif-Italic.ttf"); }
+@font-face { font-family: "Noto Serif Thai"; font-weight: normal; font-style: normal; src: url("fonts/NotoSerifThai-Regular.ttf"); }
+@font-face { font-family: "Noto Serif Thai"; font-weight: bold; font-style: normal; src: url("fonts/NotoSerifThai-Bold.ttf"); }
+"#
+        } else {
             r#"@font-face { font-family: "Noto Sans"; font-weight: normal; font-style: normal; src: url("fonts/NotoSans-Regular.ttf"); }
 @font-face { font-family: "Noto Sans"; font-weight: bold; font-style: normal; src: url("fonts/NotoSans-Bold.ttf"); }
 @font-face { font-family: "Noto Sans"; font-weight: normal; font-style: italic; src: url("fonts/NotoSans-Italic.ttf"); }
 @font-face { font-family: "Noto Sans Thai"; font-weight: normal; font-style: normal; src: url("fonts/NotoSansThai-Regular.ttf"); }
 @font-face { font-family: "Noto Sans Thai"; font-weight: bold; font-style: normal; src: url("fonts/NotoSansThai-Bold.ttf"); }
-"#,
-        );
+"#
+        });
     }
-    let family = if embed_fonts {
-        "\"Noto Sans\", \"Noto Sans Thai\", sans-serif"
-    } else {
-        "sans-serif"
+    let family = match (embed_fonts, serif) {
+        (true, true) => "\"Noto Serif\", \"Noto Serif Thai\", serif",
+        (true, false) => "\"Noto Sans\", \"Noto Sans Thai\", sans-serif",
+        (false, true) => "serif",
+        (false, false) => "sans-serif",
     };
     css.push_str(&format!(
         r#"html {{ font-size: 100%; }}
@@ -807,24 +827,44 @@ li {{ margin: 0.2em 0; }}
     css
 }
 
-fn font_files() -> [(&'static str, &'static [u8]); 5] {
-    [
-        ("NotoSans-Regular.ttf", FONT_LATIN_REG),
-        ("NotoSans-Bold.ttf", FONT_LATIN_BOLD),
-        ("NotoSans-Italic.ttf", FONT_LATIN_ITAL),
-        ("NotoSansThai-Regular.ttf", FONT_THAI_REG),
-        ("NotoSansThai-Bold.ttf", FONT_THAI_BOLD),
-    ]
+fn font_files(serif: bool) -> [(&'static str, &'static [u8]); 5] {
+    if serif {
+        [
+            ("NotoSerif-Regular.ttf", FONT_LATIN_REG_SERIF),
+            ("NotoSerif-Bold.ttf", FONT_LATIN_BOLD_SERIF),
+            ("NotoSerif-Italic.ttf", FONT_LATIN_ITAL_SERIF),
+            ("NotoSerifThai-Regular.ttf", FONT_THAI_REG_SERIF),
+            ("NotoSerifThai-Bold.ttf", FONT_THAI_BOLD_SERIF),
+        ]
+    } else {
+        [
+            ("NotoSans-Regular.ttf", FONT_LATIN_REG),
+            ("NotoSans-Bold.ttf", FONT_LATIN_BOLD),
+            ("NotoSans-Italic.ttf", FONT_LATIN_ITAL),
+            ("NotoSansThai-Regular.ttf", FONT_THAI_REG),
+            ("NotoSansThai-Bold.ttf", FONT_THAI_BOLD),
+        ]
+    }
 }
 
-fn font_manifest_ids() -> [(&'static str, &'static str); 5] {
-    [
-        ("font-latin-reg", "NotoSans-Regular.ttf"),
-        ("font-latin-bold", "NotoSans-Bold.ttf"),
-        ("font-latin-ital", "NotoSans-Italic.ttf"),
-        ("font-thai-reg", "NotoSansThai-Regular.ttf"),
-        ("font-thai-bold", "NotoSansThai-Bold.ttf"),
-    ]
+fn font_manifest_ids(serif: bool) -> [(&'static str, &'static str); 5] {
+    if serif {
+        [
+            ("font-latin-reg", "NotoSerif-Regular.ttf"),
+            ("font-latin-bold", "NotoSerif-Bold.ttf"),
+            ("font-latin-ital", "NotoSerif-Italic.ttf"),
+            ("font-thai-reg", "NotoSerifThai-Regular.ttf"),
+            ("font-thai-bold", "NotoSerifThai-Bold.ttf"),
+        ]
+    } else {
+        [
+            ("font-latin-reg", "NotoSans-Regular.ttf"),
+            ("font-latin-bold", "NotoSans-Bold.ttf"),
+            ("font-latin-ital", "NotoSans-Italic.ttf"),
+            ("font-thai-reg", "NotoSansThai-Regular.ttf"),
+            ("font-thai-bold", "NotoSansThai-Bold.ttf"),
+        ]
+    }
 }
 
 const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
