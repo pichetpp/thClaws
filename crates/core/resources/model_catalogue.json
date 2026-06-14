@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-06-13T00:00:00Z",
+  "fetched_at": "2026-06-14T00:00:00Z",
   "providers": {
     "agentic-press": {
       "list_url": "https://llm.artech.cloud/v1/models",
@@ -7189,6 +7189,461 @@
           "verified_at": "2026-06-10",
           "input_per_mtok": 1.4,
           "output_per_mtok": 4.4
+        }
+      }
+    },
+    "tokenrouter": {
+      "list_url": "https://api.tokenrouter.com/v1/models",
+      "default_context": 128000,
+      "models": {
+        "tokenrouter/MiniMax-Hailuo-2.3": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/MiniMax-M3": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-haiku-4.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-opus-4.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-opus-4.6": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-opus-4.7": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-opus-4.7-fast": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-opus-4.8": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-opus-4.8-fast": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-sonnet-4": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-sonnet-4.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/anthropic/claude-sonnet-4.6": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/bytedance-seed/seedream-4.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/claude-haiku-4-5": {
+          "context": 200000,
+          "source": "https://api.tokenrouter.com/v1/models + litellm:claude-haiku-4-5",
+          "verified_at": "2026-06-14",
+          "input_per_mtok": 1.0,
+          "output_per_mtok": 5.0
+        },
+        "tokenrouter/deepseek/deepseek-v3.2": {
+          "context": 163840,
+          "source": "https://api.tokenrouter.com/v1/models + litellm:deepseek/deepseek-v3.2",
+          "verified_at": "2026-06-14",
+          "input_per_mtok": 0.28,
+          "output_per_mtok": 0.4
+        },
+        "tokenrouter/deepseek/deepseek-v4-flash": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/deepseek/deepseek-v4-pro": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/dreamina-seedance-2-0-260128": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/dreamina-seedance-2-0-fast-260128": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/google/gemini-3-flash-preview": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/google/gemini-3.1-pro-preview": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/google/gemini-3.5-flash": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/google/gemma-4-26b-a4b-it": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/happyhorse-1.0-t2v": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/kling-v2-6": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/kling-v3": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/minimax/minimax-m2-her": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/minimax/minimax-m2.1": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/minimax/minimax-m2.1-highspeed": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/minimax/minimax-m2.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/minimax/minimax-m2.7": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/minimax/minimax-m2.7-highspeed": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/miromind/mirothinker-1-7-deepresearch": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/miromind/mirothinker-1-7-deepresearch-mini": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/mistralai/devstral-2512": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/mistralai/mistral-medium-3-5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/mistralai/mistral-small-2603": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/mistralai/voxtral-small-24b-2507": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/moonshotai/kimi-k2.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/moonshotai/kimi-k2.6": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/moonshotai/kimi-k2.7-code": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/nvidia/nemotron-3-super-120b-a12b": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-4o-mini": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-5-mini": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-5.2": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-5.4": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-5.4-mini": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-5.4-nano": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-5.4-pro": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-5.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-5.5-pro": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/openai/gpt-oss-120b": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3-coder-next": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.5-122b-a10b": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.5-35b-a3b": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.5-397b-a17b": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.5-9b": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.5-flash": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.5-plus-02-15": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.6-plus": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.7-max": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen/qwen3.7-plus": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen3.5-omni-plus": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/qwen3.6-flash": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/seed-2-0-code-preview-260328": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/seed-2-0-lite-260428": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/seed-2-0-mini-260428": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/seed-2-0-pro-260328": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/stepfun/step-3.5-flash": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/stepfun/step-3.7-flash": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/tencent/hy3-preview": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/tokenrouter/gpt-5.6-mercury": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/x-ai/grok-4.1-fast": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/x-ai/grok-4.20-beta": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/x-ai/grok-4.3": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/x-ai/grok-build-0.1": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/xiaomi/mimo-v2-flash": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/xiaomi/mimo-v2-omni": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/xiaomi/mimo-v2-pro": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/xiaomi/mimo-v2.5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/xiaomi/mimo-v2.5-pro": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/z-ai/glm-4.5-air": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/z-ai/glm-4.6": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/z-ai/glm-4.6v": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/z-ai/glm-4.7": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/z-ai/glm-5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/z-ai/glm-5-turbo": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
+        },
+        "tokenrouter/z-ai/glm-5.1": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-06-14"
         }
       }
     }

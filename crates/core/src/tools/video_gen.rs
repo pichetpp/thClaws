@@ -49,9 +49,17 @@ fn resolve_aspect(input: &Value) -> String {
     }
 }
 
+fn resolve_resolution(input: &Value) -> String {
+    match opt(input, "resolution").as_str() {
+        "1080P" | "1080p" => "1080P".into(),
+        _ => "720P".into(),
+    }
+}
+
 const MODEL_DESC: &str = "Video model. Provider inferred from the model. Veo: `fast` \
-(default; veo-3.1-fast-generate-preview), `quality` (veo-3.1-generate-preview), or \
-`lite`. Default: fast.";
+(default; veo-3.1-fast-generate-preview), `quality`, or `lite`. DashScope HappyHorse: \
+`happyhorse-1.0-t2v` (text→video) / `happyhorse-1.0-i2v` (image→video) — honor \
+`resolution` (720P/1080P). Default: fast.";
 
 /// Submit a video job and persist it; returns the user-facing text.
 async fn submit_job(kind: &str, input: &Value, init_image: Option<InputImage>) -> Result<String> {
@@ -65,6 +73,7 @@ async fn submit_job(kind: &str, input: &Value, init_image: Option<InputImage>) -
         init_image,
         aspect_ratio: aspect,
         duration_seconds: duration,
+        resolution: resolve_resolution(input),
     };
     let job_ref = provider.submit(&req).await?;
     let id = MediaJob::new_id(&job_ref.op);
@@ -100,22 +109,24 @@ impl Tool for TextToVideoTool {
         "TextToVideo"
     }
     fn description(&self) -> &'static str {
-        "Generate a short video clip from a text prompt via Veo. \
-         Requires `imageToolsEnabled: true` in `.thclaws/settings.json` plus \
-         `GEMINI_API_KEY`/`GOOGLE_API_KEY` (or the thClaws Gateway key). \
-         Aspect ratios: 16:9 (default) or 9:16 (other ratios are mapped). \
-         Duration: 4–8s (default 8). Veo is expensive (≈ $3–6 per 8s clip). \
-         Returns a job_id immediately; poll MediaJobStatus until `done`."
+        "Generate a short video clip from a text prompt. Providers: Veo \
+         (`fast`/`quality`/`lite`, needs `GEMINI_API_KEY`/`GOOGLE_API_KEY`) or \
+         DashScope `happyhorse-1.0-t2v` (needs `DASHSCOPE_API_KEY`; honors \
+         `resolution` 720P/1080P). Requires `imageToolsEnabled: true` in \
+         `.thclaws/settings.json`. Aspect ratios: 16:9 (default) or 9:16. \
+         Duration: 4–8s (default 8). Video is expensive. Returns a job_id \
+         immediately; poll MediaJobStatus until `done`."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "prompt": { "type": "string", "description": "Description of the video: subject, action, camera motion, style. Veo follows detailed cinematic briefs well." },
+                "prompt": { "type": "string", "description": "Description of the video: subject, action, camera motion, style." },
                 "model": { "type": "string", "description": MODEL_DESC },
-                "provider": { "type": "string", "description": "Optional explicit provider. Currently only `veo`.", "enum": ["veo"] },
-                "aspect_ratio": { "type": "string", "description": "16:9 (default) or 9:16. Veo only supports these two.", "enum": ["16:9", "9:16", "1:1", "3:4", "4:3"] },
-                "duration": { "type": "integer", "description": "Clip length in seconds, 4–8 (default 8).", "minimum": 4, "maximum": 8 }
+                "provider": { "type": "string", "description": "Optional explicit provider (`veo` | `dashscope`).", "enum": ["veo", "dashscope"] },
+                "aspect_ratio": { "type": "string", "description": "16:9 (default) or 9:16.", "enum": ["16:9", "9:16", "1:1", "3:4", "4:3"] },
+                "duration": { "type": "integer", "description": "Clip length in seconds, 4–8 (default 8).", "minimum": 4, "maximum": 8 },
+                "resolution": { "type": "string", "description": "Output resolution for providers that support it (DashScope happyhorse). Default 720P.", "enum": ["720P", "1080P"] }
             },
             "required": ["prompt"]
         })
@@ -138,11 +149,12 @@ impl Tool for ImageToVideoTool {
         "ImageToVideo"
     }
     fn description(&self) -> &'static str {
-        "Animate an existing image into a short video clip via Veo (the image \
-         conditions the first frame). Pass `input_path` (a path under the \
-         workspace) + a `prompt` describing the motion. Same gating, keys, \
-         aspect ratios, duration, and cost as TextToVideo. Returns a job_id; \
-         poll MediaJobStatus until `done`."
+        "Animate an existing image into a short video clip (the image \
+         conditions the first frame). Providers: Veo (`fast`/`quality`/`lite`) \
+         or DashScope `happyhorse-1.0-i2v` (honors `resolution`). Pass \
+         `input_path` (a path under the workspace) + a `prompt` describing the \
+         motion. Same gating + keys as TextToVideo. Returns a job_id; poll \
+         MediaJobStatus until `done`."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -151,9 +163,10 @@ impl Tool for ImageToVideoTool {
                 "input_path": { "type": "string", "description": "Path to the source image inside the workspace (the first frame). PNG/JPEG/WebP." },
                 "prompt": { "type": "string", "description": "Describe the motion/animation to apply to the image." },
                 "model": { "type": "string", "description": MODEL_DESC },
-                "provider": { "type": "string", "enum": ["veo"] },
+                "provider": { "type": "string", "enum": ["veo", "dashscope"] },
                 "aspect_ratio": { "type": "string", "enum": ["16:9", "9:16", "1:1", "3:4", "4:3"] },
-                "duration": { "type": "integer", "minimum": 4, "maximum": 8 }
+                "duration": { "type": "integer", "minimum": 4, "maximum": 8 },
+                "resolution": { "type": "string", "enum": ["720P", "1080P"] }
             },
             "required": ["input_path", "prompt"]
         })
@@ -285,6 +298,28 @@ mod tests {
             "veo-3.1-lite-generate-preview"
         );
         assert_eq!(registry::resolve_video("veo", "").unwrap().0.id(), "veo");
+    }
+
+    #[test]
+    fn happyhorse_resolves_to_dashscope_video() {
+        let (p, m) = registry::resolve_video("", "happyhorse-1.0-t2v").unwrap();
+        assert_eq!(p.id(), "dashscope");
+        assert_eq!(m, "happyhorse-1.0-t2v");
+        // bare alias + explicit provider
+        assert_eq!(
+            registry::resolve_video("", "happyhorse").unwrap().0.id(),
+            "dashscope"
+        );
+        assert_eq!(
+            registry::resolve_video("dashscope", "").unwrap().1,
+            "happyhorse-1.0-t2v"
+        );
+        // i2v sibling.
+        let (pi, mi) = registry::resolve_video("", "happyhorse-1.0-i2v").unwrap();
+        assert_eq!(pi.id(), "dashscope");
+        assert_eq!(mi, "happyhorse-1.0-i2v");
+        // Veo stays the default video provider.
+        assert_eq!(registry::resolve_video("", "").unwrap().0.id(), "veo");
     }
 
     #[test]

@@ -964,7 +964,13 @@ pub fn spawn_with_roots(
     // fallback for users who want to force a reload.
     spawn_settings_watcher(input_tx.clone());
 
-    let (events_tx, _) = broadcast::channel::<ViewEvent>(256);
+    // Capacity sized for fast multi-subscriber streaming. Team mode adds
+    // collectors (LINE/Telegram bridges, web WS) alongside the GUI, and a
+    // burst of small AssistantTextDelta tokens can outrun a slow consumer.
+    // At 256 the laggy subscriber silently dropped text deltas (issue #163
+    // Bug 1: thinking rendered, response text vanished); 2048 absorbs the
+    // bursts. Lagged events are now also logged in the forwarders.
+    let (events_tx, _) = broadcast::channel::<ViewEvent>(2048);
     let cancel = crate::cancel::CancelToken::new();
     let ready_gate = Arc::new(ReadyGate::new());
     // Mid-turn injection queue (issue #106) — shared between the IPC

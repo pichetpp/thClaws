@@ -28,11 +28,13 @@ const MODELS = {
     { value: "fast", label: "Veo 3.1 Fast" },
     { value: "quality", label: "Veo 3.1" },
     { value: "lite", label: "Veo 3.1 Lite" },
+    { value: "happyhorse-1.0-t2v", label: "HappyHorse 1.0 (DashScope)" },
   ],
   image2video: [
     { value: "fast", label: "Veo 3.1 Fast" },
     { value: "quality", label: "Veo 3.1" },
     { value: "lite", label: "Veo 3.1 Lite" },
+    { value: "happyhorse-1.0-i2v", label: "HappyHorse 1.0 (DashScope)" },
   ],
 };
 
@@ -69,6 +71,7 @@ const aspectSel = $("aspect");
 const sizeField = $("size-field");
 const durationField = $("duration-field");
 const durationSel = $("duration");
+const resolutionField = $("resolution-field");
 const generateBtn = $("generate");
 const statusEl = $("status");
 const hintEl = $("hint");
@@ -116,6 +119,7 @@ function applyMode() {
   inputPathField.hidden = !needsInput();
   sizeField.hidden = isVideo();
   durationField.hidden = !isVideo();
+  resolutionField.hidden = !isVideo();
   // Video only supports 16:9 / 9:16 — disable the others.
   [...aspectSel.options].forEach((o) => {
     o.disabled = isVideo() && !["16:9", "9:16"].includes(o.value);
@@ -190,7 +194,17 @@ function makeCard(item) {
   } else {
     card.innerHTML = `${badge}<img src="${url}" alt="" loading="lazy"><div class="cap">${cap}</div>`;
   }
-  card.addEventListener("click", () => openLightbox(item));
+  card.addEventListener("click", () => {
+    // In an input-needing mode (Image Edit / Image → Video), clicking an
+    // image card picks it as the source frame; otherwise (and for video
+    // cards) open the lightbox.
+    if (needsInput() && item.type === "image") {
+      inputPath.value = item.path;
+      setStatus(`Source set: ${basename(item.path)}`, "ok");
+    } else {
+      openLightbox(item);
+    }
+  });
   return card;
 }
 
@@ -257,6 +271,7 @@ async function generate() {
   }
   if (isVideo()) {
     args.duration = parseInt(durationSel.value, 10);
+    args.resolution = $("resolution").value;
   } else {
     args.size = sizeField.hidden ? "1K" : $("size").value;
   }

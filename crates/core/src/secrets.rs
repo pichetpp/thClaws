@@ -95,6 +95,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::Anthropic,
     ProviderKind::OpenAI,
     ProviderKind::OpenRouter,
+    ProviderKind::TokenRouter,
     ProviderKind::Gemini,
     ProviderKind::DashScope,
     ProviderKind::QwenCloud,

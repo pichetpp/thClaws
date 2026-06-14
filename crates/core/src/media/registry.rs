@@ -8,7 +8,8 @@
 use crate::error::{Error, Result};
 use crate::media::provider::{ImageModelInfo, ImageProvider, VideoProvider};
 use crate::media::providers::{
-    GeminiImageProvider, OpenAiImageProvider, QwenImageProvider, VeoVideoProvider,
+    DashScopeVideoProvider, GeminiImageProvider, OpenAiImageProvider, QwenImageProvider,
+    VeoVideoProvider,
 };
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ pub fn all() -> Vec<Arc<dyn ImageProvider>> {
 
 /// All registered video providers, in resolution priority order.
 pub fn video_all() -> Vec<Arc<dyn VideoProvider>> {
-    vec![Arc::new(VeoVideoProvider)]
+    vec![Arc::new(VeoVideoProvider), Arc::new(DashScopeVideoProvider)]
 }
 
 /// Resolve a video `provider`/`model` pair to a concrete provider + its

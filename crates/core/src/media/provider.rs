@@ -105,6 +105,10 @@ pub struct VideoRequest {
     pub init_image: Option<InputImage>,
     pub aspect_ratio: String,
     pub duration_seconds: u32,
+    /// Output resolution tier, e.g. `720P` / `1080P`. Veo ignores it
+    /// (resolution follows its aspect); DashScope video (happyhorse)
+    /// takes it as a `resolution` parameter that changes pricing.
+    pub resolution: String,
 }
 
 /// Opaque handle to a provider-side job (e.g. a Veo long-running

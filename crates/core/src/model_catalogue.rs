@@ -987,6 +987,7 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
         ProviderKind::OpenAIResponses => "openai-responses",
         ProviderKind::ChatGptCodex => "chatgpt-codex",
         ProviderKind::OpenRouter => "openrouter",
+        ProviderKind::TokenRouter => "tokenrouter",
         ProviderKind::Gemini => "gemini",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OllamaAnthropic => "ollama-anthropic",

@@ -234,6 +234,21 @@ In rough order of first contribution.
   as `zai/` / `qc/` / `ap/` — strip on the wire, keep canonical in
   the catalogue + picker.
 
+### [@mgprona](https://github.com/mgprona)
+- **Issue [#162](https://github.com/thClaws/thClaws/issues/162)** —
+  Requested first-class TokenRouter support and pinned the integration
+  shape (OpenAI-compatible, `tokenrouter/*` prefix, base
+  `api.tokenrouter.com/v1`). Shipped in v0.60.0 as a dedicated
+  `tokenrouter/` provider + catalogue, beyond the generic `oai/` slot.
+
+### [@Mayth01](https://github.com/Mayth01)
+- **Issue [#163](https://github.com/thClaws/thClaws/issues/163)** —
+  Three precisely-diagnosed serve + team-mode bugs on Linux: dropped
+  text deltas from an undersized `ViewEvent` broadcast channel, the
+  `pkill --team-dir` getopt failure, and an HTTP 400 on reasoning-only
+  turns — each with a root cause and a tested fix. Applied in v0.60.0;
+  a model bug report.
+
 ## How to be listed
 
 1. **Open a PR** — even small ones (typo fix, documentation,

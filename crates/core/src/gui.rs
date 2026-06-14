@@ -144,11 +144,12 @@ fn spawn_event_translator(handle: &SharedSessionHandle, proxy: EventLoopProxy<Us
                             let _ = proxy.send_event(UserEvent::Dispatch(envelope));
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Slow consumer dropped events; resync by replaying
-                        // a fresh "history replaced" with the agent's view
-                        // would need agent access — skip for now and hope
-                        // the next live event keeps state in sync.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Slow consumer dropped events; log the drop so it's
+                        // diagnosable (issue #163 Bug 1) — a full re-sync
+                        // would need agent access; the next live event keeps
+                        // state roughly in sync.
+                        eprintln!("[event_forwarder:gui] lagged: dropped {n} events");
                         continue;
                     }
                     Err(_) => break,

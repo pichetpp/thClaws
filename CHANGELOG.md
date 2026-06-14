@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-06-14
+
+More providers + media models, and a batch of Linux team/serve fixes.
+
+### Added
+- **TokenRouter provider** ([#162](https://github.com/thClaws/thClaws/issues/162)) — first-class, OpenAI-compatible access to TokenRouter's unified gateway (300+ models). Use `tokenrouter/<vendor>/<model>` (e.g. `tokenrouter/anthropic/claude-opus-4.7`); key `TOKENROUTER_API_KEY`, base overridable via `TOKENROUTER_BASE_URL`. Models populate the picker beyond the generic `oai/` slot.
+- **HappyHorse video models (DashScope).** `happyhorse-1.0-t2v` (text→video) and `happyhorse-1.0-i2v` (image→video) added to `TextToVideo` / `ImageToVideo` and the Media Studio shell, with a 720P/1080P `resolution` option. Needs `DASHSCOPE_API_KEY`. Local source images for i2v are sent inline (base64 data URI) — no upload step.
+
+### Fixed
+- **Team + serve mode on Linux** ([#163](https://github.com/thClaws/thClaws/issues/163)): (1) response text no longer vanishes under multi-subscriber streaming — the `ViewEvent` broadcast buffer was 256, now 2048, and lag is logged in the forwarders instead of dropped silently; (2) teammate cleanup `pkill -f -- "--team-dir …"` now works (the leading `--` was being parsed as an option — broke on Linux *and* macOS); (3) reasoning-only assistant turns serialize `content: ""` so OpenAI-compatible providers (DeepSeek, …) don't reject them with HTTP 400.
+- **Media Studio source-image picker.** Clicking a gallery image in Image Edit / Image → Video now sets it as the source (the "click a gallery item" hint finally does something).
+
 ## [0.59.0] - 2026-06-14
 
 Built-in media generation — multi-provider image + video tools, plus a Media Studio GUI shell to drive them.

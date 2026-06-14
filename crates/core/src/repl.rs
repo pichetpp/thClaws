@@ -3760,6 +3760,25 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("openrouter/"),
             ))
         }
+        ProviderKind::TokenRouter => {
+            // TokenRouter (tokenrouter.com) — OpenAI-compatible unified
+            // gateway to 300+ models. Models use the
+            // `tokenrouter/<vendor>/<model>` form; the prefix is stripped
+            // before the request reaches the upstream. Override the base
+            // via TOKENROUTER_BASE_URL.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "TOKENROUTER_BASE_URL",
+                "https://api.tokenrouter.com/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("tokenrouter/"),
+            ))
+        }
         ProviderKind::Anthropic => {
             let overlay = crate::providers::thclaws_gateway::for_kind(config, kind);
             let provider = match overlay {

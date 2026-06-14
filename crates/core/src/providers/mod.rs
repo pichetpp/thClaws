@@ -71,6 +71,12 @@ pub enum ProviderKind {
     /// from `~/.codex/auth.json` if absent).
     ChatGptCodex,
     OpenRouter,
+    /// TokenRouter (tokenrouter.com) — OpenAI-compatible unified gateway
+    /// to 300+ models. Same wire shape as [`OpenRouter`]; models route
+    /// via the `tokenrouter/<vendor>/<model>` prefix (stripped before the
+    /// upstream request). Key `TOKENROUTER_API_KEY`, base overridable via
+    /// `TOKENROUTER_BASE_URL`.
+    TokenRouter,
     Gemini,
     Ollama,
     OllamaAnthropic,
@@ -101,6 +107,7 @@ impl ProviderKind {
         Self::OpenAIResponses,
         Self::ChatGptCodex,
         Self::OpenRouter,
+        Self::TokenRouter,
         Self::Gemini,
         Self::Ollama,
         Self::OllamaAnthropic,
@@ -127,6 +134,7 @@ impl ProviderKind {
             Self::OpenAIResponses => "openai-responses",
             Self::ChatGptCodex => "chatgpt-codex",
             Self::OpenRouter => "openrouter",
+            Self::TokenRouter => "tokenrouter",
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
             Self::OllamaAnthropic => "ollama-anthropic",
@@ -154,6 +162,7 @@ impl ProviderKind {
             Self::OpenAIResponses => "codex/gpt-5.2-codex",
             Self::ChatGptCodex => "chatgpt-codex/gpt-5.4",
             Self::OpenRouter => "openrouter/anthropic/claude-sonnet-4-6",
+            Self::TokenRouter => "tokenrouter/anthropic/claude-sonnet-4.5",
             // Pinned to a versioned ID (matching Anthropic / OpenAI
             // convention) rather than `gemini-flash-latest` — `-latest`
             // is a rolling Google-side alias that could promote into a
@@ -228,6 +237,7 @@ impl ProviderKind {
         match self {
             // Agentic Press is a hosted gateway with a fixed URL — no env
             // override, no UI knob. Build-time only.
+            Self::TokenRouter => Some("TOKENROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
             Self::QwenCloud => Some("QWENCLOUD_BASE_URL"),
             Self::Ollama => Some("OLLAMA_BASE_URL"),
@@ -267,6 +277,7 @@ impl ProviderKind {
     pub fn default_endpoint(&self) -> Option<&'static str> {
         match self {
             // Agentic Press URL is fixed build-time; no UI placeholder.
+            Self::TokenRouter => Some("https://api.tokenrouter.com/v1"),
             Self::DashScope => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
             // International / Singapore region of DashScope.
             Self::QwenCloud => Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
@@ -331,6 +342,7 @@ impl ProviderKind {
             // ~/.config/thclaws/auth/<profile>.json — no env var.
             Self::ChatGptCodex => None,
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
+            Self::TokenRouter => Some("TOKENROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
             Self::Ollama => None,
             Self::OllamaAnthropic => None,
@@ -448,6 +460,9 @@ impl ProviderKind {
             | Self::DeepSeek
             | Self::Nvidia
             | Self::OpenCodeGo
+            // TokenRouter uses full `tokenrouter/<vendor>/<model>` ids; no
+            // short-alias table (users type the explicit id).
+            | Self::TokenRouter
             | Self::Minimax => None,
         }
     }
@@ -460,6 +475,11 @@ impl ProviderKind {
             // Check openrouter/ first — it's the most specific prefix.
             // Models look like openrouter/anthropic/claude-sonnet-4-6.
             Some(Self::OpenRouter)
+        } else if model.starts_with("tokenrouter/") {
+            // TokenRouter (tokenrouter.com) — OpenAI-compatible unified
+            // gateway. Models look like tokenrouter/anthropic/claude-sonnet-4.5;
+            // the `tokenrouter/` prefix is stripped before the upstream call.
+            Some(Self::TokenRouter)
         } else if model.starts_with("ap/") {
             Some(Self::AgenticPress)
         } else if model.starts_with("agent/") {
@@ -1435,6 +1455,36 @@ mod tests {
         );
         assert_eq!(ProviderKind::Minimax.name(), "minimax");
         assert_eq!(ProviderKind::Minimax.default_model(), "minimax/MiniMax-M3");
+    }
+
+    #[test]
+    fn detect_tokenrouter_prefix_routes_to_tokenrouter_provider() {
+        // tokenrouter/ must be detected before the bare-vendor heuristics.
+        assert_eq!(
+            ProviderKind::detect("tokenrouter/anthropic/claude-sonnet-4.5"),
+            Some(ProviderKind::TokenRouter)
+        );
+        assert_eq!(
+            ProviderKind::detect("tokenrouter/openai/gpt-5.4-nano"),
+            Some(ProviderKind::TokenRouter)
+        );
+        assert_eq!(
+            ProviderKind::TokenRouter.api_key_env(),
+            Some("TOKENROUTER_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::TokenRouter.endpoint_env(),
+            Some("TOKENROUTER_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::TokenRouter.default_endpoint(),
+            Some("https://api.tokenrouter.com/v1")
+        );
+        assert_eq!(ProviderKind::TokenRouter.name(), "tokenrouter");
+        assert_eq!(
+            ProviderKind::from_name("tokenrouter"),
+            Some(ProviderKind::TokenRouter)
+        );
     }
 
     #[test]

@@ -1117,8 +1117,12 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
                 // Slow consumer dropped frames; resume — the agent
                 // re-asks on retry, and lagged ask-frames are no
                 // worse than the pre-fix state (which was complete
-                // silence).
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // silence). Log the drop so lag is diagnosable
+                // (issue #163 Bug 1) rather than vanishing silently.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("[event_forwarder:ws] lagged: dropped {n} events");
+                    continue;
+                }
                 Err(_) => return,
             }
         }
@@ -1176,10 +1180,11 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
                         }
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Slow consumer dropped events; ignore and resume
-                    // — Phase 1A reconnect-with-snapshot-replay will
-                    // re-sync state on next ws drop.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Slow consumer dropped events; log + resume —
+                    // reconnect-with-snapshot-replay re-syncs state on
+                    // the next ws drop (issue #163 Bug 1).
+                    eprintln!("[event_forwarder:ws] lagged: dropped {n} events");
                     continue;
                 }
                 Err(_) => break,

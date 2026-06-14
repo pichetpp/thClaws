@@ -206,6 +206,12 @@ impl OpenAIProvider {
                     msg["content"] = json!(content_text);
                 } else if has_tools {
                     msg["content"] = Value::Null;
+                } else {
+                    // Reasoning-only turn (a thinking block, no text / tools /
+                    // images). Without a `content` field some OpenAI-compatible
+                    // providers (DeepSeek, etc.) reject the message with HTTP
+                    // 400 — fall back to an empty string (issue #163 Bug 3).
+                    msg["content"] = json!("");
                 }
                 if has_tools {
                     msg["tool_calls"] = json!(tool_calls);
@@ -1639,6 +1645,42 @@ mod tests {
         assert!(
             assistant_plain.get("reasoning_content").is_none(),
             "non-thinking model must not see reasoning_content; got {assistant_plain:?}"
+        );
+    }
+
+    /// Issue #163 Bug 3: a reasoning-ONLY assistant turn (a Thinking
+    /// block, no text / tools) must still serialize a `content` field —
+    /// some OpenAI-compatible providers 400 on an assistant message with
+    /// no `content`. We fall back to an empty string.
+    #[test]
+    fn messages_to_openai_reasoning_only_turn_has_empty_content() {
+        let history = vec![
+            Message::user("solve x"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    content: "thinking but produced no text".into(),
+                    signature: None,
+                }],
+            },
+            Message::user("continue"),
+        ];
+        let req = StreamRequest {
+            model: "deepseek/deepseek-v4-flash".into(),
+            system: None,
+            messages: history,
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+        let msgs = OpenAIProvider::messages_to_openai(&req);
+        let assistant = msgs.iter().find(|m| m["role"] == "assistant").unwrap();
+        // `content` must be present (not missing) and an empty string.
+        assert_eq!(
+            assistant.get("content"),
+            Some(&serde_json::json!("")),
+            "reasoning-only assistant must carry content:\"\"; got {assistant:?}"
         );
     }
 }

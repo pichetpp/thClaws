@@ -114,10 +114,14 @@ pub fn kill_my_teammates() {
         None => return,
     };
     // Match `--team-dir <abs path>` in cmdline. Most processes never
-    // carry that flag pair so the match is highly specific.
+    // carry that flag pair so the match is highly specific. The `--`
+    // end-of-options marker is REQUIRED: the pattern starts with `--`,
+    // which pkill's getopt otherwise parses as an unknown long option
+    // ("unrecognized option '--team-dir …'" on Linux procps-ng; "illegal
+    // option" on macOS) — no teammates get killed (issue #163 Bug 2).
     let pattern = format!("--team-dir {}", dir);
     let _ = std::process::Command::new("pkill")
-        .args(["-f", &pattern])
+        .args(["-f", "--", &pattern])
         .status();
 }
 
