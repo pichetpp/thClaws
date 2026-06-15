@@ -72,8 +72,12 @@ graceful degradation, no panic.
 | **`cache_creation_per_mtok`** | `f64` | no | USD per 1M cache-WRITE tokens. Anthropic charges a write premium (Sonnet 4.6: `$3.75` for 5min TTL); OpenAI auto-manages, leaves this `null`. The 5min vs 1h TTL distinction is collapsed into one field for v1; split later if a real use case demands it. |
 | **`reasoning_per_mtok`** | `f64` | no | USD per 1M o1/o3 hidden reasoning tokens. Most providers fold this into output_per_mtok — leave absent there. |
 | **`tier_billed`** | `bool` | no | `true` ⇒ model is bundled into a subscription tier (Codex via ChatGPT Plus/Pro/Team, enterprise contracts). `compute_cost_usd` returns `None` so callers show "tier-billed" rather than $0. |
+| `price_per_image_usd` | `f64` | no | USD per generated image — image-generation models (`gpt-image-2`, `gemini-3.1-*-image`, `qwen-image-2.0`). Priced per-image, not per-token, so it sits outside the `*_per_mtok` sum (see [`built-in-tools.md`](built-in-tools.md) §9d). |
+| `price_per_video_second_usd` | `f64` | no | USD per second of generated video — Veo / HappyHorse. Per-second metering at the gateway is a follow-up; desktop users with a native key bill the provider directly. |
 
-Bold rows added in schema 4 (dev-plan/24).
+Bold rows added in schema 4 (dev-plan/24). Media rows (`price_per_image_usd`, `price_per_video_second_usd`) added in dev-plan/40.
+
+> **Pseudo-model rows.** `openrouter/fusion+` is a thClaws pseudo-model with no upstream `/v1/models` entry. It carries the variable-price sentinel and is **pinned** in `refresh-model-catalogue.py` (`PROVIDERS["openrouter"]["pin"]`) so a normal `make catalogue` run never prunes it. See [`provider-openai.md`](provider-openai.md) §7.
 
 ### `ProviderCatalogue` fields
 

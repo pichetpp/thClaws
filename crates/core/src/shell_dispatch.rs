@@ -2349,6 +2349,41 @@ pub async fn dispatch(
             }
             Err(e) => emit(events_tx, format!("/kms merge failed: {e}")),
         },
+        SlashCommand::KmsExportOkf { name, output_dir } => {
+            let out = output_dir.unwrap_or_else(|| format!("{name}-okf"));
+            match crate::kms::export_okf(&name, std::path::Path::new(&out)) {
+                Ok(report) => emit(
+                    events_tx,
+                    format!(
+                        "exported '{name}' as OKF bundle → {} ({} page(s), {} reference(s)).",
+                        report.out_dir.display(),
+                        report.pages,
+                        report.sources,
+                    ),
+                ),
+                Err(e) => emit(events_tx, format!("/kms export-okf failed: {e}")),
+            }
+        }
+        SlashCommand::KmsImportOkf {
+            bundle,
+            name,
+            scope,
+        } => match crate::kms::import_okf(std::path::Path::new(&bundle), &name, scope) {
+            Ok(report) => {
+                emit(
+                    events_tx,
+                    format!(
+                        "imported OKF bundle '{bundle}' → KMS '{name}' ({} scope): {} page(s), {} source(s). \
+                         Attach it with `/kms use {name}`.",
+                        scope.as_str(),
+                        report.pages,
+                        report.sources,
+                    ),
+                );
+                broadcast_kms_update(events_tx);
+            }
+            Err(e) => emit(events_tx, format!("/kms import-okf failed: {e}")),
+        },
         SlashCommand::KmsSearch {
             name,
             query,

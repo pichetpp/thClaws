@@ -547,6 +547,30 @@ Internally:
 
 ---
 
+## 9d. Media generation tools (dev-plan/40)
+
+Five tools — `TextToImage`, `ImageToImage`, `TextToVideo`, `ImageToVideo`, `MediaJobStatus` (`src/tools/image_gen.rs`, `src/tools/video_gen.rs`) — sit on a provider abstraction in `src/media/`:
+
+- **`provider.rs`** — `ImageProvider` / `VideoProvider` traits, `ImageRequest` / `VideoRequest` (the latter carries `resolution` + `duration_seconds` + optional `init_image`), `JobState` (`Running { pct } | Done { bytes } | Failed { msg }`), `ProviderJobRef`, and `resolve_endpoint(native_key_vars, native_base, gateway_segment)` (native key env-var cascade + gateway overlay).
+- **`registry.rs`** — `all()` (image: `gemini`, `openai`, `qwen`), `video_all()` (video: `veo`, `dashscope_video`), `resolve()` / `resolve_video()` map a `(provider, model)` pair to an impl. Each provider's `resolve_model()` accepts ids + aliases.
+- **`providers/{gemini,openai,qwen,veo,dashscope_video}.rs`** — one file per backend.
+- **`job.rs`** — append-only JSONL job store at `.thclaws/media-jobs.jsonl` (latest line per id wins). Video is intrinsically async: the `*Video` tools `submit()` and return a `job_id`; `MediaJobStatus` reloads the ref and `poll()`s the provider, downloading the clip on `Done`.
+- **`mod.rs`** — `save_image` → `output/img-<ts>-<sha8>.<ext>`, `save_video` → `output/vid-<ts>-<sha8>.mp4`, plus `sniff_ext` / `sniff_video_ext` content sniffers.
+
+| Tool | Approval | Backends (model → key) |
+|---|---|---|
+| `TextToImage` / `ImageToImage` | prompt | Gemini `gemini-3.1-{flash,pro}-image` (`GEMINI_API_KEY`/`GOOGLE_API_KEY`), OpenAI `gpt-image-2` (`OPENAI_API_KEY`), Qwen `qwen-image-2.0[-pro]` (`DASHSCOPE_API_KEY`) |
+| `TextToVideo` / `ImageToVideo` | prompt | Veo `veo-3.1-{fast,,lite}-generate-preview` (Google key; `durationSeconds` clamped 4–8), DashScope `happyhorse-1.0-{t2v,i2v}` (`DASHSCOPE_API_KEY`; `720P`/`1080P`) |
+| `MediaJobStatus` | auto | reads `.thclaws/media-jobs.jsonl`, polls the owning provider |
+
+`ImageToVideo` sends the local first-frame image inline as a base64 data URI (DashScope `input.media[].first_frame`; Veo equivalent) — no upload round-trip.
+
+**Pricing** rides two catalogue fields beyond per-mtok: `price_per_image_usd` and `price_per_video_second_usd` (see [`model-catalogue.md`](model-catalogue.md)).
+
+**Gating** — all five are registered only when `AppConfig::image_tools_enabled` is true (`settings.json` `mediaToolsEnabled`, legacy alias `imageToolsEnabled`). The exception is the built-in **Media Studio** gui-shell: `ipc.rs::gui_shell_tool_invoke` force-enables the media tools when `shell_id == "media-studio"` regardless of the flag (`let media_enabled = shell_id == "media-studio" || AppConfig::load()…image_tools_enabled`), so the shell is a zero-config on-ramp while the agent surface stays opt-in. Registration happens at the agent/shared-session/shell sites listed in `shared_session.rs` (6 sites, each guarded by the flag).
+
+---
+
 ## 10. Code organization
 
 ```

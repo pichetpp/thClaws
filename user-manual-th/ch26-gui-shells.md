@@ -105,6 +105,36 @@ Mode A เป็น default Mode B (Tier 2) ใช้สำหรับเรี
 }
 ```
 
+## Media Studio shell  *(built-in)*
+
+thClaws มี shell มาให้สามตัว — **Session Explorer**, **Chatbot** และ
+**Media Studio** โดย Media Studio เป็นหน้าจอแบบคลิก ๆ สำหรับเครื่องมือ
+สร้างภาพและวิดีโอ (บทที่ 11) ให้สร้างสื่อได้โดยไม่ต้องพิมพ์ tool call ในแชต
+
+เปิดจาก picker ของ GUI Shell (`media-studio`) หรือ pin ไว้:
+
+```jsonc
+// ./.thclaws/settings.json
+{ "guiShell": "media-studio" }
+```
+
+มันทำอะไรได้:
+
+- **สลับโหมด** — Text → Image, Image → Image (แก้ภาพ), Text → Video,
+  Image → Video
+- **เลือก provider / model** พร้อมตัวควบคุม **resolution** สำหรับวิดีโอ
+  (720P / 1080P)
+- **แกลเลอรี** ของทุกอย่างที่อยู่ใน `output/` อยู่แล้ว (ไม่ใช่แค่ที่เพิ่ง
+  สร้าง) — คลิกชิ้นไหนก็ได้เพื่อตั้งเป็นภาพต้นทางของงาน Image → Image หรือ
+  Image → Video หรือคลิกเพื่อเปิดดูใน lightbox
+- **วิดีโอ async** จัดการให้อัตโนมัติ — shell จะ submit งานแล้ว poll
+  `MediaJobStatus` จนคลิปเสร็จ แล้วหย่อนลงแกลเลอรี
+
+Media Studio **เปิด media tools ให้อัตโนมัติ** สำหรับ session ของมันเอง
+จึงไม่ต้องตั้ง `mediaToolsEnabled` ก่อน — แต่ยังต้องมี key ของ provider
+ที่เกี่ยวข้อง (`GEMINI_API_KEY` / `OPENAI_API_KEY` / `DASHSCOPE_API_KEY`
+ดูบทที่ 11) ใน environment หรือ keychain
+
 ---
 
 ## Mode B — serve shell ขึ้น cloud  *(Tier 2)*

@@ -259,17 +259,18 @@ pub(crate) fn native_confirm(title: &str, message: &str, yes_label: &str, no_lab
 /// PowerShell `FolderBrowserDialog`) with the `rfd` crate, which calls
 /// the same OS APIs natively. Eliminates dependence on `osascript` /
 /// `zenity` being installed and PowerShell quote-escaping bugs.
-fn pick_directory_native(start_dir: &str) -> Option<String> {
+fn pick_directory_native(start_dir: &str, title: &str) -> Option<String> {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         FileDialog::new()
-            .set_title("Select working directory")
+            .set_title(title)
             .set_directory(start_dir)
             .pick_folder()
             .map(|p| p.to_string_lossy().into_owned())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
+        let _ = title;
         None
     }
 }
@@ -1051,7 +1052,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                         .unwrap_or_else(|| std::env::current_dir()
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_else(|_| ".".into()));
-                    let result = pick_directory_native(&start_dir);
+                    let result = pick_directory_native(&start_dir, "Select working directory");
                     let payload = match result {
                         Some(path) => serde_json::json!({
                             "type": "directory_picked",
@@ -1065,6 +1066,117 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     let _ = proxy_for_ipc.send_event(
                         UserEvent::SessionLoaded(payload.to_string()),
                     );
+                }
+                // OKF (Open Knowledge Format) import/export for a KMS,
+                // driven from the sidebar "Knowledge" header context menu.
+                // GUI-only: both open a native folder picker (rfd), so they
+                // can't live in the transport-agnostic handle_ipc path. The
+                // picker blocks the event loop the same way `pick_directory`
+                // above does.
+                "kms_export_okf" => {
+                    let name = msg
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let start_dir = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".into());
+                    let payload = if name.is_empty() {
+                        serde_json::json!({
+                            "type": "kms_okf_result", "ok": false,
+                            "message": "Export failed: no KMS selected.",
+                        })
+                    } else {
+                        match pick_directory_native(
+                            &start_dir,
+                            &format!("Export '{name}' — choose a destination folder"),
+                        ) {
+                            None => serde_json::json!({
+                                "type": "kms_okf_result", "ok": false,
+                                "message": "Export cancelled.",
+                            }),
+                            Some(dir) => {
+                                let out = std::path::Path::new(&dir).join(format!("{name}-okf"));
+                                match crate::kms::export_okf(&name, &out) {
+                                    Ok(r) => serde_json::json!({
+                                        "type": "kms_okf_result", "ok": true,
+                                        "message": format!(
+                                            "Exported '{name}' → {} ({} page(s), {} reference(s)).",
+                                            r.out_dir.display(), r.pages, r.sources,
+                                        ),
+                                    }),
+                                    Err(e) => serde_json::json!({
+                                        "type": "kms_okf_result", "ok": false,
+                                        "message": format!("Export failed: {e}"),
+                                    }),
+                                }
+                            }
+                        }
+                    };
+                    let _ = proxy_for_ipc
+                        .send_event(UserEvent::SessionLoaded(payload.to_string()));
+                }
+                "kms_import_okf" => {
+                    let name = msg
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let scope = match msg.get("scope").and_then(|v| v.as_str()) {
+                        Some("project") => crate::kms::KmsScope::Project,
+                        _ => crate::kms::KmsScope::User,
+                    };
+                    let start_dir = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".into());
+                    let mut imported = false;
+                    let payload = if name.is_empty() {
+                        serde_json::json!({
+                            "type": "kms_okf_result", "ok": false,
+                            "message": "Import failed: name the new KMS first.",
+                        })
+                    } else {
+                        match pick_directory_native(
+                            &start_dir,
+                            "Import OKF bundle — choose the bundle folder",
+                        ) {
+                            None => serde_json::json!({
+                                "type": "kms_okf_result", "ok": false,
+                                "message": "Import cancelled.",
+                            }),
+                            Some(dir) => match crate::kms::import_okf(
+                                std::path::Path::new(&dir),
+                                &name,
+                                scope,
+                            ) {
+                                Ok(r) => {
+                                    imported = true;
+                                    serde_json::json!({
+                                        "type": "kms_okf_result", "ok": true,
+                                        "message": format!(
+                                            "Imported OKF bundle → KMS '{name}' ({} page(s), {} source(s)). Tick it to attach.",
+                                            r.pages, r.sources,
+                                        ),
+                                    })
+                                }
+                                Err(e) => serde_json::json!({
+                                    "type": "kms_okf_result", "ok": false,
+                                    "message": format!("Import failed: {e}"),
+                                }),
+                            },
+                        }
+                    };
+                    let _ = proxy_for_ipc
+                        .send_event(UserEvent::SessionLoaded(payload.to_string()));
+                    if imported {
+                        // Refresh the sidebar's KMS list so the new one shows.
+                        let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
+                            crate::kms::build_update_payload().to_string(),
+                        ));
+                    }
                 }
                 "confirm" => {
                     // Native OS confirmation dialog. Frontend sends an

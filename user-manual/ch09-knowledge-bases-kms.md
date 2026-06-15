@@ -238,6 +238,7 @@ The full surface, grouped by purpose:
 - **Cross-linking**: `/kms link`
 - **Consolidation**: `/kms merge`
 - **Decision support**: `/kms challenge`
+- **Interchange**: `/kms export-okf`, `/kms import-okf`
 - **Destruction**: `/kms drop`
 
 Most subcommands accept short aliases (e.g. `add` for `ingest`, `rm` for `drop`) — the aliases are listed inline under each section heading below.
@@ -626,11 +627,62 @@ Pages without any frontmatter at all are flagged separately under `pages without
 
 Legacy KMSes (created before manifests existed) have no `manifest.json` and silently skip the per-field check. Run `/kms migrate <name> --apply` to bring them to v1.0; the migration is purely additive (writes the manifest file, doesn't touch pages).
 
+## Importing and exporting OKF bundles
+
+A KMS can be shipped to — and created from — an **Open Knowledge Format (OKF)** bundle. OKF is Google's open v0.1 spec for representing knowledge as a folder of markdown files with YAML frontmatter — the same "LLM wiki" shape a KMS already uses. Because the formats are so close, this is a clean round-trip: export a KMS as a vendor-neutral bundle you can zip up, commit to git, or hand to another team's agent; and import any OKF bundle (yours or someone else's) as a new KMS.
+
+Nothing about how your KMS works on disk changes — this is a converter, not a new storage format. The agent still reads your KMS exactly as before.
+
+### Export — `/kms export-okf NAME [OUT-DIR]`
+
+Writes the KMS as an OKF bundle. Without an output directory it lands in `./NAME-okf/` in your working directory:
+
+```
+❯ /kms export-okf notes
+exported 'notes' as OKF bundle → /Users/you/work/notes-okf (42 page(s), 7 reference(s)).
+```
+
+The bundle is a plain folder you can browse, diff, or archive:
+
+```
+notes-okf/
+├── index.md          # table of contents (declares okf_version)
+├── log.md            # change history
+├── SCHEMA.md         # your page conventions
+├── pages/            # one markdown file per page (your "concepts")
+└── references/       # your raw sources
+```
+
+During export the frontmatter is normalised to OKF's vocabulary — your `category:` becomes OKF's required `type:`, `topic:` becomes `description:`, comma-separated `tags` become a YAML list — and `[[wikilinks]]` become ordinary markdown links so any OKF reader can follow them. Your KMS-specific fields (`sources`, `verified`, `created`) are preserved as-is, so a round-trip loses nothing.
+
+### Import — `/kms import-okf BUNDLE-DIR NAME [--project]`
+
+Creates a **new** KMS named `NAME` from a bundle on disk. Defaults to user scope; add `--project` to create it under `./.thclaws/kms/` instead:
+
+```
+❯ /kms import-okf ./partner-bundle partner-knowledge
+imported OKF bundle './partner-bundle' → KMS 'partner-knowledge' (user scope): 30 page(s), 4 source(s).
+  attach it with `/kms use partner-knowledge`.
+```
+
+Import is forgiving by design (per the OKF spec): unknown field values, missing fields, and broken cross-links are all tolerated rather than rejected. Concepts that live anywhere in the bundle — not just under `pages/` — are pulled in, and the table of contents is rebuilt fresh so the result behaves like any other KMS. Import refuses if a KMS by that name already exists at the chosen scope; drop it or pick another name.
+
+### From the sidebar (GUI)
+
+You don't need the commands in the desktop app — **right-click the "Knowledge" section header** in the sidebar:
+
+- **Import OKF bundle…** asks for the new KMS name and scope, then opens a native folder picker for the bundle directory.
+- **Export OKF bundle** lists your KMSes; pick one and choose a destination folder.
+
+A short status line under the header confirms the result, and an import makes the new KMS appear immediately with its attach checkbox. (These menu actions are desktop-only because they open a native folder dialog; over `--serve`/remote use the slash commands.)
+
 ## Sidebar (GUI)
 
 The sidebar's **Knowledge** section lists every discoverable KMS with a checkbox per entry. Tick to attach, untick to detach — the same underlying toggle as `/kms use` / `/kms off`.
 
 The `+` button prompts for a name, then asks for scope (OK = user, Cancel = project). A new KMS is created with starter files ready to edit.
+
+**Right-click the "Knowledge" header** for OKF import/export (see [Importing and exporting OKF bundles](#importing-and-exporting-okf-bundles) above).
 
 ## Tools the agent calls
 

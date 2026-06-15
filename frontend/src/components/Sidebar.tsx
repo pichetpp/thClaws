@@ -134,6 +134,15 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
   // KMS create modal (new KMS base). null = closed. Replaces the old
   // window.prompt() flow that silently failed inside the webview.
   const [kmsModal, setKmsModal] = useState<KmsCreateMode | null>(null);
+  // OKF import/export context menu on the "Knowledge" section header,
+  // anchored to cursor coords; null when closed.
+  const [kmsMenu, setKmsMenu] = useState<{ x: number; y: number } | null>(null);
+  // OKF import modal (collects new KMS name + scope; the backend opens
+  // the native folder picker on submit). null = closed.
+  const [okfImport, setOkfImport] = useState<{ scope: "user" | "project" } | null>(null);
+  const okfImportNameRef = useRef<HTMLInputElement | null>(null);
+  // Transient status line under the Knowledge header for OKF results.
+  const [okfMsg, setOkfMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // Right-click context menu anchored to the session row the user
   // right-clicked; null when closed. Click anywhere else dismisses.
   const [sessionMenu, setSessionMenu] = useState<
@@ -200,6 +209,8 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
         setMcpServers(msg.servers as { name: string; tools: number }[]);
       } else if (msg.type === "kms_update") {
         setKmss(msg.kmss as KmsInfo[]);
+      } else if (msg.type === "kms_okf_result") {
+        setOkfMsg({ ok: Boolean(msg.ok), text: String(msg.message ?? "") });
       } else if (msg.type === "line_status") {
         setLineStatus({
           state: (msg.state as LineStatus["state"]) ?? "disconnected",
@@ -248,6 +259,36 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
       window.removeEventListener("keydown", onKey);
     };
   }, [sessionMenu]);
+
+  // Same dismiss behaviour for the Knowledge-header OKF menu.
+  useEffect(() => {
+    if (!kmsMenu) return;
+    const onClick = () => setKmsMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setKmsMenu(null);
+    };
+    window.addEventListener("click", onClick);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", onClick);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [kmsMenu]);
+
+  // Auto-dismiss the OKF status line a few seconds after it lands.
+  useEffect(() => {
+    if (!okfMsg) return;
+    const t = setTimeout(() => setOkfMsg(null), 6000);
+    return () => clearTimeout(t);
+  }, [okfMsg]);
+
+  // Focus + select the import-name field when the modal opens.
+  useEffect(() => {
+    if (okfImport && okfImportNameRef.current) {
+      okfImportNameRef.current.focus();
+      okfImportNameRef.current.select();
+    }
+  }, [okfImport]);
 
   // Focus + select-all when the rename dialog opens so the user can
   // either replace the whole title or click to keep part of it.
@@ -574,16 +615,33 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
       {/* Knowledge bases */}
       <Section
         title="Knowledge"
+        onHeaderContextMenu={(e) => {
+          e.preventDefault();
+          setKmsMenu({ x: e.clientX, y: e.clientY });
+        }}
         action={
           <button
             className="p-0.5 rounded hover:bg-white/10"
-            title="New KMS"
+            title="New KMS (right-click header to import/export OKF bundles)"
             onClick={() => setKmsModal({ kind: "kms" })}
           >
             <Plus size={12} />
           </button>
         }
       >
+        {okfMsg && (
+          <div
+            className="mx-2 mb-1 px-2 py-1 rounded text-xs"
+            style={{
+              background: "var(--bg-secondary, rgba(255,255,255,0.04))",
+              color: okfMsg.ok ? "var(--text-primary)" : "var(--danger, #e06c75)",
+              border: "1px solid var(--border)",
+            }}
+            title={okfMsg.text}
+          >
+            {okfMsg.text}
+          </div>
+        )}
         {kmss.length === 0 ? (
           <div className="px-2 py-1" style={{ color: "var(--text-secondary)" }}>
             None yet
@@ -701,6 +759,176 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
           >
             Delete
           </CtxMenuItem>
+        </div>
+      )}
+      {/* OKF import/export menu for the "Knowledge" header. Export lists
+          each KMS (export is per-KMS); both actions open a native folder
+          picker on the backend. */}
+      {kmsMenu && (
+        <div
+          className="fixed z-50 rounded border shadow-lg py-1 text-xs"
+          style={{
+            left: kmsMenu.x,
+            top: kmsMenu.y,
+            background: "var(--bg-primary)",
+            borderColor: "var(--border)",
+            color: "var(--text-primary)",
+            minWidth: 180,
+            maxHeight: 320,
+            overflowY: "auto",
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <CtxMenuItem
+            onClick={() => {
+              setKmsMenu(null);
+              setOkfImport({ scope: "user" });
+            }}
+          >
+            Import OKF bundle…
+          </CtxMenuItem>
+          <div
+            className="my-1"
+            style={{ borderTop: "1px solid var(--border)" }}
+            aria-hidden
+          />
+          <div
+            className="px-3 py-0.5 uppercase tracking-wider"
+            style={{ color: "var(--text-secondary)", fontSize: "9px" }}
+          >
+            Export OKF bundle
+          </div>
+          {kmss.length === 0 ? (
+            <div
+              className="px-3 py-1"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              No KMS yet
+            </div>
+          ) : (
+            kmss.map((k) => (
+              <CtxMenuItem
+                key={`${k.scope}:${k.name}`}
+                onClick={() => {
+                  setKmsMenu(null);
+                  send({ type: "kms_export_okf", name: k.name });
+                }}
+              >
+                {k.name}
+                {k.scope === "project" ? " (proj)" : ""}
+              </CtxMenuItem>
+            ))
+          )}
+        </div>
+      )}
+      {/* OKF import: collect the new KMS name + scope, then the backend
+          opens a native folder picker for the bundle directory. */}
+      {okfImport && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "var(--modal-backdrop, rgba(0,0,0,0.55))" }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setOkfImport(null);
+          }}
+        >
+          <div
+            className="rounded-lg border shadow-xl w-80"
+            style={{
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div
+              className="px-4 py-2 border-b text-sm font-semibold"
+              style={{ borderColor: "var(--border)" }}
+            >
+              Import OKF bundle
+            </div>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const name = (okfImportNameRef.current?.value ?? "").trim();
+                if (!name) return;
+                send({ type: "kms_import_okf", name, scope: okfImport.scope });
+                setOkfImport(null);
+              }}
+            >
+              <div className="px-4 py-3 flex flex-col gap-3">
+                <div>
+                  <label
+                    className="block mb-1"
+                    style={{ color: "var(--text-secondary)", fontSize: "11px" }}
+                  >
+                    New KMS name
+                  </label>
+                  <input
+                    ref={okfImportNameRef}
+                    type="text"
+                    placeholder="e.g. partner-knowledge"
+                    className="w-full rounded border px-2 py-1 text-xs"
+                    style={{
+                      background: "var(--bg-secondary)",
+                      borderColor: "var(--border)",
+                      color: "var(--text-primary)",
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        setOkfImport(null);
+                      }
+                    }}
+                  />
+                </div>
+                <div className="flex items-center gap-3" style={{ fontSize: "11px" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>Scope:</span>
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="okf-scope"
+                      checked={okfImport.scope === "user"}
+                      onChange={() => setOkfImport({ scope: "user" })}
+                    />
+                    user
+                  </label>
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="okf-scope"
+                      checked={okfImport.scope === "project"}
+                      onChange={() => setOkfImport({ scope: "project" })}
+                    />
+                    project
+                  </label>
+                </div>
+                <div style={{ color: "var(--text-secondary)", fontSize: "10px" }}>
+                  You&rsquo;ll pick the bundle folder next.
+                </div>
+              </div>
+              <div
+                className="px-4 py-3 border-t flex items-center justify-end gap-2"
+                style={{ borderColor: "var(--border)" }}
+              >
+                <button
+                  type="button"
+                  className="text-xs px-3 py-1.5 rounded hover:bg-white/5"
+                  style={{ color: "var(--text-secondary)" }}
+                  onClick={() => setOkfImport(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="text-xs px-3 py-1.5 rounded"
+                  style={{ background: "var(--accent)", color: "var(--accent-fg, #fff)" }}
+                >
+                  Choose folder &amp; import
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
       {/* Rename dialog: simple text input in a centered modal. Replaces
@@ -864,10 +1092,12 @@ function Section({
   title,
   children,
   action,
+  onHeaderContextMenu,
 }: {
   title: string;
   children: React.ReactNode;
   action?: React.ReactNode;
+  onHeaderContextMenu?: (e: React.MouseEvent) => void;
 }) {
   return (
     <div className="mb-2">
@@ -878,6 +1108,7 @@ function Section({
           fontSize: "10px",
           borderBottom: "1px solid var(--border)",
         }}
+        onContextMenu={onHeaderContextMenu}
       >
         {title}
         {action}

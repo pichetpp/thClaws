@@ -432,6 +432,8 @@ _… index truncated at 200 entries (total: 487)_
 | `/kms migrate <name>` | Dry-run preview of the schema chain |
 | `/kms migrate <name> --apply` | Execute the chain. Aliases: `--execute`, `--run` (and `--dry-run` / `--plan` to opt back) |
 | `/kms file-answer <kms> <title>` (or `file`) | File latest assistant message as a new page |
+| `/kms export-okf <name> [<out-dir>]` (or `okf-export`) | Export the KMS as a conformant OKF v0.1 bundle to `./<name>-okf/` (or `<out-dir>`). See §16. |
+| `/kms import-okf <bundle-dir> <name> [--project]` (or `okf-import`) | Create a new KMS from an OKF bundle dir. Defaults to user scope; `--project` → `./.thclaws/kms/`. See §16. |
 
 **Source auto-detection** in `parse_slash`: `t == "$"` → `KmsIngestSession` (M6.28); `t.starts_with("http://") || t.starts_with("https://")` → `KmsIngestUrl`; `t.to_ascii_lowercase().ends_with(".pdf")` → `KmsIngestPdf`; otherwise `KmsIngest`.
 
@@ -766,7 +768,10 @@ crates/core/src/
 │                                          system_prompt_section + categorized index,
 │                                          mark_dependent_pages_stale + scan_stale_markers,
 │                                          Migration + migrations() + migrate +
-│                                          detect_schema_version + MigrationReport
+│                                          detect_schema_version + MigrationReport,
+│                                          export_okf + import_okf + OKF adapter helpers (§16)
+├── gui.rs (selected lines)             ── kms_export_okf / kms_import_okf IPC arms (native
+│                                          folder picker → export_okf / import_okf); §16
 ├── tools/
 │   └── kms.rs (430 LOC)                ── KmsRead, KmsSearch, KmsWrite, KmsAppend, KmsDelete
 ├── shell_dispatch.rs (selected lines)  ── /kms slash handlers (GUI), format_lint_report,
@@ -1149,3 +1154,121 @@ Build wiring:
 `shell_dispatch.rs` (GUI / `--serve`). Drops `.index/` and calls
 `full_rebuild`. Operator-only (no `KmsReindex` model-callable
 tool — the auto-build-on-stale path covers self-healing).
+
+---
+
+## 16. OKF (Open Knowledge Format) import/export
+
+[OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) (Google,
+v0.1) formalizes the same Karpathy "LLM wiki" pattern the KMS is built
+on: a directory of markdown concept files with YAML frontmatter, an
+`index.md`, a `log.md`, and markdown cross-links. The KMS is an
+opinionated **superset**, so interop is a thin frontmatter/layout
+**adapter** — `export_okf` / `import_okf` in `kms.rs` — not a second
+store. We deliberately did **not** convert the KMS to be OKF-native:
+OKF's value is portable interchange, while the KMS is the live working
+store with security hardening, scopes, BM25, and `manifest.json`
+enforcement. The adapter keeps each side's contract intact and is fully
+reversible.
+
+### Field mapping
+
+| KMS | OKF | Direction |
+|---|---|---|
+| `category:` | `type:` (OKF's only REQUIRED field) | both — export falls back to `Note`; import prefers `category:`, else `type:`, else `uncategorized` |
+| `topic:` | `description:` | both |
+| `updated:` | `timestamp:` | both — import takes the date part of an ISO 8601 stamp |
+| `tags: a, b` (CSV string) | `tags: [a, b]` (YAML list) | both — `tags_to_yaml_list` / `tags_to_csv` |
+| `pages/<stem>.md` | concept `.md` (any path) | export keeps `pages/`; import flattens nested paths to a stem and de-collides |
+| `sources/<f>` | `references/<f>` | both — `.md` sources get a reversible `type: Source` shim so they stay conformant |
+| `[[wikilink]]` | `[wikilink](/pages/wikilink.md)` | export only (`wikilinks_to_okf`); import rewrites concept links to KMS-relative + follows the flattening |
+| `## [date] verb \| alias` | `## date` + `* **Verb**: alias` | both — `kms_log_to_okf` / `okf_log_to_kms` |
+| `SCHEMA.md` (no frontmatter) | `SCHEMA.md` + `type: OKF Schema` | export adds the shim; import strips it |
+| `manifest.json` | `manifest.json` (verbatim) | copied both ways — non-`.md`, OKF ignores it; aids round-trip |
+
+KMS-only keys with no OKF home (`sources`, `verified`, `created`) ride
+along verbatim — OKF tolerates arbitrary producer keys, so
+KMS→OKF→KMS is lossless for them.
+
+### `export_okf(name, out_dir) -> OkfExportReport`
+
+Resolves the KMS, then writes a **conformant OKF v0.1 bundle** (every
+non-reserved `.md` carries a `type`):
+
+```
+out_dir/
+  index.md        — okf_version: "0.1" frontmatter + the KMS index body
+  log.md          — date-grouped OKF history
+  SCHEMA.md       — KMS schema with a `type: OKF Schema` shim
+  manifest.json   — copied verbatim
+  pages/<stem>.md — concepts: frontmatter normalised, wikilinks → md links
+  references/<f>  — raw sources (md gets the `type: Source` shim)
+```
+
+`OkfExportReport { pages, sources, out_dir }`.
+
+### `import_okf(bundle, name, scope) -> OkfImportReport`
+
+Creates a **new** KMS (errors if `name` already exists at `scope`),
+then ingests the bundle **permissively** per OKF §9 — unknown types,
+missing fields, and broken links are all tolerated:
+
+- **Concepts** are collected recursively (`collect_okf_concepts`),
+  skipping symlinks, reserved files (`index.md` / `log.md` /
+  `SCHEMA.md` at any level), and the `references/` subtree. Concepts may
+  live **anywhere** in the tree, not just `pages/`. Each gets a flat
+  stem (`okf_concept_stem`: drop a leading `pages/`, join nested
+  components with `-`), de-colliding with a `-2`, `-3`… suffix.
+- A two-pass walk builds a bundle-path → stem map first, then rewrites
+  each page's cross-concept links (`rewrite_okf_concept_links`) so a
+  link to `/tables/x.md` follows the flattening to `pages/tables-x.md`.
+- `references/` → `sources/`, unwrapping the `type: Source` shim.
+- `log.md` / `SCHEMA.md` / `manifest.json` are converted/restored.
+- The KMS `index.md` is **rebuilt from the imported pages**
+  (`rebuild_index_from_pages`) rather than translated — the OKF index
+  is "an optimization," and the result must be KMS-native.
+
+`OkfImportReport { pages, sources, root }`.
+
+### Slash commands
+
+`SlashCommand::KmsExportOkf { name, output_dir }` and
+`KmsImportOkf { bundle, name, scope }` — parsed in `repl.rs`, dispatched
+in both `shell_dispatch.rs` (GUI / `--serve`) and `repl.rs` (CLI). Export
+defaults `output_dir` to `./<name>-okf`; import defaults to user scope
+(`--project` opts into project scope). Pure file transforms — no agent
+turn, no LLM.
+
+### GUI: "Knowledge" header context menu
+
+The desktop sidebar's **Knowledge** section header has a right-click
+context menu (`Sidebar.tsx`):
+
+- **Import OKF bundle…** opens a modal for the new KMS name + scope,
+  then sends `kms_import_okf`.
+- **Export OKF bundle** lists each KMS (export is per-KMS); clicking one
+  sends `kms_export_okf`.
+
+Both IPC messages are handled in **`gui.rs`** (not the
+transport-agnostic `handle_ipc` path) because each opens a native `rfd`
+folder picker — for export the destination, for import the bundle dir —
+which only exists in the desktop binary. The picker blocks the event
+loop the same way the existing `pick_directory` arm does
+(`pick_directory_native` gained a `title` parameter). Results come back
+as a `kms_okf_result` `{ ok, message }` envelope rendered as a transient
+status line under the header; a successful import additionally re-emits
+`build_update_payload()` so the KMS list refreshes and the new base
+appears with its attach checkbox. In `--serve` / remote mode the menu
+still renders but the messages no-op (you cannot pop a host-side dialog
+for a remote browser) — the slash commands are the path for non-GUI
+surfaces.
+
+### Tests
+
+`kms.rs` test module: `okf_tag_conversions_round_trip`,
+`okf_wikilinks_become_bundle_relative_links`,
+`okf_export_produces_conformant_bundle`,
+`okf_round_trip_preserves_page_fields` (full KMS→OKF→KMS),
+`okf_import_handles_root_level_concepts_and_missing_type`,
+`okf_import_rejects_existing_name`. Parser coverage in `repl.rs`:
+`parse_slash_kms_export_okf`, `parse_slash_kms_import_okf`.

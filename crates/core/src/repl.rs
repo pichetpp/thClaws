@@ -644,6 +644,25 @@ pub enum SlashCommand {
         name: String,
         output_dir: Option<String>,
     },
+    /// `/kms export-okf <name> [<output-dir>]` — write the KMS as a
+    /// conformant Open Knowledge Format (OKF v0.1) bundle to the cwd
+    /// (defaults to `./<name>-okf/`). Pure file transform — frontmatter
+    /// is normalised (`category`→`type`, `topic`→`description`, tags
+    /// list-ified), wikilinks become markdown links, `sources/` becomes
+    /// `references/`.
+    KmsExportOkf {
+        name: String,
+        output_dir: Option<String>,
+    },
+    /// `/kms import-okf <bundle-dir> <name> [--project]` — create a new
+    /// KMS from an OKF bundle on disk. Defaults to user scope; pass
+    /// `--project` for `.thclaws/kms/`. Errors if `name` already exists
+    /// at the target scope.
+    KmsImportOkf {
+        bundle: String,
+        name: String,
+        scope: crate::kms::KmsScope,
+    },
     /// `/schedule` — list schedules (same as `/schedule list`).
     Schedule,
     /// `/schedule show <id>` — pretty-print one schedule's record.
@@ -2971,6 +2990,70 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 ),
             }
         }
+        "export-okf" | "okf-export" => {
+            // `/kms export-okf <name> [<output-dir>]` — positional;
+            // first non-flag is the KMS name, optional second is the
+            // output dir (defaults to `./<name>-okf` at dispatch time).
+            let mut name: Option<String> = None;
+            let mut output_dir: Option<String> = None;
+            for tok in rest.split_whitespace() {
+                if tok.starts_with("--") {
+                    return SlashCommand::Unknown(format!(
+                        "unknown flag '{tok}' — usage: /kms export-okf <name> [<output-dir>]"
+                    ));
+                }
+                if name.is_none() {
+                    name = Some(tok.to_string());
+                } else if output_dir.is_none() {
+                    output_dir = Some(tok.to_string());
+                }
+            }
+            match name {
+                Some(n) => SlashCommand::KmsExportOkf {
+                    name: n,
+                    output_dir,
+                },
+                None => SlashCommand::Unknown(
+                    "usage: /kms export-okf <name> [<output-dir>]".into(),
+                ),
+            }
+        }
+        "import-okf" | "okf-import" => {
+            // `/kms import-okf <bundle-dir> <name> [--project|--user]` —
+            // first non-flag is the bundle directory, second is the new
+            // KMS name. Defaults to user scope.
+            let mut bundle: Option<String> = None;
+            let mut name: Option<String> = None;
+            let mut scope = crate::kms::KmsScope::User;
+            for tok in rest.split_whitespace() {
+                match tok {
+                    "--project" => scope = crate::kms::KmsScope::Project,
+                    "--user" => scope = crate::kms::KmsScope::User,
+                    other if !other.starts_with("--") => {
+                        if bundle.is_none() {
+                            bundle = Some(other.to_string());
+                        } else if name.is_none() {
+                            name = Some(other.to_string());
+                        }
+                    }
+                    other => {
+                        return SlashCommand::Unknown(format!(
+                            "unknown flag '{other}' — usage: /kms import-okf <bundle-dir> <name> [--project]"
+                        ));
+                    }
+                }
+            }
+            match (bundle, name) {
+                (Some(b), Some(n)) => SlashCommand::KmsImportOkf {
+                    bundle: b,
+                    name: n,
+                    scope,
+                },
+                _ => SlashCommand::Unknown(
+                    "usage: /kms import-okf <bundle-dir> <name> [--project]".into(),
+                ),
+            }
+        }
         "migrate" | "upgrade" => {
             // `/kms migrate <name> [--apply]` — dry-run by default, --apply
             // to execute. Order-insensitive so `--apply <name>` also works.
@@ -3017,7 +3100,7 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
             }
         }
         other => SlashCommand::Unknown(format!(
-            "unknown kms subcommand: '{other}' (try: /kms, /kms new …, /kms use …, /kms off …, /kms show …, /kms ingest …, /kms dump …, /kms challenge …, /kms html …, /kms merge …, /kms drop …, /kms link …, /kms lint …, /kms wrap-up …, /kms reconcile …, /kms migrate …, /kms file-answer …)"
+            "unknown kms subcommand: '{other}' (try: /kms, /kms new …, /kms use …, /kms off …, /kms show …, /kms ingest …, /kms dump …, /kms challenge …, /kms html …, /kms merge …, /kms drop …, /kms link …, /kms lint …, /kms wrap-up …, /kms reconcile …, /kms migrate …, /kms export-okf …, /kms import-okf …, /kms file-answer …)"
         )),
     }
 }
@@ -3532,6 +3615,13 @@ pub fn render_help() -> &'static str {
      \x20                 --llm switches to a semantic per-page LLM\n  \
      \x20                 pass (synonyms + related concepts; slower\n  \
      \x20                 + costs tokens, still dry-run by default).\n  \
+     /kms export-okf NAME [OUT]\n  \
+     \x20                 Export a KMS as an Open Knowledge Format\n  \
+     \x20                 (OKF v0.1) bundle to ./NAME-okf/ (or OUT).\n  \
+     /kms import-okf BUNDLE NAME [--project]\n  \
+     \x20                 Create a new KMS from an OKF bundle dir.\n  \
+     \x20                 Defaults to ~/.config/thclaws/kms/ (--project\n  \
+     \x20                 for ./.thclaws/kms/).\n  \
      /schedule         List scheduled jobs (use `thclaws schedule add` from\n  \
      \x20                 the shell to create one — multi-line prompts don't\n  \
      \x20                 fit a REPL line)\n  \
@@ -8762,6 +8852,49 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::KmsExportOkf { name, output_dir } => {
+                    let out = output_dir.unwrap_or_else(|| format!("{name}-okf"));
+                    match crate::kms::export_okf(&name, std::path::Path::new(&out)) {
+                        Ok(report) => {
+                            println!(
+                                "{COLOR_DIM}exported '{name}' as OKF bundle → {} ({} page(s), {} reference(s)).{COLOR_RESET}",
+                                report.out_dir.display(),
+                                report.pages,
+                                report.sources,
+                            );
+                        }
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/kms export-okf failed: {e}{COLOR_RESET}");
+                        }
+                    }
+                }
+                SlashCommand::KmsImportOkf {
+                    bundle,
+                    name,
+                    scope,
+                } => {
+                    match crate::kms::import_okf(
+                        std::path::Path::new(&bundle),
+                        &name,
+                        scope,
+                    ) {
+                        Ok(report) => {
+                            println!(
+                                "{COLOR_DIM}imported OKF bundle '{bundle}' → KMS '{name}' ({} scope): \
+                                 {} page(s), {} source(s).{COLOR_RESET}",
+                                scope.as_str(),
+                                report.pages,
+                                report.sources,
+                            );
+                            println!(
+                                "{COLOR_DIM}  attach it with `/kms use {name}`.{COLOR_RESET}"
+                            );
+                        }
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/kms import-okf failed: {e}{COLOR_RESET}");
+                        }
+                    }
+                }
                 SlashCommand::KmsWrapUp { name, fix } => {
                     let Some(k) = crate::kms::resolve(&name) else {
                         println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
@@ -11738,6 +11871,51 @@ mod tests {
             }
             other => panic!("expected KmsHtml with output_dir, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_slash_kms_export_okf() {
+        match parse_slash("/kms export-okf notes") {
+            Some(SlashCommand::KmsExportOkf { name, output_dir }) => {
+                assert_eq!(name, "notes");
+                assert!(output_dir.is_none());
+            }
+            other => panic!("expected KmsExportOkf, got {other:?}"),
+        }
+        match parse_slash("/kms export-okf notes ./bundle") {
+            Some(SlashCommand::KmsExportOkf { name, output_dir }) => {
+                assert_eq!(name, "notes");
+                assert_eq!(output_dir, Some("./bundle".into()));
+            }
+            other => panic!("expected KmsExportOkf with dir, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_slash_kms_import_okf() {
+        match parse_slash("/kms import-okf ./bundle notes") {
+            Some(SlashCommand::KmsImportOkf {
+                bundle,
+                name,
+                scope,
+            }) => {
+                assert_eq!(bundle, "./bundle");
+                assert_eq!(name, "notes");
+                assert_eq!(scope, crate::kms::KmsScope::User);
+            }
+            other => panic!("expected KmsImportOkf, got {other:?}"),
+        }
+        match parse_slash("/kms import-okf ./bundle notes --project") {
+            Some(SlashCommand::KmsImportOkf { scope, .. }) => {
+                assert_eq!(scope, crate::kms::KmsScope::Project);
+            }
+            other => panic!("expected KmsImportOkf project, got {other:?}"),
+        }
+        // Missing the name positional → usage error.
+        assert!(matches!(
+            parse_slash("/kms import-okf ./bundle"),
+            Some(SlashCommand::Unknown(_))
+        ));
     }
 
     #[test]

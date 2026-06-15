@@ -142,6 +142,56 @@ so Thai content renders correctly without a system-font dependency.
   unrelated regions survive the load+modify+save cycle. Cells use A1-
   style addresses (`B7`, `AA12`).
 
+## Media — image & video generation
+
+Provider-abstracted tools for generating and editing images and video.
+One tool per task; the `provider` + `model` arguments pick the backend.
+**Off by default** — see "Enabling media tools" below. Images are
+written to `output/img-<ts>-<hash>.<ext>`; videos run as async jobs and
+land at `output/vid-<ts>-<hash>.mp4` once finished.
+
+| Tool | Approval | Summary |
+|---|---|---|
+| `TextToImage` | prompt | Prompt → image |
+| `ImageToImage` | prompt | Source image + prompt → edited image |
+| `TextToVideo` | prompt | Prompt → video (async job) |
+| `ImageToVideo` | prompt | Source image as first frame + prompt → video (async job) |
+| `MediaJobStatus` | auto | Poll an async video job by `job_id` → `running` / `done` (path) / `failed` |
+
+**Models & keys** (choose with the `model` argument):
+
+| Provider | Image models | Video models | Key |
+|---|---|---|---|
+| Google Gemini | `gemini-3.1-flash-image`, `gemini-3.1-pro-image` | `veo-3.1-fast-generate-preview`, `veo-3.1-generate-preview`, `veo-3.1-lite-generate-preview` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| OpenAI | `gpt-image-2` | — | `OPENAI_API_KEY` |
+| Alibaba DashScope | `qwen-image-2.0`, `qwen-image-2.0-pro` | `happyhorse-1.0-t2v` (text→video), `happyhorse-1.0-i2v` (image→video) | `DASHSCOPE_API_KEY` |
+
+- **Video is asynchronous.** `TextToVideo` / `ImageToVideo` submit the
+  job and return a `job_id` immediately — the file isn't ready yet. Call
+  `MediaJobStatus { job_id }` to poll: `running`, `done` (with the saved
+  `output/…mp4` path), or `failed` (with the provider error). Job state
+  is journalled to `.thclaws/media-jobs.jsonl`, so a poll survives a
+  restart.
+- **Veo clips are 4–8 seconds.** Veo and HappyHorse take a `resolution`
+  of `720P` or `1080P`.
+- **`ImageToVideo`** uses a local image as the first frame, sent inline
+  (base64 data URI) — no separate upload step.
+
+### Enabling media tools
+
+Media tools cost money per image / per video-second, so they're **off by
+default**. Turn them on in `settings.json`:
+
+```jsonc
+// ./.thclaws/settings.json
+{ "mediaToolsEnabled": true }   // legacy alias: "imageToolsEnabled"
+```
+
+The built-in **Media Studio** GUI shell (Chapter 26) auto-enables them
+for its own session regardless of this flag — it's the no-config,
+point-and-click on-ramp for people who aren't driving the agent from
+chat.
+
 ## User interaction
 
 | Tool | Approval | Summary |

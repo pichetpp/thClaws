@@ -87,9 +87,30 @@ with current pricing.
 | Model | Tier | Input ($/M) | Output ($/M) | Remark |
 |---|---|---:|---:|---|
 | `openrouter/auto` | starter | (pass-through) | (pass-through) | OpenRouter's auto-router; actual cost determined by the routed model. The gateway forwards usage as-is. |
+| `openrouter/fusion` | — | (variable) | (variable) | Fusion router — default panel. Billed by the panel + judge it runs; cost varies per request. |
+| `openrouter/fusion+` | — | (variable) | (variable) | Configurable Fusion (panel/judge/limits — see [Chapter 6](ch06-providers-models-api-keys.md)). thClaws pseudo-model; the wire call is your configured outer model + the `openrouter:fusion` tool. |
 
-The DB row for `openrouter/auto` holds `0/0` because the upstream cost varies per request.
-We rely on OpenRouter's own metering in this case.
+The DB rows for `openrouter/auto` / `fusion` / `fusion+` hold the variable-price sentinel
+because the upstream cost varies per request. We rely on OpenRouter's own metering here.
+
+## Media generation models (image & video)
+
+The built-in media tools (`TextToImage` / `ImageToImage` / `TextToVideo` /
+`ImageToVideo` — see [Chapter 11](ch11-built-in-tools.md)) are billed
+**per image** or **per second of video**, not per token, so they sit
+outside the `$/M` table above. They need the relevant provider key
+(`GEMINI_API_KEY` / `OPENAI_API_KEY` / `DASHSCOPE_API_KEY`).
+
+| Provider | Image | Video |
+|---|---|---|
+| Google | `gemini-3.1-flash-image`, `gemini-3.1-pro-image` | `veo-3.1-{fast,,lite}-generate-preview` (4–8s, 720P/1080P) |
+| OpenAI | `gpt-image-2` (also token-priced: ~$5 / $30 per M in/out) | — |
+| Alibaba DashScope | `qwen-image-2.0`, `qwen-image-2.0-pro` | `happyhorse-1.0-t2v`, `happyhorse-1.0-i2v` (720P/1080P) |
+
+Per-unit rates live in the catalogue's `price_per_image_usd` /
+`price_per_video_second_usd` fields; check `/models` for the current
+seeded values (some media rows are desktop-key-only and not yet metered
+through the gateway).
 
 ## Inactive / deprecated rows
 

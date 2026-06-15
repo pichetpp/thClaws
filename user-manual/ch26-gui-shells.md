@@ -109,6 +109,38 @@ Long form, when desktop and serve defaults should differ:
 }
 ```
 
+## The Media Studio shell  *(built-in)*
+
+thClaws ships three built-in shells — **Session Explorer**, **Chatbot**,
+and **Media Studio**. Media Studio is a point-and-click front end for the
+image & video tools (Chapter 11), so you can generate media without
+typing tool calls in chat.
+
+Open it from the GUI Shell picker (`media-studio`), or pin it:
+
+```jsonc
+// ./.thclaws/settings.json
+{ "guiShell": "media-studio" }
+```
+
+What it does:
+
+- **Mode switch** — Text → Image, Image → Image (edit), Text → Video,
+  Image → Video.
+- **Provider / model picker** with a **resolution** control for video
+  (720P / 1080P).
+- **Gallery** of everything already in `output/` (not just what you just
+  generated) — click any item to set it as the source image for an
+  Image → Image or Image → Video run; click to open it in the lightbox.
+- **Async video** is handled for you — the shell submits the job and
+  polls `MediaJobStatus` until the clip is ready, then drops it in the
+  gallery.
+
+Media Studio **auto-enables the media tools** for its own session, so you
+don't have to set `mediaToolsEnabled` first — but you still need the
+relevant provider key (`GEMINI_API_KEY` / `OPENAI_API_KEY` /
+`DASHSCOPE_API_KEY`, see Chapter 11) in your environment or keychain.
+
 ---
 
 ## Mode B — serve a shell over the cloud  *(Tier 2)*

@@ -23,7 +23,7 @@ The sidebar is always visible and holds four sections:
 |---|---|---|
 | **Provider** | Active provider + model, ready/not-ready dot, ▾ chevron | Click to open the inline model picker (v0.7.2+) |
 | **Sessions** | Last 10 saved sessions (title or ID) | `+` to start a new session · hover row → pencil to rename · click to load |
-| **Knowledge** | Every discoverable KMS with attach checkbox | `+` to create a new KMS — see [chapter 9](ch09-knowledge-bases-kms.md) |
+| **Knowledge** | Every discoverable KMS with attach checkbox | `+` to create a new KMS; **right-click the header** to import/export OKF bundles — see [chapter 9](ch09-knowledge-bases-kms.md) |
 | **MCP Servers** | Active MCP servers + their tool count | Read-only here — configure via `/mcp add` |
 
 The **Provider** section has a visual health indicator:

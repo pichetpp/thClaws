@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.62.0] - 2026-06-15
+
+KMS ↔ Open Knowledge Format (OKF) interchange.
+
+### Added
+- **Import/export KMS as OKF bundles.** New `/kms export-okf <name> [<out-dir>]` writes a knowledge base as a conformant [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog) v0.1 bundle (defaults to `./<name>-okf/`); `/kms import-okf <bundle-dir> <name> [--project]` creates a new KMS from any OKF bundle. OKF is Google's open spec for knowledge-as-markdown — the same "LLM wiki" shape a KMS already uses — so this is a clean round-trip for shipping a KMS across teams/agents or pulling external bundles in. It's an adapter, not a storage change: the on-disk KMS format is unchanged.
+- **OKF import/export from the sidebar.** Right-click the desktop sidebar's **Knowledge** section header for "Import OKF bundle…" (name + scope, then a native folder picker) and per-KMS "Export OKF bundle" (native folder picker). A status line confirms the result; imports refresh the KMS list immediately.
+
+The adapter maps `category:`↔`type:`, `topic:`↔`description:`, comma `tags`↔YAML list, `sources/`↔`references/`, and converts `[[wikilinks]]` to markdown links on export; KMS-specific frontmatter rides along verbatim so round-trips are lossless. Import is permissive per the OKF spec (tolerates unknown types, missing fields, broken links, and concepts anywhere in the tree).
+
 ## [0.61.0] - 2026-06-14
 
 OpenRouter Fusion: fixed, plus a configurable variant with a GUI panel.

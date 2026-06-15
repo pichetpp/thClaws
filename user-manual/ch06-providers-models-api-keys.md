@@ -372,6 +372,42 @@ prefix and `/model <id>` would error "unknown model provider".
 Anything you copy from `/models` straight into `/model <id>` will
 route correctly.
 
+### Fusion Router — multi-model deliberation (v0.61.0+)
+
+OpenRouter's **Fusion** router is one model id that, behind the scenes,
+fans your question out to a **panel** of up to 8 models in parallel
+(each can search / fetch the web), then a **judge** model compares all
+the answers — where they agree (consensus), where they conflict, what's
+missing, unique angles, blind spots — and synthesizes the final reply.
+In short: "many heads + a referee," packaged as a single model.
+
+Two ways to use it in thClaws:
+
+- **`openrouter/fusion`** — the default panel (Claude Opus + GPT +
+  Gemini), zero configuration. Just `/model openrouter/fusion`.
+- **`openrouter/fusion+`** — the **configurable** variant. Selecting it
+  in the model picker opens a config panel where you tune the
+  deliberation:
+
+  | Field | Meaning |
+  |---|---|
+  | **Analysis models** | The panel — 1–8 OpenRouter model ids (e.g. `anthropic/claude-opus-4.8`). Leave empty to use Fusion's default panel. |
+  | **Judge model** | Synthesizes the final answer. Blank = same as the outer model. |
+  | **Outer model** | The orchestrator call thClaws makes (a thClaws id, e.g. `openrouter/openai/gpt-4.1`); also the default judge. |
+  | **Max tool calls** | Web-search/fetch steps each panel/judge model may take (1–16, default 8). |
+  | **Max output tokens** | Per inner panel/judge call. |
+  | **Temperature** | Forwarded to panel + judge (0–2). |
+  | **Reasoning effort** | Forwarded to panel + judge. |
+  | **Tool choice** | `auto` (Fusion fires when useful and coexists with the agent's own tools) or `required` (always deliberate). |
+
+  Your choices persist to `.thclaws/settings.json` under
+  `openrouterFusion`, so they also apply when you run thClaws headless or
+  with `--serve` — not just in the GUI.
+
+Fusion is billed by the panel + judge it runs, so a single turn costs
+more than a single-model call. It's the practical stand-in when a model
+you'd otherwise reach for isn't available on the platform.
+
 ## Using a generic OpenAI-compatible endpoint (`oai/*`)
 
 The `OpenAICompat` provider is a single configurable slot for **any
