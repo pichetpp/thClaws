@@ -11,8 +11,8 @@ teams.
 |---|---|
 | 1 | [What is thClaws?](ch01-what-is-thclaws.md) |
 | 2 | [Installation](ch02-installation.md) |
-| 3 | [Desktop GUI tour](ch04-desktop-gui-tour.md) |
-| 4 | [Working directory & running modes](ch03-working-directory-and-modes.md) |
+| 3 | [Working directory & running modes](ch03-working-directory-and-modes.md) |
+| 4 | [Desktop GUI tour](ch04-desktop-gui-tour.md) |
 | 5 | [Permissions](ch05-permissions.md) |
 | 6 | [Providers, models & API keys](ch06-providers-models-api-keys.md) |
 | 7 | [Sessions](ch07-sessions.md) |
@@ -26,6 +26,7 @@ teams.
 | 15 | [Subagents](ch15-subagents.md) |
 | 16 | [Plugins](ch16-plugins.md) |
 | 17 | [Agent teams](ch17-agent-teams.md) |
+| 18 | [Plan mode](ch18-plan-mode.md) |
 | 19 | [Scheduling](ch19-scheduling.md) |
 | 20 | [Background research (`/research`)](ch20-research.md) |
 | 21 | [LINE chat & web browser bridge](ch21-line-and-browser-chat.md) |

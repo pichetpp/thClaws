@@ -123,10 +123,7 @@ impl Tool for EpubCreateTool {
             (text, base)
         } else {
             let inline = req_str(&input, "content")?;
-            (
-                inline.to_string(),
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            )
+            (inline.to_string(), crate::workdir::current_workdir())
         };
 
         let title = input

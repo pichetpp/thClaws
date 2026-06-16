@@ -42,7 +42,7 @@ Two things bind your desktop to a catalog server:
    in the OS keychain (never in `settings.json`).
 
 Settings → **thClaws.cloud** has fields for both. Paste the URL, paste
-the token from your dashboard's *Mint CLI token* button, hit Save —
+the token you mint at your dashboard (**+ New token**), hit Save —
 every slash command in the rest of this chapter works immediately.
 
 The token never goes through a shell argument or environment variable —
@@ -110,18 +110,20 @@ the next `/reload` reads the new `AGENTS.md`. No shell tab-out needed.
 ### The folder-safety check
 
 `/cloud get` refuses to overwrite a non-empty folder unless the folder
-already holds the **same** agent (matched by UUID, see below) or you
-pass `--force`. The check works like this:
+already holds the **same** agent (matched by UUID, see below). The
+check works like this:
 
 | Target folder state | Behaviour |
 |---|---|
 | Empty | Fresh install. |
 | Has `AGENTS.md` / `manifest.json` with a matching `agent.uuid` | Safe update — overwrites in place, preserves your `.thclaws/` session state. |
-| Has `AGENTS.md` / `manifest.json` with a **mismatched** UUID | Abort with an error. The folder belongs to another agent. |
-| Other random files (notes, scratch, etc.) | Abort unless `--force`. |
+| Has `AGENTS.md` / `manifest.json` with a **mismatched** UUID | Abort. The folder belongs to another agent — `/cloud unbind` first, or use a different folder. |
+| Other random files (notes, scratch, etc.) | Abort — install into an empty folder instead. |
 
 This is intentional — it prevents a typo from clobbering an
-in-progress agent or someone else's work in the same directory.
+in-progress agent or someone else's work in the same directory. The
+slash surface has no `--force` override on purpose; just `/cloud get`
+into a fresh, empty directory when in doubt.
 
 ## Publishing an agent
 
@@ -130,7 +132,6 @@ start a thClaws session in that folder and use the slash command:
 
 ```
 ❯ /cloud publish              # uploads the cwd
-❯ /cloud publish --dry-run    # preview the tarball contents, no upload
 ```
 
 `/cloud publish` does three things:
@@ -272,6 +273,49 @@ from the gateway with an upgrade link. Tiers are independent of
 balance — having $100 in credit doesn't unlock enterprise models on
 a starter account.
 
+## Shared agents (one company agent, many people)
+
+A **shared agent** is a single company-owned agent that several people
+use at once — think a support bot, an internal research assistant, or
+an onboarding helper that the whole team should share *without* each
+person re-installing or re-configuring it. Shared agents are a
+**hosted-cloud** feature (they run as hosted workspaces, not on your
+laptop), managed from the **Dashboard → Shared agents** panel.
+
+How it's structured:
+
+- **One read-only company "brain", many private workspaces.** The
+  owner uploads the agent's brain — `AGENTS.md`, the company KMS,
+  skills, slash commands, and `mcp.json` (tool *config*, never
+  credentials). Every member's workspace mounts that brain
+  **read-only** and composes it in. Each member still gets their own
+  private space: their chat history, their files, their own additive
+  KMS, and their own MCP logins — none of which is visible to other
+  members or the owner.
+- **Locked to the company setup.** In shared mode the engine takes
+  instructions **only** from the company `AGENTS.md` (a member's own
+  `AGENTS.md` / `~/.config` / `~/.claude` are ignored), and the model
+  can be pinned by the owner. This keeps every member on the same
+  agent.
+- **Gateway-only, owner pays.** Shared agents have no BYOK and no
+  `.env` — all inference goes through the thClaws.cloud gateway and is
+  billed to the **owner**. The owner sets a **per-member monthly
+  budget cap** ($/mo); a member who hits their cap is blocked until it
+  resets, so one person can't run up the whole bill.
+- **Read-only means fork to customize.** A member can't edit the
+  shared brain or write to the company KMS — those return a clear
+  "shared KMS is read-only — fork to edit" message. To tailor it,
+  **fork** the shared agent into your own private agent (a normal
+  catalog agent you own and can change freely).
+
+From the **Dashboard**, the Shared agents panel separates agents
+**you own** (where you manage members, caps, brain upload, and see
+usage) from agents **shared with you** (which you just launch and
+use). The owner adds members by handle, sets each member's cap,
+uploads or refreshes the brain (`brain.tgz` containing `AGENTS.md`,
+`kms`, `skills`, `commands`, `mcp.json` — or builds it from an
+existing agent), and watches per-member spend in the usage breakdown.
+
 ## Quick reference
 
 All catalog ops happen inside an open thClaws session — every old
@@ -283,8 +327,8 @@ slash-command equivalent.
 | Settings → **thClaws.cloud** | GUI | Cloud URL + CLI token (paste / clear). The only path for login/logout. |
 | `/cloud status` | In-session slash | Show resolved URL + token state |
 | `/cloud list [--mine]` | In-session slash | Browse the catalog |
-| `/cloud get <slug> [--force]` | In-session slash | Install into the session's cwd |
-| `/cloud publish [--dry-run]` | In-session slash | Upload the session's cwd |
+| `/cloud get <slug>` | In-session slash | Install into the session's cwd (aborts on a non-empty/mismatched folder) |
+| `/cloud publish` | In-session slash | Upload the session's cwd |
 | `/cloud unbind` | In-session slash | Clear `agent.uuid` so the next publish creates a new catalog row |
 | Settings → **Agent identity** | GUI | Edit this folder's `agent.name` / `description` |
 | `/credit` (web) | Catalog UI | Top up + view balance + browse pricing |

@@ -161,8 +161,19 @@ struct Cli {
     /// routing layer (typically dev-plan/34 thClaws.cloud) and routes
     /// each request to a per-user SharedSessionHandle. Without this
     /// flag, `--serve` is single-tenant (today's behaviour).
-    #[arg(long, requires = "serve")]
+    ///
+    /// `--multiuser` is the dev-plan/42 alias; combined with a
+    /// workspaces-base it gives each authenticated user their own
+    /// `workspace-<id>/` working directory.
+    #[arg(long, visible_alias = "multiuser", requires = "serve")]
     multi_tenant: bool,
+
+    /// dev-plan/42: parent directory for per-user working directories.
+    /// When set (flag or env `THCLAWS_WORKSPACES_BASE`), each user runs
+    /// in `<base>/workspace-<user_id>/` instead of sharing one cwd.
+    /// Falls back to env; unset keeps the dev-plan/35 shared-cwd layout.
+    #[arg(long, value_name = "DIR", requires = "multi_tenant")]
+    multi_tenant_workspaces_base: Option<String>,
 
     /// HMAC-SHA256 secret for verifying X-Thclaws-User-Proof. Must
     /// match the secret the cloud routing layer signs with. Falls
@@ -844,10 +855,32 @@ async fn main() {
                     .as_deref()
                     .and_then(parse_ttl_secs)
                     .unwrap_or(30 * 60);
+                // dev-plan/42: per-user working dirs when a base is given
+                // (flag or env). Unset → dev-plan/35 shared-cwd layout.
+                let workspaces_base = cli
+                    .multi_tenant_workspaces_base
+                    .clone()
+                    .or_else(|| std::env::var("THCLAWS_WORKSPACES_BASE").ok())
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from);
+                // dev-plan/42: read-only agent-def source seeded into each
+                // new per-user workspace (env-injected by the cloud).
+                let def_source = std::env::var("THCLAWS_SHARED_DEF_SOURCE")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from);
+                // dev-plan/42 Phase 5: the workspace owner — their seeded def
+                // is writable so they can author + publish updates.
+                let owner_user_id = std::env::var("THCLAWS_OWNER_USER_ID")
+                    .ok()
+                    .filter(|s| !s.is_empty());
                 Some(thclaws_core::server::MultiTenantMode {
                     hmac_secret: secret.into_bytes(),
                     max_users: cli.multi_tenant_max_users,
                     idle_timeout: std::time::Duration::from_secs(idle_timeout_secs),
+                    workspaces_base,
+                    def_source,
+                    owner_user_id,
                 })
             } else {
                 None

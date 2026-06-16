@@ -37,8 +37,21 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Returns a clone of the sandbox root directory.
+    /// Returns the active sandbox root directory.
+    ///
+    /// dev-plan/42: when a per-session working root is scoped (multiuser
+    /// `--serve` — one `workspace-<id>/` per user), that takes priority
+    /// over the process-global `SANDBOX_ROOT`. `SANDBOX_ROOT` is a single
+    /// mutable global; in a shared multi-tenant process it can only hold
+    /// one root, so resolving against it would let one user's path
+    /// resolution land in another user's tree. The task-local root is
+    /// per-session and follows the task across runtime threads. Single-
+    /// tenant / desktop / CLI never scope it, so the global path is
+    /// unchanged.
     pub fn root() -> Option<PathBuf> {
+        if crate::workdir::workdir_is_scoped() {
+            return Some(crate::workdir::current_workdir());
+        }
         SANDBOX_ROOT.read().ok()?.clone()
     }
 
@@ -100,11 +113,12 @@ impl Sandbox {
             return if p.is_absolute() {
                 Ok(p.to_path_buf())
             } else {
-                Ok(std::env::current_dir()?.join(p))
+                Ok(crate::workdir::current_workdir().join(p))
             };
         };
-        let cwd =
-            std::env::current_dir().map_err(|e| Error::Tool(format!("cannot read cwd: {e}")))?;
+        // dev-plan/42: resolve relative paths against the per-session
+        // working dir (task-local when scoped, else process cwd).
+        let cwd = crate::workdir::current_workdir();
         Self::validate_against(&root, &cwd, path)
     }
 
@@ -581,5 +595,39 @@ mod tests {
             let err = Sandbox::check_write_for_user(root, &alice, "output/shared.png").unwrap_err();
             assert!(format!("{err}").contains("outside the per-user writable subtree"));
         });
+    }
+
+    // dev-plan/42 security proof: in a multiuser process two concurrent
+    // sessions resolve against their OWN workspace. `Sandbox::root()`
+    // returns the per-session task-local root and never falls through to
+    // the shared process-global `SANDBOX_ROOT` (the scoped branch returns
+    // first), and interleaving (yield mid-task on a multi-thread runtime)
+    // can't make one session see another's root. Deliberately does NOT
+    // touch the global root — that would pollute it for sibling tests
+    // (the codebase convention; see `with_sandbox`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_sessions_isolate_workdir_roots() {
+        let alice = tempdir().unwrap();
+        let bob = tempdir().unwrap();
+        let ap = alice.path().to_path_buf();
+        let bp = bob.path().to_path_buf();
+
+        // Two sessions, each scoped to its own workspace, yielding mid-task
+        // to force interleaving across the runtime's worker threads. That
+        // `root()` returns the scoped dir at all proves the scoped branch
+        // fired instead of consulting the global.
+        let a = crate::workdir::scope_workdir(ap.clone(), async {
+            tokio::task::yield_now().await;
+            Sandbox::root().unwrap()
+        });
+        let b = crate::workdir::scope_workdir(bp.clone(), async {
+            tokio::task::yield_now().await;
+            Sandbox::root().unwrap()
+        });
+        let (ra, rb) = tokio::join!(a, b);
+
+        assert_eq!(ra, ap, "alice's turn resolves into alice's workspace");
+        assert_eq!(rb, bp, "bob's turn resolves into bob's workspace");
+        assert_ne!(ra, rb, "no cross-tenant leakage under interleaving");
     }
 }

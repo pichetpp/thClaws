@@ -11,8 +11,8 @@ deploy โปรเจกต์จริง ไม่ว่าจะเป็น
 |---|---|
 | 1 | [thClaws คืออะไร?](ch01-what-is-thclaws.md) |
 | 2 | [การติดตั้ง](ch02-installation.md) |
-| 3 | [ทัวร์ Desktop GUI](ch04-desktop-gui-tour.md) |
-| 4 | [Working directory และโหมดการรัน](ch03-working-directory-and-modes.md) |
+| 3 | [Working directory และโหมดการรัน](ch03-working-directory-and-modes.md) |
+| 4 | [ทัวร์ Desktop GUI](ch04-desktop-gui-tour.md) |
 | 5 | [สิทธิ์การใช้งาน (Permissions)](ch05-permissions.md) |
 | 6 | [Provider, โมเดล และ API key](ch06-providers-models-api-keys.md) |
 | 7 | [Session](ch07-sessions.md) |
@@ -26,6 +26,7 @@ deploy โปรเจกต์จริง ไม่ว่าจะเป็น
 | 15 | [Subagent](ch15-subagents.md) |
 | 16 | [Plugin](ch16-plugins.md) |
 | 17 | [ทีมของ Agent](ch17-agent-teams.md) |
+| 18 | [Plan mode (โหมดวางแผน)](ch18-plan-mode.md) |
 | 19 | [การตั้งเวลา (Scheduling)](ch19-scheduling.md) |
 | 20 | [Background research (`/research`)](ch20-research.md) |
 | 21 | [LINE chat & web browser bridge](ch21-line-and-browser-chat.md) |

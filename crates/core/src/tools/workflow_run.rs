@@ -154,7 +154,7 @@ impl Tool for WorkflowRunTool {
         // verbatim — mirrors `/workflow exec`. Sandbox: the path must
         // resolve inside the workspace.
         let script = if let Some(path) = script_path {
-            let cwd = std::env::current_dir().map_err(|e| Error::Tool(format!("cwd: {e}")))?;
+            let cwd = crate::workdir::current_workdir();
             let resolved = crate::sandbox::Sandbox::check_in(&cwd, path)
                 .map_err(|e| Error::Tool(format!("script_path {path:?}: {e}")))?;
             std::fs::read_to_string(&resolved)

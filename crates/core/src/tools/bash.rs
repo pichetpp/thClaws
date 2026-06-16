@@ -90,7 +90,7 @@ impl Tool for BashTool {
         } else if let Some(root) = crate::sandbox::Sandbox::root() {
             root
         } else {
-            std::env::current_dir()?
+            crate::workdir::current_workdir()
         };
 
         // Auto-activate venv for pip/python commands when no venv exists yet.

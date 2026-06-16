@@ -75,15 +75,24 @@ Memory lives at `.thclaws/memory/`:
 
 ### Writing memory
 
-In v0.2.x memory is **user-edited** — open any `*.md` file under
-`~/.local/share/thclaws/memory/` (or `./.thclaws/memory/` for a
-project-scoped note) and edit it by hand. The agent reads these files
-on every turn but does not yet write back to them.
+The agent writes memory through three tools, all gated by the normal
+permission system:
 
-A `Memory` tool that lets the agent persist facts through the permission
-gate ("remember that I prefer TypeScript over plain JS") is on the
-roadmap for a later release. Until then, treat memory as a static
-context file you curate yourself.
+- **`MemoryWrite`** — create or replace an entry. Auto-stamps the
+  frontmatter (`name`, `created`, `updated`) and auto-updates the
+  `MEMORY.md` index. Asks for approval before it writes.
+- **`MemoryAppend`** — append to an existing entry and bump `updated:`.
+- **`MemoryRead`** — fetch the full body of an entry the system prompt
+  marked as `body deferred` (elided to keep the prompt under budget).
+
+So you can just say "remember that I prefer TypeScript over plain JS"
+and the agent files it through the permission gate — no hand-editing
+required. You can still open any `*.md` under
+`~/.local/share/thclaws/memory/` (or `./.thclaws/memory/` for a
+project-scoped note) and edit it by hand; the agent re-reads these
+files every turn. The write tools deliberately bypass the filesystem
+sandbox to land inside the resolved memory root (the same carve-out as
+`TodoWrite` and `KmsWrite`), with path safety enforced separately.
 
 Each memory file has YAML frontmatter:
 
@@ -95,7 +104,7 @@ type: project
 ---
 
 The billing module rewrite is blocked on legal review of the new
-pricing tiers. Target unblock date: 2026-05-15. Contact: Priya.
+pricing tiers. Target unblock date: 2026-09-15. Contact: Priya.
 ```
 
 Types thClaws recognises: `user`, `feedback`, `project`, `reference`.

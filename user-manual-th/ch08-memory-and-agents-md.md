@@ -116,15 +116,25 @@ Memory อยู่ที่ `.thclaws/memory/`:
 
 ### การเขียน memory
 
-ใน v0.2.x memory จะ **ถูกแก้ไขโดยผู้ใช้เอง** — เปิดไฟล์ `*.md` ใด ๆ ใน
-`~/.local/share/thclaws/memory/` (หรือ `./.thclaws/memory/` สำหรับ
-บันทึกแบบ project-scoped) แล้วแก้ด้วยมือ agent จะอ่านไฟล์เหล่านี้
-ทุก turn แต่ยังไม่สามารถเขียนกลับลงไปได้
+agent เขียน memory ได้ผ่าน 3 tool โดยทุกตัวผ่าน permission system
+ตามปกติ:
 
-Memory tool ที่ให้ agent บันทึกข้อเท็จจริงผ่าน permission gate ได้
-("จำไว้ว่าฉันชอบ TypeScript มากกว่า plain JS") ยังอยู่ใน roadmap
-ของรุ่นถัดไป จนกว่าจะถึงวันนั้น ให้มอง memory เป็นไฟล์ context
-คงที่ที่คุณต้องคอยดูแลเอง
+- **`MemoryWrite`** — สร้างหรือแทนที่ entry ประทับ frontmatter
+  (`name`, `created`, `updated`) ให้อัตโนมัติ และอัปเดต index ใน
+  `MEMORY.md` ให้เอง ขออนุมัติก่อนเขียนเสมอ
+- **`MemoryAppend`** — เพิ่มเนื้อหาต่อท้าย entry เดิม พร้อมเลื่อน
+  `updated:`
+- **`MemoryRead`** — ดึงเนื้อหาเต็มของ entry ที่ system prompt ทำเครื่อง
+  หมายว่า `body deferred` (ถูกตัดออกเพื่อให้ prompt อยู่ในงบประมาณ)
+
+ดังนั้นคุณแค่บอกว่า "จำไว้ว่าฉันชอบ TypeScript มากกว่า plain JS" แล้ว
+agent จะบันทึกให้ผ่าน permission gate — ไม่ต้องแก้ด้วยมือ คุณยังเปิดไฟล์
+`*.md` ใด ๆ ใน `~/.local/share/thclaws/memory/` (หรือ
+`./.thclaws/memory/` สำหรับบันทึกแบบ project-scoped) แก้เองได้ agent จะ
+อ่านไฟล์เหล่านี้ทุก turn tool ที่เขียนได้เหล่านี้จงใจ bypass filesystem
+sandbox เพื่อลงใน memory root ที่ resolve แล้ว (เป็น carve-out แบบ
+เดียวกับ `TodoWrite` และ `KmsWrite`) โดยบังคับความปลอดภัยของ path แยก
+ต่างหาก
 
 ไฟล์ memory แต่ละไฟล์มี YAML frontmatter
 
@@ -136,7 +146,7 @@ type: project
 ---
 
 The billing module rewrite is blocked on legal review of the new
-pricing tiers. Target unblock date: 2026-05-15. Contact: Priya.
+pricing tiers. Target unblock date: 2026-09-15. Contact: Priya.
 ```
 
 ชนิดที่ thClaws รู้จักได้แก่ `user`, `feedback`, `project`, `reference`

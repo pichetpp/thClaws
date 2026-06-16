@@ -97,6 +97,25 @@ pub struct RegistryConfig {
     /// `--serve` does not construct a registry, so this is always
     /// set; tests use a tempdir.
     pub project_root: PathBuf,
+    /// dev-plan/42: when `Some`, each user gets their own working
+    /// directory at `<workspaces_base>/workspace-<user_id>/` (the
+    /// "a workspace per user" model). `get_or_spawn` provisions it on
+    /// first connect and roots the session's cwd + state there. When
+    /// `None`, the dev-plan/35 layout applies — one shared `project_root`
+    /// cwd with per-user state subtrees.
+    pub workspaces_base: Option<PathBuf>,
+    /// dev-plan/42: the read-only agent-definition source (the owner's
+    /// agent folder, e.g. `/workspace`). When set, a freshly-provisioned
+    /// per-user workspace is seeded with a copy of the def from here
+    /// (AGENTS.md + `.thclaws/{settings,kms,skills,…}` + project files),
+    /// marked read-only — a frozen snapshot per user. `None` → empty
+    /// workspace (no shared def).
+    pub def_source: Option<PathBuf>,
+    /// dev-plan/42 Phase 5: the workspace owner's user id (as the cloud
+    /// signs it). Their per-user workspace is seeded with a *writable* def
+    /// (they author the agent and "publish" updates to guests); every
+    /// other user's def is read-only. `None` → all seeded defs read-only.
+    pub owner_user_id: Option<String>,
 }
 
 impl UserSessionRegistry {
@@ -141,10 +160,44 @@ impl UserSessionRegistry {
         // dev-plan/35 Tier 1: per-user roots derived from
         // (project_root, user_id) — the SharedSessionHandle below
         // writes its session JSONL, gui-shell storage, and usage
-        // tracker under <project>/.thclaws/users/<user_id>/...
+        // tracker under <state_root>/.thclaws/users/<user_id>/...
         // instead of the cwd-relative single-tenant defaults.
-        let user_state = UserStatePaths::new(&self.config.project_root, user_id);
-        let roots = SessionRoots::for_user_state(&user_state);
+        //
+        // dev-plan/42: when `workspaces_base` is set, each user's
+        // *working directory* is their own `workspace-<user_id>/`. We
+        // provision it on first connect and root both the state paths
+        // and the session cwd there. With no base (dev-plan/35 layout),
+        // state lives under the one shared `project_root` and the cwd
+        // stays process-global.
+        let (state_root, workspace_root) = match &self.config.workspaces_base {
+            Some(base) => {
+                let ws = base.join(format!("workspace-{}", user_id.as_str()));
+                let fresh = !ws.exists();
+                if let Err(e) = std::fs::create_dir_all(&ws) {
+                    eprintln!(
+                        "\x1b[33m[serve] could not provision workspace for {}: {e}\x1b[0m",
+                        user_id.as_str()
+                    );
+                }
+                // dev-plan/42: seed the agent def into a brand-new per-user
+                // workspace (frozen snapshot). Only on first create so a
+                // returning user keeps their own files. dev-plan/42 Phase 5:
+                // the OWNER's def is writable (they author + publish
+                // updates); everyone else's is read-only.
+                if fresh {
+                    if let Some(src) = &self.config.def_source {
+                        let read_only =
+                            self.config.owner_user_id.as_deref() != Some(user_id.as_str());
+                        seed_def_into(src, &ws, read_only);
+                    }
+                }
+                (ws.clone(), Some(ws))
+            }
+            None => (self.config.project_root.clone(), None),
+        };
+        let user_state = UserStatePaths::new(&state_root, user_id);
+        let mut roots = SessionRoots::for_user_state(&user_state);
+        roots.workspace_root = workspace_root;
         let handle = Arc::new(spawn_with_roots(self.config.approver.clone(), Some(roots)));
         let session = Arc::new(UserSession {
             user_id: user_id.clone(),
@@ -237,6 +290,94 @@ fn evict_lru(state: &mut RegistryState) {
     }
 }
 
+/// dev-plan/42: copy the agent definition from `src` into a freshly
+/// provisioned per-user workspace `dst`, then mark every copied file
+/// read-only (a frozen snapshot — the company agent's instructions/KMS/
+/// skills are locked to the guest; their own work lives elsewhere in the
+/// workspace, writable). Excludes the per-user dirs themselves (so we
+/// never recurse `dst` back into itself), member-private state, build
+/// artefacts, and secrets — mirrors the cloud pack/brain strip rules.
+///
+/// Best-effort: a copy/permission failure is logged, not fatal — a
+/// missing def file just means the guest's agent is thinner, never a
+/// crash or a security downgrade (gateway-force + isolation are enforced
+/// elsewhere).
+///
+/// dev-plan/42 Phase 5: `read_only` marks copied def files `0444` (the
+/// guest can't change the company agent). The OWNER seeds with
+/// `read_only = false` so they can author the def and "publish" updates.
+fn seed_def_into(src: &std::path::Path, dst: &std::path::Path, read_only: bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn excluded(rel: &str) -> bool {
+        const PREFIXES: &[&str] = &[
+            ".users/",
+            ".thclaws/users/",
+            ".thclaws/sessions/",
+            ".thclaws/browser-profile/",
+            ".thclaws/cache/",
+            ".thclaws/kms/data/",
+            "output/users/",
+            ".git/",
+            "node_modules/",
+            "target/",
+            "__pycache__/",
+        ];
+        if PREFIXES.iter().any(|p| rel.starts_with(p)) {
+            return true;
+        }
+        if rel.ends_with(".env") || rel.ends_with(".key") {
+            return true;
+        }
+        rel.to_lowercase().contains("_secret")
+    }
+
+    let walker = walkdir::WalkDir::new(src)
+        .follow_links(false)
+        .into_iter()
+        // Prune heavy / private dirs so we don't descend into them (esp.
+        // `.users`, which lives under `src` and would otherwise recurse).
+        .filter_entry(|e| match e.path().strip_prefix(src) {
+            Ok(rel) if e.file_type().is_dir() => {
+                let mut s = rel.to_string_lossy().replace('\\', "/");
+                if !s.is_empty() {
+                    s.push('/');
+                }
+                !excluded(&s)
+            }
+            _ => true,
+        });
+
+    for entry in walker.filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(src) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if excluded(&rel_str) {
+            continue;
+        }
+        let out = dst.join(rel);
+        if let Some(parent) = out.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::copy(entry.path(), &out) {
+            Ok(_) => {
+                if read_only {
+                    let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o444));
+                }
+            }
+            Err(e) => eprintln!(
+                "\x1b[33m[serve] seed copy failed for {}: {e}\x1b[0m",
+                rel_str
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +403,101 @@ mod tests {
             idle_timeout,
             approver: Arc::new(AutoApprover),
             project_root,
+            workspaces_base: None,
+            def_source: None,
+            owner_user_id: None,
         }
+    }
+
+    // dev-plan/42: registry config with per-user working directories.
+    fn config_with_workspaces_base(base: PathBuf) -> RegistryConfig {
+        RegistryConfig {
+            max_users: 10,
+            idle_timeout: Duration::from_secs(60),
+            approver: Arc::new(AutoApprover),
+            project_root: base.clone(),
+            workspaces_base: Some(base),
+            def_source: None,
+            owner_user_id: None,
+        }
+    }
+
+    #[test]
+    fn seed_def_into_copies_def_excludes_private_and_locks_readonly() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempfile::tempdir().unwrap();
+        let s = src.path();
+        std::fs::write(s.join("AGENTS.md"), b"# agent def").unwrap();
+        std::fs::create_dir_all(s.join(".thclaws/kms")).unwrap();
+        std::fs::write(s.join(".thclaws/kms/index.bin"), b"idx").unwrap();
+        std::fs::create_dir_all(s.join(".thclaws/sessions")).unwrap();
+        std::fs::write(s.join(".thclaws/sessions/sess.jsonl"), b"private chat").unwrap();
+        std::fs::create_dir_all(s.join(".users/workspace-bob")).unwrap();
+        std::fs::write(s.join(".users/workspace-bob/file.txt"), b"bob's").unwrap();
+        std::fs::write(s.join(".env"), b"OPENAI_API_KEY=sk-x").unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let d = dst.path();
+        seed_def_into(s, d, true);
+
+        // Def parts are copied…
+        assert!(d.join("AGENTS.md").is_file(), "AGENTS.md seeded");
+        assert!(
+            d.join(".thclaws/kms/index.bin").is_file(),
+            "kms index seeded"
+        );
+        // …private / recursive / secret parts are NOT.
+        assert!(
+            !d.join(".thclaws/sessions/sess.jsonl").exists(),
+            "sessions excluded"
+        );
+        assert!(
+            !d.join(".users").exists(),
+            "per-user dirs excluded (no recursion)"
+        );
+        assert!(!d.join(".env").exists(), ".env excluded");
+        // Seeded def is locked read-only (frozen snapshot).
+        let mode = std::fs::metadata(d.join("AGENTS.md"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o444, "seeded def file is read-only");
+    }
+
+    // dev-plan/42 Phase 5: the owner seeds with read_only=false so they
+    // can edit the agent def + publish updates.
+    #[test]
+    fn seed_def_into_owner_gets_writable_def() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("AGENTS.md"), b"# def").unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        seed_def_into(src.path(), dst.path(), /* read_only */ false);
+        let mode = std::fs::metadata(dst.path().join("AGENTS.md"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o200, 0, "owner's seeded def must be writable");
+    }
+
+    #[test]
+    fn per_user_workspaces_are_provisioned_and_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_path_buf();
+        let reg = UserSessionRegistry::new(config_with_workspaces_base(base.clone()));
+
+        let alice = UserId::new_for_test("alice");
+        let bob = UserId::new_for_test("bob");
+        let _ = reg.get_or_spawn(&alice);
+        let _ = reg.get_or_spawn(&bob);
+
+        // dev-plan/42: first connect provisions <base>/workspace-<id>/,
+        // one per user, and they are distinct directories.
+        let alice_ws = base.join(format!("workspace-{}", alice.as_str()));
+        let bob_ws = base.join(format!("workspace-{}", bob.as_str()));
+        assert!(alice_ws.is_dir(), "alice's workspace dir provisioned");
+        assert!(bob_ws.is_dir(), "bob's workspace dir provisioned");
+        assert_ne!(alice_ws, bob_ws, "each user gets their own workspace");
     }
 
     #[test]

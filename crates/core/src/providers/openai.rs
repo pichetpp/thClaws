@@ -397,6 +397,26 @@ fn extract_images(content: &ToolResultContent) -> Vec<(String, String)> {
     }
 }
 
+/// True if any message in the request carries image pixels — either an
+/// inline `ContentBlock::Image` (pasted/attached) or a `ToolResult` whose
+/// content includes an image block (Read on an image, PdfRead rendering a
+/// scanned/image PDF to pages). Used to turn an otherwise-opaque provider
+/// 4xx into an actionable "this model can't see images" hint: text-only
+/// models (DeepSeek v4, most non-`-vl` Qwen, etc.) reject image_url
+/// content with a bare HTTP 400. See issue #164.
+fn request_carries_image(req: &StreamRequest) -> bool {
+    req.messages.iter().any(|m| {
+        m.content.iter().any(|b| match b {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::ToolResult { content, .. } => {
+                matches!(content, ToolResultContent::Blocks(blocks)
+                    if blocks.iter().any(|tb| matches!(tb, ToolResultBlock::Image { .. })))
+            }
+            _ => false,
+        })
+    })
+}
+
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -475,10 +495,20 @@ impl Provider for OpenAIProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "http {status}: {}",
-                super::redact_key(&text, &self.api_key)
-            )));
+            let mut msg = format!("http {status}: {}", super::redact_key(&text, &self.api_key));
+            // Issue #164: a 4xx on a request that shipped image pixels is
+            // almost always "this model can't see images" (text-only
+            // model + a Read on an image / a scanned-image PDF). The raw
+            // upstream 400 body is unhelpful, so append a concrete fix.
+            if status.is_client_error() && request_carries_image(&req) {
+                msg.push_str(&format!(
+                    "\n\n⚠️ This request included an image, but model `{}` may not support image input. \
+                     Switch to a vision-capable model (e.g. dashscope/qwen3-vl-plus, gpt-4o, gemini-2.x, a Claude model), \
+                     or extract the PDF/image to text first (e.g. read it once with a vision model and save to KMS, then query the text).",
+                    req.model
+                ));
+            }
+            return Err(Error::Provider(msg));
         }
 
         let byte_stream = resp.bytes_stream();
@@ -1213,6 +1243,55 @@ mod tests {
             user_content[2]["image_url"]["url"],
             "data:image/png;base64,AAAA"
         );
+    }
+
+    #[test]
+    fn request_carries_image_detects_inline_and_tool_result_images() {
+        use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
+        let img = ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        let base = |content: Vec<ContentBlock>| StreamRequest {
+            model: "deepseek-v4-flash".into(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content,
+            }],
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+
+        // Text-only request → no image.
+        assert!(!request_carries_image(&base(vec![ContentBlock::text(
+            "hi"
+        )])));
+
+        // Inline (pasted) image → detected.
+        assert!(request_carries_image(&base(vec![ContentBlock::Image {
+            source: img.clone(),
+        }])));
+
+        // Image riding inside a ToolResult (Read / PdfRead fallback) → detected.
+        assert!(request_carries_image(&base(vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "c1".into(),
+                content: ToolResultContent::Blocks(vec![ToolResultBlock::Image { source: img }]),
+                is_error: false,
+            }
+        ])));
+
+        // Text-only ToolResult → no image.
+        assert!(!request_carries_image(&base(vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "c2".into(),
+                content: ToolResultContent::Text("just text".into()),
+                is_error: false,
+            }
+        ])));
     }
 
     #[test]

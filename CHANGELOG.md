@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.65.0] - 2026-06-17
+
+### Added
+- **Multiuser `--serve` mode** (dev-plan/42). `thclaws --serve --multiuser` hosts many authenticated users from one pod, each in their own `workspace-<id>/` working directory with isolated session history and files. The agent definition (AGENTS.md, KMS, skills, MCP config) is seeded read-only per user; HMAC-signed `X-Thclaws-User` identity routes every request — and every tool's path resolution — to the right per-user session; the gateway is forced (no BYOK). This powers thClaws.cloud **workspace sharing**: one owner-billed pod, many guests; the owner edits the agent and publishes updates to everyone, and guests can wake a sleeping shared workspace themselves.
+
+### Fixed
+- **Clear error when an image is sent to a text-only model** ([#164](https://github.com/thClaws/thClaws/issues/164)). Reading an image or an image/scanned PDF (e.g. `PdfRead` rendering blueprint pages) and feeding it to a model that can't see images (DeepSeek v4, most non-`-vl` Qwen, etc.) previously failed with a bare upstream `HTTP 400`. The OpenAI-compatible provider now detects image content in a rejected request and appends an actionable hint — switch to a vision model (e.g. `dashscope/qwen3-vl-plus`), or extract the PDF/image to text/KMS first and query that.
+
 ## [0.64.0] - 2026-06-16
 
 ### Fixed

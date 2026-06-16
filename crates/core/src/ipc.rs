@@ -64,6 +64,23 @@ pub type SendInitialStateFn = Arc<dyn Fn() + Send + Sync>;
 /// client (the browser's CSS zoom handles the rest).
 pub type ZoomFn = Arc<dyn Fn(f64) + Send + Sync>;
 
+/// dev-plan/42: resolve the session store for IPC session ops. In
+/// multiuser `--serve` the handle carries per-user `session_roots`, so
+/// session list/rename/delete must hit THAT user's `sessions_dir` — not
+/// `SessionStore::default_path()` (process-cwd-relative = the owner's
+/// shared `/workspace/.thclaws/sessions/`, which leaked every user the
+/// owner's sessions and made the listed ids unloadable by the per-user
+/// worker). Falls back to the default path for single-tenant.
+fn ipc_session_store(ctx: &IpcContext) -> Option<crate::session::SessionStore> {
+    ctx.shared
+        .session_roots
+        .as_ref()
+        .map(|r| crate::session::SessionStore::new(r.sessions_dir.clone()))
+        .or_else(|| {
+            crate::session::SessionStore::default_path().map(crate::session::SessionStore::new)
+        })
+}
+
 /// Everything the IPC dispatch needs from its surrounding transport.
 /// Construct one per session in the transport's setup; pass `&` to
 /// [`handle_ipc`] for each inbound message.
@@ -1379,6 +1396,14 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         }
 
         "set_cwd" => {
+            // dev-plan/42: in a multiuser serve pod, switching the
+            // *process* cwd would relocate every tenant's working dir.
+            // Refuse — each user's root is fixed to their workspace-<id>/
+            // via the task-local scope. (Desktop / single-tenant serve is
+            // unaffected.)
+            if crate::workdir::is_multiuser() {
+                return true;
+            }
             if let Some(path) = msg.get("path").and_then(|v| v.as_str()) {
                 let p = std::path::Path::new(path);
                 if p.is_dir() {
@@ -3794,9 +3819,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let (ok, error) = if id.is_empty() {
                 (false, "id required".to_string())
             } else {
-                match crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new)
-                {
+                match ipc_session_store(ctx) {
                     Some(store) => match store.rename(id, title) {
                         Ok(_) => (true, String::new()),
                         Err(e) => (false, e.to_string()),
@@ -3821,8 +3844,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         title: title.to_string(),
                     },
                 );
-                let store = crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new);
+                let store = ipc_session_store(ctx);
                 (ctx.dispatch)(crate::shared_session::build_session_list(&store, ""));
             }
         }
@@ -3833,8 +3855,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             // `initial_state` snapshot already passed — answer with a
             // fresh list so the history isn't blank until the next
             // worker-side push.
-            let store =
-                crate::session::SessionStore::default_path().map(crate::session::SessionStore::new);
+            let store = ipc_session_store(ctx);
             (ctx.dispatch)(crate::shared_session::build_session_list(&store, ""));
         }
 
@@ -3843,9 +3864,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let (ok, error) = if id.is_empty() {
                 (false, "id required".to_string())
             } else {
-                match crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new)
-                {
+                match ipc_session_store(ctx) {
                     Some(store) => match store.delete(id) {
                         Ok(()) => (true, String::new()),
                         Err(e) => (false, e.to_string()),
@@ -3868,8 +3887,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         id: id.to_string(),
                     },
                 );
-                let store = crate::session::SessionStore::default_path()
-                    .map(crate::session::SessionStore::new);
+                let store = ipc_session_store(ctx);
                 (ctx.dispatch)(crate::shared_session::build_session_list(&store, ""));
             }
         }

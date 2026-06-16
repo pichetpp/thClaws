@@ -37,8 +37,9 @@ use crate::uploads::{
     UPLOADS_DIRNAME, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Multipart, Query, State};
+use axum::extract::{Multipart, Query, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -89,6 +90,18 @@ pub struct MultiTenantMode {
     pub max_users: usize,
     /// Idle-TTL for session eviction.
     pub idle_timeout: std::time::Duration,
+    /// dev-plan/42: when `Some`, each user gets their own working
+    /// directory `<workspaces_base>/workspace-<user_id>/` (the "a
+    /// workspace per user" model). `None` keeps the dev-plan/35 layout
+    /// (one shared cwd + per-user state subtrees).
+    pub workspaces_base: Option<std::path::PathBuf>,
+    /// dev-plan/42: read-only agent-def source seeded into each new
+    /// per-user workspace (frozen snapshot). `None` → empty workspaces.
+    pub def_source: Option<std::path::PathBuf>,
+    /// dev-plan/42 Phase 5: the workspace owner's user id — their seeded
+    /// def is writable (they author + publish); everyone else's is
+    /// read-only. `None` → all read-only.
+    pub owner_user_id: Option<String>,
 }
 
 impl std::fmt::Debug for MultiTenantMode {
@@ -98,6 +111,9 @@ impl std::fmt::Debug for MultiTenantMode {
             .field("hmac_secret", &"<redacted>")
             .field("max_users", &self.max_users)
             .field("idle_timeout", &self.idle_timeout)
+            .field("workspaces_base", &self.workspaces_base)
+            .field("def_source", &self.def_source)
+            .field("owner_user_id", &self.owner_user_id)
             .finish()
     }
 }
@@ -312,6 +328,12 @@ pub async fn run_with_engine(
         None => std::env::current_dir()
             .map_err(|e| crate::error::Error::Tool(format!("workspace cwd unavailable: {e}")))?,
     };
+    // dev-plan/42: flag the process as multiuser so global cwd/sandbox
+    // mutators (IPC `set_cwd`) stay no-ops — per-session roots come from
+    // the task-local working dir, not process-global state.
+    if config.multi_tenant.is_some() {
+        crate::workdir::set_multiuser(true);
+    }
     // dev-plan/35 Tier 1: construct the multi-tenant registry +
     // background evictor when multi-tenant mode is configured.
     let multi_tenant_state = config.multi_tenant.as_ref().map(|cfg| {
@@ -324,6 +346,10 @@ pub async fn run_with_engine(
                 // <workspace>/.thclaws/users/<user_id>/... so a pod
                 // restart preserves every user's session.
                 project_root: workspace.clone(),
+                // dev-plan/42: per-user working dirs + def seed source.
+                workspaces_base: cfg.workspaces_base.clone(),
+                def_source: cfg.def_source.clone(),
+                owner_user_id: cfg.owner_user_id.clone(),
             });
         // Sweep every 30s — fine for 30m default idle_timeout, will
         // need re-tuning if Tier 3 wants sub-minute sessions.
@@ -404,6 +430,16 @@ pub async fn run_with_engine(
             .route("/file-asset/{*rel}", get(serve_file_asset))
             .with_state(state)
             .merge(crate::api_v1::router())
+    };
+
+    // dev-plan/42: gate the ENTIRE surface behind HMAC identity in a
+    // multiuser pod (both router shapes above), so no route is reachable
+    // without a verified user. /healthz stays open for k8s probes.
+    let app = if let Some(mt) = config.multi_tenant.as_ref() {
+        let secret = Arc::new(mt.hmac_secret.clone());
+        app.layer(axum::middleware::from_fn_with_state(secret, multiuser_auth))
+    } else {
+        app
     };
 
     let listener = tokio::net::TcpListener::bind(&config.bind)
@@ -573,6 +609,51 @@ fn build_shell_router(
     }
 
     Ok(router)
+}
+
+/// dev-plan/42: in `--multiuser`, EVERY HTTP request must carry a valid
+/// HMAC-signed identity (the cloud routing layer injects
+/// `X-Thclaws-User` / `-ts` / `-proof`) — otherwise 401. Without this a
+/// multiuser pod would serve the index, bridge, `/upload`, and `/v1/*`
+/// to anyone, since those routes have no per-route HMAC check (only WS +
+/// file-asset did). Single-tenant `--serve` never installs this layer
+/// (keeps its `THCLAWS_API_TOKEN` Bearer model). `/healthz` is exempt so
+/// k8s liveness/readiness probes — which carry no identity — still pass.
+async fn multiuser_auth(State(secret): State<Arc<Vec<u8>>>, req: Request, next: Next) -> Response {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if multiuser_request_authed(req.uri().path(), req.headers(), secret.as_slice(), now) {
+        next.run(req).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
+/// The auth decision for [`multiuser_auth`], split out so it's unit
+/// testable without driving a live router. `/healthz` is exempt (k8s
+/// probes); everything else needs a valid HMAC identity triple.
+fn multiuser_request_authed(
+    path: &str,
+    headers: &axum::http::HeaderMap,
+    secret: &[u8],
+    now_secs: u64,
+) -> bool {
+    if path == "/healthz" {
+        return true;
+    }
+    let get = |n: &str| headers.get(n).and_then(|v| v.to_str().ok());
+    match (
+        get("x-thclaws-user"),
+        get("x-thclaws-user-ts"),
+        get("x-thclaws-user-proof"),
+    ) {
+        (Some(u), Some(ts), Some(p)) => {
+            crate::multi_tenant::verify_user_header(u, ts, p, secret, now_secs).is_ok()
+        }
+        _ => false,
+    }
 }
 
 fn is_loopback(addr: &SocketAddr) -> bool {
@@ -1073,6 +1154,9 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
             let _ = tx.send(payload);
         })
     };
+    // dev-plan/42: capture the resolved (per-user) session roots for the
+    // initial-state snapshot closure below.
+    let initial_session_roots = shared.session_roots.clone();
     let ctx = IpcContext {
         is_serve_mode: true,
         // dev-plan/35 Tier 1: `shared` here is the RESOLVED handle
@@ -1090,7 +1174,12 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
             );
         }),
         on_send_initial_state: Arc::new(move || {
-            let payload = build_initial_state_payload();
+            // dev-plan/42: per-user sessions dir from the resolved handle
+            // (multiuser) so the snapshot lists this user's history.
+            let sessions_dir = initial_session_roots
+                .as_ref()
+                .map(|r: &crate::multi_tenant::SessionRoots| r.sessions_dir.clone());
+            let payload = build_initial_state_payload(sessions_dir);
             let _ = initial_dispatch(payload);
         }),
         on_zoom: Arc::new(|_scale| {
@@ -1230,7 +1319,7 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
 /// credentials but another provider does, switch + persist so the
 /// "ready" indicator in the sidebar is accurate after the user adds
 /// a key.
-fn build_initial_state_payload() -> String {
+fn build_initial_state_payload(sessions_dir: Option<std::path::PathBuf>) -> String {
     let mut config = AppConfig::load().unwrap_or_default();
     if let Some(new_model) = crate::providers::auto_fallback_model(&config) {
         let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
@@ -1244,8 +1333,13 @@ fn build_initial_state_payload() -> String {
     // McpReady worker event) so reconnect-after-startup ships real
     // counts instead of the hardcoded zeros that surfaced as issue #86.
     let mcp_servers = crate::gui::build_mcp_servers_payload(&config);
-    let sessions: Vec<serde_json::Value> = SessionStore::default_path()
+    // dev-plan/42: in multiuser `--serve` the WS-connect snapshot must
+    // list THIS user's sessions (their per-user `sessions_dir`), not the
+    // process-cwd default (the owner's shared `/workspace/.thclaws/
+    // sessions/`). `None` → single-tenant default.
+    let sessions: Vec<serde_json::Value> = sessions_dir
         .map(SessionStore::new)
+        .or_else(|| SessionStore::default_path().map(SessionStore::new))
         .and_then(|store| store.list().ok())
         .unwrap_or_default()
         .into_iter()
@@ -1732,6 +1826,9 @@ mod tests {
                 // checks that never write per-user state — temp_dir
                 // is fine, nothing lands on disk.
                 project_root: std::env::temp_dir(),
+                workspaces_base: None,
+                def_source: None,
+                owner_user_id: None,
             });
         MultiTenantState {
             registry,
@@ -1750,6 +1847,46 @@ mod tests {
         headers.insert("x-thclaws-user-ts", ts.to_string().parse().unwrap());
         headers.insert("x-thclaws-user-proof", proof.parse().unwrap());
         headers
+    }
+
+    // dev-plan/42: the global multiuser auth gate.
+    #[test]
+    fn multiuser_auth_requires_valid_identity_on_every_route() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let empty = HeaderMap::new();
+
+        // No identity → rejected on a normal route.
+        assert!(!multiuser_request_authed("/", &empty, TEST_SECRET, now));
+        assert!(!multiuser_request_authed(
+            "/v1/chat/completions",
+            &empty,
+            TEST_SECRET,
+            now
+        ));
+        // Health probe is exempt (k8s has no identity to present).
+        assert!(multiuser_request_authed(
+            "/healthz",
+            &empty,
+            TEST_SECRET,
+            now
+        ));
+        // Valid signed identity → allowed.
+        assert!(multiuser_request_authed(
+            "/",
+            &headers_for("alice"),
+            TEST_SECRET,
+            now
+        ));
+        // Wrong secret → forged → rejected.
+        assert!(!multiuser_request_authed(
+            "/",
+            &headers_for("alice"),
+            b"a-different-secret",
+            now
+        ));
     }
 
     #[test]

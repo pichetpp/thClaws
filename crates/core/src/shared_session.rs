@@ -1179,7 +1179,16 @@ async fn run_worker(
     session_roots: Option<crate::multi_tenant::SessionRoots>,
     browser_mcp: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::mcp::McpClient>>>>,
 ) {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    // dev-plan/42: when this worker belongs to a per-user workspace
+    // (multiuser `--serve`), its working directory is that user's
+    // `workspace-<id>/`, not the process cwd. Falls back to process cwd
+    // for single-tenant `--serve`, desktop, and CLI (`workspace_root`
+    // is `None`).
+    let cwd = session_roots
+        .as_ref()
+        .and_then(|r| r.workspace_root.clone())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
     let config = AppConfig::load().unwrap_or_default();
     // Push the configured stream-chunk timeout into the global the
     // providers read on every `byte_stream.next()`. Live; subsequent
@@ -3996,7 +4005,13 @@ async fn drive_turn_stream(
     input_tx: &mpsc::Sender<ShellInput>,
     surface_session: Option<String>,
 ) {
-    let turn_result = AssertUnwindSafe(drive_turn_stream_inner(
+    // dev-plan/42: in a multiuser pod, run the whole turn under this
+    // session's task-local working dir (`workspace-<id>/`) so every tool
+    // — bash, write, kms, pdf/epub, workflow — resolves paths against the
+    // user's own folder, never the process cwd / shared SANDBOX_ROOT.
+    // Single-tenant leaves the scope unset (process cwd, unchanged).
+    let root = state.cwd.clone();
+    let inner = drive_turn_stream_inner(
         stream,
         state,
         events_tx,
@@ -4004,9 +4019,14 @@ async fn drive_turn_stream(
         lead_mb,
         input_tx,
         surface_session,
-    ))
-    .catch_unwind()
-    .await;
+    );
+    let turn_result = if crate::workdir::is_multiuser() {
+        AssertUnwindSafe(crate::workdir::scope_workdir(root, inner))
+            .catch_unwind()
+            .await
+    } else {
+        AssertUnwindSafe(inner).catch_unwind().await
+    };
 
     if let Err(payload) = turn_result {
         let msg = panic_message(&payload);

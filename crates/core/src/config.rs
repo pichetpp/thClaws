@@ -1584,6 +1584,20 @@ impl AppConfig {
             config.model = m;
         }
 
+        // dev-plan/42: in a multiuser pod the guest's settings.json + .env
+        // live in their WRITABLE workspace, so without this they could
+        // BYOK and bypass the owner's gateway (billing + governance).
+        // Force every gateway-routable provider through the gateway,
+        // ignoring any BYOK/native config in the workspace. Mirrors
+        // shared-mode's gateway-only rule (load_shared), but triggered by
+        // multiuser — here the def is in-workspace, not a $SHARED mount.
+        if crate::workdir::is_multiuser() {
+            config.gateway_use_for = crate::shared::GATEWAY_ALL_PROVIDERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+
         Ok(config)
     }
 
@@ -1939,6 +1953,38 @@ mod tests {
     // (the crate-wide lock) rather than a local one, so they don't race
     // against tests in kms/plugins/context/agent that also flip cwd /
     // HOME / THCLAWS_PROJECT_ROOT.
+
+    // dev-plan/42: a multiuser pod forces every gateway-routable provider
+    // through the gateway, so a guest can't BYOK out of the owner's bill
+    // via their writable settings/.env. Single-tenant leaves it alone.
+    #[test]
+    fn multiuser_forces_gateway_routable_providers() {
+        let _guard = crate::kms::test_env_lock();
+
+        // Single-tenant baseline: no blanket gateway-force.
+        crate::workdir::set_multiuser(false);
+        let plain = AppConfig::load().unwrap();
+
+        // Multiuser: every gateway-routable provider is forced onto the
+        // gateway. Reset the flag before asserting so a panic can't leak
+        // multiuser mode into sibling tests.
+        crate::workdir::set_multiuser(true);
+        let multi = AppConfig::load().unwrap();
+        crate::workdir::set_multiuser(false);
+
+        for p in crate::shared::GATEWAY_ALL_PROVIDERS {
+            assert!(
+                multi.gateway_use_for.iter().any(|s| s == p),
+                "multiuser must force {p} through the gateway"
+            );
+        }
+        // The force is multiuser-specific, not unconditional.
+        assert!(
+            plain.gateway_use_for.len() < multi.gateway_use_for.len()
+                || plain.gateway_use_for.is_empty(),
+            "single-tenant must not blanket-force the gateway"
+        );
+    }
 
     #[test]
     fn default_config_is_anthropic_sonnet() {

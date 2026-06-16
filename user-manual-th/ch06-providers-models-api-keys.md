@@ -490,3 +490,108 @@ Auth เป็น header `Authorization: Bearer $OPENAI_COMPAT_API_KEY`
 ถ้า endpoint ของคุณ implement `/v1/models` ด้วย คำสั่ง
 `/models refresh` จะดึง catalogue มาให้อัตโนมัติ ถ้าไม่มี
 endpoint นั้น refresh จะ fail เงียบ ๆ และ chat ยังทำงานต่อได้ปกติ
+
+## ใช้ Codex ผ่าน subscription ChatGPT (`chatgpt-codex/*`)
+
+รัน Codex model กับ `chatgpt.com/backend-api/codex/responses` โดย
+**คิดเงินจาก subscription ChatGPT Plus / Pro / Team** แทนการใช้
+OpenAI API key แบบเสียเงิน เป็น wire path เดียวกับที่ Codex CLI
+ตัวทางการใช้
+
+การตั้งค่าทำครั้งเดียว และ thClaws จะอาศัย auth ของ Codex CLI
+ตัวทางการ:
+
+1. ติดตั้ง Codex CLI (`npm i -g @openai/codex-cli` หรือทำตามเอกสาร
+   ของเขา)
+2. รัน `codex login` หนึ่งครั้ง — จะเปิด browser ให้คุณ sign in เข้า
+   บัญชี ChatGPT แล้ว CLI จะเก็บ token ไว้ที่
+   `~/.codex/auth.json`
+3. ใน thClaws: `/model chatgpt-codex/gpt-5.4` (หรือ Codex model ตัว
+   อื่นตาม tier ของ subscription คุณ)
+
+thClaws จะ auto-import ไฟล์ auth ให้ตอนใช้งานครั้งแรก — ไม่ต้อง
+login ฝั่ง thClaws แยกอีก เมื่อ access token หมดอายุ ให้รัน `codex
+login` ใหม่ thClaws จะหยิบไฟล์ที่ refresh แล้วมาใช้ในการเรียกครั้งถัดไป
+
+ข้อควรระวัง:
+
+- endpoint นี้ไม่มีเอกสาร OpenAI อาจเปลี่ยน wire shape ได้โดยไม่แจ้ง
+  ล่วงหน้า ถ้าเจอ 400 พร้อมชื่อ field ที่ไม่คาดคิด ลองเช็ค
+  [thclaws issues](https://github.com/thClaws/thClaws/issues) ก่อน
+  ลงมือ debug
+- rate limit ของ subscription มีผล (โดยทั่วไปใจกว้างกว่า free API
+  tier มาก แต่ก็ยังมีขีดจำกัด — automation หนัก ๆ อาจชนเพดานได้)
+- การ refresh token ยังไม่ถูกทำให้อัตโนมัติใน thClaws (ให้รัน `codex
+  login` ใหม่เมื่อเจอ error เรื่อง auth)
+
+เพิ่มใน v0.9.5 ผ่าน PR #88 เครดิต: port มาจาก `client_codex.rs`
+ของ themion
+
+## Sign in เข้า thClaws Cloud — ตัวเลือกเสริม
+
+มุมขวาบนของ navbar มีปุ่ม **Sign in** ตั้งแต่ v0.9.6 เป็นต้นไป
+dropdown มี IdP ให้เลือกสองตัว:
+
+- **Sign in with Google** — สำหรับบัญชี Google / Workspace ส่วนตัว
+- **Sign in with Microsoft** — สำหรับบัญชี Microsoft 365 / Azure Entra
+  (multi-tenant — Entra org ไหนก็ใช้ได้โดยไม่ต้องลงทะเบียนต่อ tenant)
+  บัญชี Microsoft ส่วนตัว (Outlook, Hotmail) ก็ใช้ได้ผ่าน endpoint
+  `/common` เดียวกัน
+
+ทั้งสองทางจะ authenticate คุณกับ `gateway.thclaws.ai` และปลดล็อก
+ฟีเจอร์ cloud-gateway (proxy ต่อ provider, shared credit pool — ดูที่
+หัวข้อ **thClaws Gateway** ด้านล่าง)
+
+**สำคัญ:** thClaws ใช้งานได้เต็มที่โดยไม่ต้อง sign in ปุ่มนี้เป็น
+opt-in ถ้าไม่สนใจก็ไม่มีอะไรพัง
+
+### จาก source — ชี้ไป OAuth project ของคุณเอง
+
+ใส่คู่ `*_CLIENT_ID` / `*_CLIENT_SECRET` ที่ตรงกันลงใน `.env`
+(หรือ environment ของ workspace) ก่อนเปิดใช้งาน:
+
+```sh
+# Google (web/native app — ต้องมีทั้ง ID และ secret)
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-...
+
+# Microsoft Entra (public/native client — PKCE-only, ไม่มี secret)
+AZURE_CLIENT_ID=00000000-0000-0000-0000-000000000000
+```
+
+Azure เป็น client แบบ **public** และรัน PKCE โดยไม่ต้องมี secret
+การ register Entra app ต้องตั้ง "Allow public client flows = Yes"
+และใส่ `http://localhost` เป็น redirect URI (ไม่ระบุ port — Entra
+จับ ephemeral port ตัวไหนก็ได้) คู่มือฉบับ operator ครบ ๆ อยู่ที่
+[`docs/azure-setting.md`](../docs/azure-setting.md)
+
+คลิกปุ่ม → browser เปิด → หน้า consent → desktop รับ callback →
+ปุ่มจะเปลี่ยนเป็น email ของคุณพร้อมเครื่องหมายถูก token จะถูกเก็บลง
+OS keychain (macOS Keychain / Windows Credential Manager / Linux
+Secret Service) **ไม่ใช่ใน `.env`** — แม้ว่าคุณจะเลือก backend แบบ
+dotenv สำหรับเก็บ API key ก็ตาม
+
+### จาก dmg / msi ตัวทางการ
+
+OAuth credential ที่ bundle มาถูกฝังเข้าไปใน build ตัวทางการผ่านการ
+inject secret ตอน CI (`BUNDLED_GOOGLE_CLIENT_ID`,
+`BUNDLED_GOOGLE_CLIENT_SECRET`, `BUNDLED_AZURE_CLIENT_ID` ถูกอ่าน
+ตอน compile) ปุ่ม Sign-in ทำงานได้ทันที — ไม่ต้องตั้งค่า `.env` เอง
+
+### ไม่มี prompt จาก keychain ตอนเปิดครั้งแรก
+
+การอ่าน OS keychain จะ trigger prompt ขอสิทธิ์เข้าถึงครั้งแรกที่
+binary ที่เพิ่งเซ็นใหม่ไปแตะ entry แม้ entry นั้นจะยังไม่มีอยู่ก็ตาม
+v0.9.6 เพิ่มไฟล์ marker เล็ก ๆ ที่
+`~/.config/thclaws/sso-known.json` ซึ่งระบุ issuer ที่คุณ sign in
+ไปจริง ๆ ตอน startup จะปรึกษา marker นี้ก่อนจะ probe keychain
+ดังนั้นผู้ใช้ที่ไม่เคย sign in (และผู้ใช้ backend แบบ dotenv ที่ SSO
+ไม่เกี่ยวข้องด้วย) จะไม่เจอ prompt เลย marker นี้ไม่มี secret ใด ๆ —
+เป็นแค่ hint แบบ denormalised ว่า "ใช่ มี session ของ X อยู่"
+
+### override สำหรับองค์กร
+
+องค์กรที่ ship ไฟล์ policy ที่เซ็นแล้วพร้อม `policies.sso` จะ
+override ปุ่ม Google/Microsoft มาตรฐาน — navbar จะแสดง IdP ของเขา
+แทน ดูโมเดล verification ฝั่ง gateway ได้ในเอกสาร SSO ของ technical
+manual
