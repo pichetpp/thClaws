@@ -7186,8 +7186,9 @@
           "output_per_mtok": 4.4
         },
         "zai/glm-5.2": {
-          "context": 131072,
-          "source": "https://api.z.ai/api/coding/paas/v4/models + manual:glm-5.2",
+          "context": 1000000,
+          "max_output": 131072,
+          "source": "https://docs.z.ai/guides/llm/glm-5.2 + manual:glm-5.2",
           "verified_at": "2026-06-17",
           "input_per_mtok": 1.4,
           "output_per_mtok": 4.4
