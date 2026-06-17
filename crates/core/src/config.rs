@@ -1508,6 +1508,13 @@ impl AppConfig {
         // 2. User-level: ~/.config/thclaws/settings.json.
         candidates.extend(Self::user_config_paths());
 
+        // Tracks whether any settings layer (user / project / Claude Code
+        // fallback / CLI override) explicitly pinned a `model`. When it
+        // stays false the effective model is just the compiled-in
+        // placeholder, and startup is free to pick a credential-aware
+        // default provider (see the `preferred_default_model` step below).
+        let mut model_explicit = false;
+
         let mut config = None;
         for path in &candidates {
             if !path.exists() {
@@ -1516,6 +1523,9 @@ impl AppConfig {
             let contents = std::fs::read_to_string(path)?;
             let pc: ProjectConfig = serde_json::from_str(&contents)
                 .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
+            if pc.model.is_some() {
+                model_explicit = true;
+            }
             let mut cfg = Self::default();
             pc.apply_to(&mut cfg);
             config = Some(cfg);
@@ -1536,6 +1546,9 @@ impl AppConfig {
 
         // Project-level overrides from .thclaws/settings.json (or legacy .thclaws.toml).
         if let Some(project) = ProjectConfig::load() {
+            if project.model.is_some() {
+                model_explicit = true;
+            }
             project.apply_to(&mut config);
         }
 
@@ -1582,6 +1595,28 @@ impl AppConfig {
         // decides the user's choice was unreachable.
         if let Some(m) = cli_model_override() {
             config.model = m;
+            model_explicit = true;
+        }
+
+        // Credential-aware default provider. When no layer pinned a model
+        // the compiled-in `model` is an Anthropic placeholder; prefer the
+        // first provider the user actually has credentials (own key or a
+        // gateway route) for, in order DashScope → OpenAI → Anthropic, so
+        // a fresh install / new session starts on a provider that's ready
+        // instead of a stuck "no API key" Anthropic default. In-memory
+        // only (not persisted): keeping it unpinned means the default
+        // re-evaluates if the user later adds or removes a key. Skipped in
+        // multiuser pods (the gateway-forced guest keeps the placeholder)
+        // and under tests (env-dependent, would make the default
+        // nondeterministic). A non-default `model` value from any layer
+        // also counts as an explicit choice.
+        if config.model != Self::default().model {
+            model_explicit = true;
+        }
+        if !model_explicit && !cfg!(test) && !crate::workdir::is_multiuser() {
+            if let Some(m) = crate::providers::preferred_default_model(&config) {
+                config.model = m;
+            }
         }
 
         // dev-plan/42: in a multiuser pod the guest's settings.json + .env

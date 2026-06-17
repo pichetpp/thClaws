@@ -107,6 +107,8 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::ThaiLLM,
     ProviderKind::Nvidia,
     ProviderKind::OpenCodeGo,
+    ProviderKind::Moonshot,
+    ProviderKind::XAi,
 ];
 
 /// Non-LLM service keys we surface in the same Settings modal as the

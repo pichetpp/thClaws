@@ -96,6 +96,18 @@ pub enum ProviderKind {
     Nvidia,
     Minimax,
     OpenCodeGo,
+    /// Moonshot AI (moonshot.ai) — the Kimi family. OpenAI-compatible
+    /// `/chat/completions` at `api.moonshot.ai/v1` (override to the
+    /// mainland `api.moonshot.cn/v1` via `MOONSHOT_BASE_URL`). Models
+    /// route via the `moonshot/<id>` prefix (e.g. `moonshot/kimi-k2.6`),
+    /// stripped before the upstream request. Key `MOONSHOT_API_KEY`.
+    Moonshot,
+    /// xAI (x.ai) — the Grok family. OpenAI-compatible `/chat/completions`
+    /// at `api.x.ai/v1` (override via `XAI_BASE_URL`). Models route via
+    /// the `xai/<id>` prefix (e.g. `xai/grok-4.3`, stripped before the
+    /// upstream request); bare `grok-*` ids also route here. Key
+    /// `XAI_API_KEY`.
+    XAi,
 }
 
 impl ProviderKind {
@@ -123,6 +135,8 @@ impl ProviderKind {
         Self::Nvidia,
         Self::Minimax,
         Self::OpenCodeGo,
+        Self::Moonshot,
+        Self::XAi,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -150,6 +164,8 @@ impl ProviderKind {
             Self::Nvidia => "nvidia",
             Self::Minimax => "minimax",
             Self::OpenCodeGo => "opencode-go",
+            Self::Moonshot => "moonshot",
+            Self::XAi => "xai",
         }
     }
 
@@ -158,7 +174,7 @@ impl ProviderKind {
             Self::AgenticPress => "ap/gemma4-12b",
             Self::Anthropic => "claude-sonnet-4-6",
             Self::AgentSdk => "agent/claude-sonnet-4-6",
-            Self::OpenAI => "gpt-4o",
+            Self::OpenAI => "gpt-4.1",
             Self::OpenAIResponses => "codex/gpt-5.2-codex",
             Self::ChatGptCodex => "chatgpt-codex/gpt-5.4",
             Self::OpenRouter => "openrouter/anthropic/claude-sonnet-4-6",
@@ -169,12 +185,14 @@ impl ProviderKind {
             // higher-tier model without warning, surprising users with
             // unexpected cost. Track upcoming retirement at:
             // https://ai.google.dev/gemini-api/docs/deprecations
-            // Next bump deadline: 2026-06-17 (gemini-2.5-flash shutdown).
-            Self::Gemini => "gemini-2.5-flash",
+            // Bumped to gemini-3.5-flash ahead of the 2026-06-17
+            // gemini-2.5-flash shutdown; track the next retirement at the
+            // deprecations page above.
+            Self::Gemini => "gemini-3.5-flash",
             Self::Ollama => "ollama/llama3.2",
             Self::OllamaAnthropic => "oa/qwen3-coder",
             Self::OllamaCloud => "ollama-cloud/deepseek-v4-flash",
-            Self::DashScope => "dashscope/qwen-max",
+            Self::DashScope => "dashscope/qwen3.7-max",
             // Alibaba Singapore DashScope (`dashscope-intl.aliyuncs.com`).
             // Same OpenAI-compat wire protocol as DashScope, but a
             // separate region/account, so models route via the short
@@ -182,7 +200,7 @@ impl ProviderKind {
             // reaches the upstream (which expects bare `qwen-max`,
             // `qwen-plus`, etc.).
             Self::QwenCloud => "qc/qwen-max",
-            Self::ZAi => "zai/glm-4.6",
+            Self::ZAi => "zai/glm-5.1",
             // Most LMStudio installs change models constantly; this is a
             // placeholder that lets the connection establish so the user
             // can `/model lmstudio/<loaded-model>` to switch. list_models
@@ -227,6 +245,15 @@ impl ProviderKind {
             // `opencode-go/kimi-k2.6`); the prefix is stripped before
             // the request reaches the upstream.
             Self::OpenCodeGo => "opencode-go/deepseek-v4-flash",
+            // Moonshot AI — latest general Kimi flagship. The `-code`
+            // variants (kimi-k2.7-code…) are coding-specialised; k2.6 is
+            // the newest general-purpose model. `moonshot/` prefix is
+            // stripped before the upstream request.
+            Self::Moonshot => "moonshot/kimi-k2.6",
+            // xAI — unified Grok flagship. `grok-4.3` supersedes the
+            // grok-4 / grok-3 lines (those are aliases of it upstream).
+            // The `xai/` prefix is stripped before the upstream request.
+            Self::XAi => "xai/grok-4.3",
         }
     }
 
@@ -251,6 +278,8 @@ impl ProviderKind {
             Self::Nvidia => Some("NVIDIA_BASE_URL"),
             Self::Minimax => Some("MINIMAX_BASE_URL"),
             Self::OpenCodeGo => Some("OPENCODE_GO_BASE_URL"),
+            Self::Moonshot => Some("MOONSHOT_BASE_URL"),
+            Self::XAi => Some("XAI_BASE_URL"),
             _ => None,
         }
     }
@@ -310,6 +339,11 @@ impl ProviderKind {
             Self::Minimax => Some("https://api.minimax.io/v1"),
             // OpenCodeGo — hosted gateway at opencode.ai.
             Self::OpenCodeGo => Some("https://opencode.ai/zen/go/v1"),
+            // Moonshot AI — international endpoint. Mainland users
+            // override to https://api.moonshot.cn/v1 via MOONSHOT_BASE_URL.
+            Self::Moonshot => Some("https://api.moonshot.ai/v1"),
+            // xAI — public OpenAI-compatible endpoint.
+            Self::XAi => Some("https://api.x.ai/v1"),
             _ => None,
         }
     }
@@ -358,6 +392,8 @@ impl ProviderKind {
             Self::Nvidia => Some("NVIDIA_API_KEY"),
             Self::Minimax => Some("MINIMAX_API_KEY"),
             Self::OpenCodeGo => Some("OPENCODE_GO_API_KEY"),
+            Self::Moonshot => Some("MOONSHOT_API_KEY"),
+            Self::XAi => Some("XAI_API_KEY"),
         }
     }
 
@@ -463,7 +499,9 @@ impl ProviderKind {
             // TokenRouter uses full `tokenrouter/<vendor>/<model>` ids; no
             // short-alias table (users type the explicit id).
             | Self::TokenRouter
-            | Self::Minimax => None,
+            | Self::Minimax
+            | Self::Moonshot
+            | Self::XAi => None,
         }
     }
 
@@ -576,6 +614,20 @@ impl ProviderKind {
             Some(Self::Nvidia)
         } else if model.starts_with("opencode-go/") {
             Some(Self::OpenCodeGo)
+        } else if model.starts_with("moonshot/") {
+            // Moonshot AI (Kimi family). Models look like
+            // moonshot/kimi-k2.6 or moonshot/moonshot-v1-128k; the
+            // `moonshot/` prefix is stripped before the request reaches
+            // the OpenAI-compatible upstream at api.moonshot.ai.
+            Some(Self::Moonshot)
+        } else if model.starts_with("xai/") || model.starts_with("grok-") {
+            // xAI (Grok). Canonical ids carry an `xai/` prefix
+            // (xai/grok-4.3); it's stripped before the upstream request.
+            // Bare `grok-*` ids route here too for nicer UX — they pass
+            // through unchanged (the upstream expects the bare id).
+            // openrouter/x-ai/grok-* is caught by the `openrouter/`
+            // branch above, so this never steals those.
+            Some(Self::XAi)
         } else {
             None
         }
@@ -1131,6 +1183,36 @@ pub fn auto_fallback_model(cfg: &crate::config::AppConfig) -> Option<String> {
     None
 }
 
+/// Pick the default model for the highest-priority provider the user
+/// actually has usable credentials for — their own API key (env or
+/// keychain) **or** a gateway route — scanning in the order
+/// DashScope → OpenAI → Anthropic. Used at startup / new-session to
+/// replace the compiled-in Anthropic placeholder when the user hasn't
+/// explicitly pinned a model, so a fresh install with (say) only a
+/// DashScope key lands on DashScope instead of an unconfigured
+/// Anthropic. Returns `None` when none of the three are configured, in
+/// which case the caller keeps the compiled-in default.
+///
+/// Distinct from [`auto_fallback_model`], which only ever falls back to
+/// free *local* providers when the *currently configured* provider is
+/// keyless; this picks the preferred *paid* default when nothing is
+/// configured yet.
+pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String> {
+    const ORDER: &[ProviderKind] = &[
+        ProviderKind::DashScope,
+        ProviderKind::OpenAI,
+        ProviderKind::Anthropic,
+    ];
+    for kind in ORDER {
+        let has_key = kind_has_credentials(Some(*kind));
+        let via_gateway = crate::providers::thclaws_gateway::for_kind(cfg, *kind).is_some();
+        if has_key || via_gateway {
+            return Some(kind.default_model().to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1406,6 +1488,51 @@ mod tests {
         assert_eq!(ProviderKind::QwenCloud.default_model(), "qc/qwen-max");
     }
 
+    // Serialises the env-var mutation in `preferred_default_model_*`
+    // tests (api-key + gateway-key vars are process-global).
+    static PREF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn preferred_default_provider_models_match_requested() {
+        assert_eq!(
+            ProviderKind::DashScope.default_model(),
+            "dashscope/qwen3.7-max"
+        );
+        assert_eq!(ProviderKind::OpenAI.default_model(), "gpt-4.1");
+        assert_eq!(ProviderKind::Anthropic.default_model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn preferred_default_model_follows_dashscope_openai_anthropic_order() {
+        let _guard = PREF_ENV_LOCK.lock().unwrap();
+        // Isolate from any real provider keys in the host env so only the
+        // gateway route under test decides the pick.
+        for v in ["DASHSCOPE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"] {
+            std::env::remove_var(v);
+        }
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
+
+        let mut cfg = crate::config::AppConfig::default();
+
+        // Only OpenAI gateway-routed → OpenAI's default model.
+        cfg.gateway_use_for = vec!["openai".into()];
+        assert_eq!(preferred_default_model(&cfg).as_deref(), Some("gpt-4.1"));
+
+        // DashScope outranks OpenAI when both are available.
+        cfg.gateway_use_for = vec!["openai".into(), "dashscope".into()];
+        assert_eq!(
+            preferred_default_model(&cfg).as_deref(),
+            Some("dashscope/qwen3.7-max")
+        );
+
+        // None of the three configured (no gateway route, host keys
+        // cleared) → None so the caller keeps the compiled-in default.
+        cfg.gateway_use_for = vec![];
+        let out = preferred_default_model(&cfg);
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+        assert!(out.is_none());
+    }
+
     // The catalogue stores DashScope rows with a `dashscope/` routing
     // prefix so heterogeneous Alibaba-hosted families (qwen, deepseek,
     // glm, kimi, …) all route through one provider — the bare-id arms
@@ -1434,7 +1561,7 @@ mod tests {
         );
         assert_eq!(
             ProviderKind::DashScope.default_model(),
-            "dashscope/qwen-max"
+            "dashscope/qwen3.7-max"
         );
     }
 

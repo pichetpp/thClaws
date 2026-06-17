@@ -3989,6 +3989,39 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("zai/"),
             ))
         }
+        ProviderKind::Moonshot => {
+            // Moonshot AI (Kimi family). OpenAI-compatible /chat/completions.
+            // Models use `moonshot/<id>` form (e.g. moonshot/kimi-k2.6);
+            // strip the prefix before forwarding to the upstream. Defaults
+            // to the international endpoint; mainland users override to
+            // https://api.moonshot.cn/v1 via MOONSHOT_BASE_URL.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "MOONSHOT_BASE_URL",
+                "https://api.moonshot.ai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("moonshot/"),
+            ))
+        }
+        ProviderKind::XAi => {
+            // xAI (Grok). OpenAI-compatible /chat/completions at
+            // api.x.ai/v1. Canonical ids use `xai/<id>` form
+            // (e.g. xai/grok-4.3); strip the prefix before forwarding.
+            // Bare `grok-*` ids have no prefix and pass through as-is.
+            // Override the base via XAI_BASE_URL.
+            let (key, url) =
+                compat_endpoint(config, kind, "XAI_BASE_URL", "https://api.x.ai/v1", api_key);
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("xai/"),
+            ))
+        }
         ProviderKind::AzureAIFoundry => {
             let endpoint = std::env::var("AZURE_AI_FOUNDRY_ENDPOINT").map_err(|_| {
                 Error::Config(
@@ -12603,10 +12636,10 @@ mod tests {
             default_model_for_provider("anthropic"),
             Some("claude-sonnet-4-6")
         );
-        assert_eq!(default_model_for_provider("openai"), Some("gpt-4o"));
+        assert_eq!(default_model_for_provider("openai"), Some("gpt-4.1"));
         assert_eq!(
             default_model_for_provider("gemini"),
-            Some("gemini-2.5-flash")
+            Some("gemini-3.5-flash")
         );
         assert_eq!(
             default_model_for_provider("ollama"),
