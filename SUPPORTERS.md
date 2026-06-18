@@ -31,7 +31,7 @@ This page is our thank-you wall. Every name below is someone who backed thClaws 
 | Danutha Samael | Patcharaphong Batdee (Bas) | Thanatip S. |
 | DK Rungroat | pawit | Thongdaeng Foongyai |
 | Durongrit Hirunked | Pawit Ketsuk | Thongperm Yoowattana |
-| Ekkachai | phitsanu C. | Thosapol Klamthai |
+| Ekkachai J. CS@RMUTI | phitsanu C. | Thosapol Klamthai |
 | goffee ai | Phunsak Chaiyarath | tong haha |
 | GRAD PASSION | Phutapong Suanyim | Tor Supakit |
 | honeystar | Pichaya Morimoto | Trasvin Jittidecharak |
