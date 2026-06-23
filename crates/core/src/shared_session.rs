@@ -4259,6 +4259,19 @@ async fn drive_turn_stream(
         let _ = lead_mb.write_status("lead", "idle", Some(&msg));
         std::panic::resume_unwind(payload);
     }
+
+    // After a turn that ran tools, push a fresh KMS snapshot so the sidebar
+    // reflects any KMS an agent/workflow just created or wrote — e.g. the
+    // research agent's synthesizer/fetcher write pages via `Write` into
+    // `.thclaws/kms/**`, which no KMS-tool hook catches. `build_kms_update_payload`
+    // re-scans disk, so plain-Write pages show up without a `/reload`. The native
+    // `/research` job manager already pushes this on Done (see set_broadcaster
+    // above); this covers the catalog-agent path that runs via WorkflowRun.
+    if state.last_turn_made_tool_calls {
+        let _ = events_tx.send(ViewEvent::KmsUpdate(
+            crate::gui::build_kms_update_payload().to_string(),
+        ));
+    }
 }
 
 async fn drive_turn_stream_inner(

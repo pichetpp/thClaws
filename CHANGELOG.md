@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.73.0] - 2026-06-23
+
+### Added
+- **OS-level Bash confinement (`bash.sandbox`, on by default).** Bash commands (and everything they spawn) now run inside an OS-enforced filesystem boundary — writes confined to the workspace + `/tmp` + package-manager caches, secret dotfiles read-denied — so a malicious or mistaken command can't write outside the project no matter how it's obfuscated. macOS Seatbelt (`sandbox-exec`) + Linux **Landlock** (needs no user namespace, so it works where bubblewrap is AppArmor-blocked; bwrap fallback). Probed at runtime: a host where no confiner can enforce falls back to command-screening with a warning rather than breaking commands. Modes `workspace` (default) / `strict` / `off`; applies to subagent + workflow Bash. A sandbox-denied write appends an actionable hint to the Bash output.
+- **`thclaws.parallel([specs])` — genuine workflow fan-out.** Runs subagent specs concurrently (capped at `min(16, cores-2)`); plain `Promise.all` over `thclaws.subagent` stays serial. **Settles** rather than rejects — a failed worker becomes its spec's `fallback` (default `null`) so partial results are kept. Per-future caps are task-local-isolated (no KMS-grant bleed). Plus `thclaws.pollUntil(fn, {interval, timeout, until})` for the submit→poll→done async-job shape.
+- **Headless agent tooling.** `thclaws agent new <dir> --pattern static-pipeline|batch-fanout|dynamic` scaffolds a best-practice agent that validates green out of the box; `thclaws agent run <dir> [--workflow X --args {…}] [--dry-tools]` executes an agent's workflow headlessly (Task + MCP registered) for behavioral smoke-testing. `thclaws agent validate` deepened: `py_compile`s `.thclaws/scripts/*.py`, cross-checks MCP/skill requirements, warns on `writePaths`+`Bash`.
+
+### Changed
+- **`pre_tool_use` hook gate hardened.** The full, untruncated command is now piped to the gate on **stdin** (`THCLAWS_TOOL_INPUT_ON_STDIN=1`) so a screening hook isn't bypassed by a >8 KB command; new `hooks.fail_closed` makes a gate timeout/error **deny** instead of allow. The gate runs upstream of `bash.sandbox` — complementary layers (policy screening + a hard write floor).
+- **KMS sidebar auto-refreshes** after a tool-using turn — a KMS an agent/workflow just created or wrote shows up without a `/reload`.
+
 ## [0.72.0] - 2026-06-23
 
 ### Added

@@ -195,7 +195,7 @@ pub fn shell_command_async(command: &str) -> tokio::process::Command {
 /// string like `"bash -c"` or `"pwsh -Command"` and we split on
 /// whitespace; the first token is the executable, the second is the
 /// flag.
-fn shell_invocation() -> (String, String) {
+pub(crate) fn shell_invocation() -> (String, String) {
     if let Ok(s) = std::env::var("THCLAWS_SHELL") {
         let parts: Vec<&str> = s.split_whitespace().collect();
         if parts.len() == 2 {

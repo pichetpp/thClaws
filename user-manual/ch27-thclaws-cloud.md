@@ -225,7 +225,9 @@ From the catalog web UI:
 1. Browse to an agent's detail page.
 2. Click *Install on hosted*.
 3. The catalog spins up a workspace, copies the agent's files in, and
-   redirects you to the chat UI at `/u/<your-handle>/<slug>/`.
+   redirects you to the chat UI at `/u/<your-handle>/<slug>/` (the handle
+   is a stable per-user id, so two users can each have a workspace named
+   `<slug>` without their URLs colliding).
 
 Hosted workspaces support both BYOK (paste your own provider keys
 under *Settings → Hosted keys*) and the **thClaws.cloud gateway**

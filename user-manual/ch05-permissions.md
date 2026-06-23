@@ -180,6 +180,55 @@ If you want the agent to touch something outside the current directory,
 either launch thClaws from the parent directory (which widens the
 sandbox), or copy / symlink the file in first.
 
+## OS-level Bash sandbox (`bash.sandbox`) {#bash-sandbox}
+
+The filesystem sandbox above scopes the **file tools** (Read/Write/Edit).
+It does **not** confine what a `Bash` command writes — `echo x > ~/secret`
+or `python -c "open('/abs','w')"` runs the shell directly, so an absolute
+path escapes. A `pre_tool_use` hook (Chapter 13) can *screen* commands, but
+screening a string is defeatable by obfuscation (`$(printf …)`, `eval`).
+
+`bash.sandbox` adds a **hard, OS-enforced** boundary around the Bash
+subprocess (and everything it spawns) — the kernel blocks the write, so it
+holds no matter how the command is written:
+
+```json
+{
+  "bash": {
+    "sandbox": "workspace",
+    "sandbox_write_paths": ["/some/extra/dir"],
+    "sandbox_deny_read": ["~/secret-notes"]
+  }
+}
+```
+
+| Mode | Writable | Use |
+|---|---|---|
+| `workspace` *(default)* | the workspace + `/tmp` + package-manager caches (`~/.cache`, `~/.npm`, `~/.cargo`, …) | normal dev — `pip`/`npm`/`cargo` still work |
+| `strict` | the workspace + `/tmp` only | untrusted runs; breaks tools that cache in `$HOME` |
+| `off` | everything | opt out of confinement |
+
+**This is on by default** (`workspace`). To turn it off, set
+`{ "bash": { "sandbox": "off" } }`. If a legitimate command needs to write
+somewhere outside the workspace + caches, add it to `sandbox_write_paths`
+rather than disabling confinement entirely.
+
+In `workspace` and `strict`, reads of secret dotfiles (`~/.ssh`, `~/.aws`,
+`~/.gnupg`, cloud creds, `~/.config/thclaws`) are **denied** too. Enforced
+by macOS Seatbelt (`sandbox-exec`) and, on Linux, **Landlock** (an LSM needing no
+user namespace, so it works on stock Ubuntu 24.04 where `bubblewrap` is blocked
+by AppArmor; bwrap is the fallback). The confiner is **probed at runtime** — if
+it can't actually enforce on this host, thClaws logs a loud one-time warning and
+falls back to command-screening only **rather than breaking your commands**. So
+turning the mode on is always safe: it either confines, or runs
+unconfined-with-warning. It applies to **subagent and workflow** Bash
+identically. Notes: v1 is **filesystem-only** (no network egress control), and
+the Linux/Landlock path is **write-confinement only** (secret-read masking is
+macOS-only for now).
+
+> Layering: the `pre_tool_use` hook (soft policy/audit, Chapter 13) runs
+> first and can deny; `bash.sandbox` is the hard floor under it.
+
 ## MCP stdio spawn allowlist
 
 MCP stdio servers are subprocesses spawned from a JSON config file

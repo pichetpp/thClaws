@@ -66,10 +66,27 @@ Frontmatter fields:
 | `model` | Model override for this agent |
 | `tools` | Comma-separated tool allowlist |
 | `disallowedTools` | Tool denylist |
+| `skills` | Comma-separated skill allowlist this agent may load/list/search (subset of the parent's). Empty = inherit all |
+| `mcp` | Comma-separated MCP **server** names this agent may use (subset). Empty = inherit all; otherwise MCP tools from other servers are dropped |
+| `writePaths` | Glob allowlist confining this agent's file writes (Write/Edit/office tools), e.g. `.thclaws/kms/**`. Empty = inherit. Mechanical write-scoping — a writer can't scribble outside its lane. Does **not** cover `Bash` |
+| `output_schema` | JSON Schema for the agent's output — single-line inline JSON, or a path (relative to the `.md`) to a `.json` file. A workflow `thclaws.subagent({agent})` call that omits a per-call `schema` validates against this (one source of truth instead of duplicating the schema in the workflow). See [ch25](ch25-workflows.md) |
+| `input_schema` | JSON Schema documenting the agent's expected input (same encoding as `output_schema`) — used by `thclaws agent validate` |
 | `permissionMode` | `auto` or `ask` (useful for "read-only" agents) |
 | `maxTurns` | Max iterations (default 200) |
 | `color` | Terminal colour for child output |
 | `isolation` | `worktree` — give this agent its own git worktree (teams only) |
+
+> **Scaffold, validate, run.** `thclaws agent new <dir> --pattern
+> static-pipeline|batch-fanout|dynamic` scaffolds a best-practice skeleton
+> (planner / worker / read-only verifier subagents + schemas + a workflow) that
+> validates green out of the box. `thclaws agent validate <dir>` then lints
+> offline — frontmatter parses, tool names known, `output_schema` /
+> `input_schema` valid, `writePaths` globs compile, `.thclaws/scripts/*.py`
+> compile, declared MCP/skills present, workflow avoids stripped globals, manifest
+> fuses. `thclaws agent run <dir> --args '{…}'` *runs* the agent's workflow
+> headlessly (Task + MCP wired) to behaviorally smoke-test it; `--dry-tools`
+> skips real generation. `thclaws agent pack <dir>` builds the publish tarball
+> (identical to what `/cloud publish` ships).
 
 ### Authoring in the GUI — `/agent new` / `/agent edit`
 

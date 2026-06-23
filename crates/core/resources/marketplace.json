@@ -120,6 +120,46 @@
       "license_tier": "open",
       "install_url": "https://github.com/thClaws/marketplace.git#main:agents/research-summarizer.md",
       "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/research-summarizer.md"
+    },
+    {
+      "name": "fact-checker",
+      "category": "research",
+      "short_description": "Verify each claim in a doc against its cited source",
+      "description": "Verifies every factual claim in a document against its cited source — re-reads the source and rules verified/contested/opinion/unsupported, matching numbers and dates strictly. Read-only; never edits the doc or invents a source. Spawn via Task(agent: \"fact-checker\") or /agent fact-checker.",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:agents/fact-checker.md",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/fact-checker.md"
+    },
+    {
+      "name": "transcriber",
+      "category": "productivity",
+      "short_description": "Recording or messy transcript → clean speaker-attributed text",
+      "description": "Turns a meeting/interview recording (via any available transcription tool) or a raw transcript into clean, speaker-attributed, lightly-timestamped text — drops filler, fixes run-ons, preserves every word's meaning. Doesn't summarize. Spawn via Task(agent: \"transcriber\") or /agent transcriber.",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:agents/transcriber.md",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/transcriber.md"
+    },
+    {
+      "name": "outliner",
+      "category": "writing",
+      "short_description": "Idea + sources → structured hierarchical outline",
+      "description": "Turns an idea + audience + source material into a structured outline (parts → sections → beats) with a per-section premise, rough size, and source references — the cheap planning gate before drafting. Read-only. Spawn via Task(agent: \"outliner\") or /agent outliner.",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:agents/outliner.md",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/outliner.md"
+    },
+    {
+      "name": "classifier",
+      "category": "productivity",
+      "short_description": "Batch-sort items into labels with rationale + confidence",
+      "description": "Sorts a batch of items (emails, tickets, messages, docs) into a caller-supplied label set, each with a one-line rationale and confidence, and escalates high-stakes/ambiguous items for a human instead of guessing. Read-only. Spawn via Task(agent: \"classifier\") or /agent classifier.",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:agents/classifier.md",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/agents/classifier.md"
     }
   ]
 }

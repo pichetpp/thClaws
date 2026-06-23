@@ -313,6 +313,17 @@ thread_local! {
 
 }
 
+tokio::task_local! {
+    /// 48.1: per-future worker caps for `thclaws.parallel`. Concurrent
+    /// subagent futures interleave on the one block_on thread, so caps
+    /// can't live in `WORKFLOW_WORKER_CAPS` (a thread-local) without
+    /// bleeding across workers — a privilege-escalation bug. Each
+    /// parallel future is `.scope()`d with its own caps; the task-local
+    /// propagates through the nested tool-call tree, and
+    /// `check_kms_write_capability` prefers it over the thread-local.
+    static WORKER_CAPS_TASK: WorkerCaps;
+}
+
 // Tier 3 polish: chat-tab worker progress. When set, each
 // `thclaws.subagent` call emits ToolCallStart/Result events so the
 // chat tab renders workers as one-line `▸ … ✓` indicators alongside
@@ -477,18 +488,27 @@ fn send_workflow_event(ev: crate::shared_session::ViewEvent) {
 /// behaviour); inside a workflow call, only KMSs named in the
 /// per-worker `caps.kms_write` set may be written.
 pub fn check_kms_write_capability(kms_name: &str) -> crate::Result<()> {
+    let deny = || {
+        crate::Error::Tool(format!(
+            "workflow: KMS write to '{kms_name}' denied — not in the worker's \
+             granted-write list. The script must pass \
+             `caps: {{kms: {{write: [\"{kms_name}\"]}}}}` to thclaws.subagent \
+             to grant write access for this call."
+        ))
+    };
+    // 48.1: a `thclaws.parallel` future carries its caps in a task-local
+    // (the thread-local would bleed across interleaved futures). Prefer it
+    // when in scope; otherwise fall back to the serial thread-local.
+    if let Ok(allowed) = WORKER_CAPS_TASK.try_with(|caps| caps.kms_write.contains(kms_name)) {
+        return if allowed { Ok(()) } else { Err(deny()) };
+    }
     WORKFLOW_WORKER_CAPS.with(|cell| match cell.borrow().as_ref() {
         None => Ok(()),
         Some(caps) => {
             if caps.kms_write.contains(kms_name) {
                 Ok(())
             } else {
-                Err(crate::Error::Tool(format!(
-                    "workflow: KMS write to '{kms_name}' denied — not in the worker's \
-                     granted-write list. The script must pass \
-                     `caps: {{kms: {{write: [\"{kms_name}\"]}}}}` to thclaws.subagent \
-                     to grant write access for this call."
-                )))
+                Err(deny())
             }
         }
     })
@@ -513,10 +533,14 @@ fn register_thclaws(ctx: &mut Context) -> JsResult<()> {
     let subagent_fn = NativeFunction::from_fn_ptr(subagent);
     let include_fn = NativeFunction::from_fn_ptr(include);
     let log_fn = NativeFunction::from_fn_ptr(workflow_log);
+    let poll_fn = NativeFunction::from_fn_ptr(poll_until);
+    let parallel_fn = NativeFunction::from_fn_ptr(parallel);
     let thclaws_obj = ObjectInitializer::new(ctx)
         .function(subagent_fn, js_string!("subagent"), 1)
         .function(include_fn, js_string!("include"), 1)
         .function(log_fn, js_string!("log"), 1)
+        .function(poll_fn, js_string!("pollUntil"), 2)
+        .function(parallel_fn, js_string!("parallel"), 1)
         .build();
     ctx.register_global_property(js_string!("thclaws"), thclaws_obj, Attribute::READONLY)
 }
@@ -551,6 +575,88 @@ fn workflow_log(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
         });
     }
     Ok(JsValue::undefined())
+}
+
+/// Host implementation of `thclaws.pollUntil(checkFn, opts)` (dev-plan/48.5)
+/// — the submit→poll→done shape async jobs (image/video/TTS) repeat. Calls
+/// `checkFn()` every `opts.interval` until `opts.until(result)` is truthy (or
+/// `result` itself is truthy when no `until` is given), returns that result;
+/// throws on `opts.timeout`. Bounded + cancellation-aware (same Stop token as
+/// `subagent`). `checkFn` is synchronous from the host's view — it may call
+/// `thclaws.subagent(...)` (which blocks internally) and return its value.
+///
+/// ```js
+/// const done = await thclaws.pollUntil(
+///   () => thclaws.subagent({ agent: "job-poller", prompt: jobId }),
+///   { interval: "10s", timeout: "10m", until: r => r.state === "done" });
+/// ```
+fn poll_until(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let Some(check_fn) = args.get_or_undefined(0).as_callable() else {
+        return Err(js_error(
+            "thclaws.pollUntil: first argument must be a function",
+        ));
+    };
+
+    let mut interval = std::time::Duration::from_secs(5);
+    let mut timeout = std::time::Duration::from_secs(300);
+    let mut until_fn: Option<boa_engine::JsObject> = None;
+    if let Some(o) = args.get_or_undefined(1).as_object() {
+        if let Ok(v) = o.get(js_string!("interval"), ctx) {
+            if let Some(d) = value_to_duration(&v) {
+                interval = d;
+            }
+        }
+        if let Ok(v) = o.get(js_string!("timeout"), ctx) {
+            if let Some(d) = value_to_duration(&v) {
+                timeout = d;
+            }
+        }
+        if let Ok(v) = o.get(js_string!("until"), ctx) {
+            until_fn = v.as_callable();
+        }
+    }
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return Err(js_error("thclaws.pollUntil: no tokio runtime available"));
+    };
+    let cancel = workflow_cancel_clone();
+    let start = std::time::Instant::now();
+    let mut attempt: u32 = 0;
+    loop {
+        if let Some(tok) = cancel.as_ref() {
+            if tok.is_cancelled() {
+                return Err(js_error(WORKFLOW_CANCELLED_MSG));
+            }
+        }
+        if start.elapsed() > timeout {
+            return Err(js_error(&format!(
+                "thclaws.pollUntil: timed out after {} ({attempt} poll(s))",
+                crate::tool_display::format_duration(timeout)
+            )));
+        }
+        attempt += 1;
+        let result = check_fn.call(&JsValue::undefined(), &[], ctx)?;
+        let done = match &until_fn {
+            Some(f) => f
+                .call(&JsValue::undefined(), &[result.clone()], ctx)?
+                .to_boolean(),
+            None => result.to_boolean(),
+        };
+        if done {
+            return Ok(result);
+        }
+        // Sleep one interval, racing the Stop token so a poll loop aborts promptly.
+        match cancel.as_ref() {
+            Some(tok) => handle.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = tok.cancelled() => {}
+                    _ = tokio::time::sleep(interval) => {}
+                }
+            }),
+            None => handle.block_on(tokio::time::sleep(interval)),
+        }
+    }
 }
 
 /// Install (or clear with `None`) the base directory that
@@ -1010,6 +1116,233 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
         Some(v) => JsValue::from_json(&v, ctx),
         None => Ok(JsValue::from(js_string!(text.as_str()))),
     }
+}
+
+enum WorkerOut {
+    Json(serde_json::Value),
+    Text(String),
+}
+
+/// 48.1: `thclaws.parallel(specs)` — run an array of subagent specs
+/// CONCURRENTLY. This is the only genuine fan-out primitive in the
+/// workflow runtime: plain `Promise.all` over `thclaws.subagent` still
+/// runs serially because that host call blocks on each spawn. Each spec
+/// is the same `{prompt, agent?, schema?, caps?, budget?, fallback?}`
+/// object `thclaws.subagent` takes; results come back as an array in
+/// input order (parsed JSON when a schema / def output_schema applies,
+/// else the worker's text).
+///
+/// **Settle semantics (not Promise.all):** a worker that fails after its
+/// transient retries does NOT abort the batch — that item becomes the
+/// spec's `fallback` value (default `null`), so partial results are
+/// preserved (a 50-item render where 1 worker dies keeps the other 49).
+/// This mirrors the graceful `step(opts, fallback)` pattern batch agents
+/// want. The call only throws on a programmer error (arg not an array, no
+/// Task tool on this surface), never on a worker error.
+///
+/// Concurrency is capped at `min(16, cores-2)`. Each future is `.scope`d
+/// with its own caps via a tokio task-local (`WORKER_CAPS_TASK`) so a
+/// per-worker KMS-write grant can't bleed across interleaved futures.
+/// The parallel path deliberately skips the per-worker token-budget
+/// soft-cap and replay-cache that `thclaws.subagent` applies (total
+/// usage is still metered for billing).
+fn parallel(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let Some(arr_obj) = args.get_or_undefined(0).as_object() else {
+        return Err(js_error(
+            "thclaws.parallel: first argument must be an array of subagent specs",
+        ));
+    };
+    if !arr_obj.is_array() {
+        return Err(js_error(
+            "thclaws.parallel: first argument must be an array of subagent specs",
+        ));
+    }
+    let len = arr_obj.get(js_string!("length"), ctx)?.to_number(ctx)? as usize;
+
+    let task_tool = WORKFLOW_TASK_TOOL.with(|c| c.borrow().clone());
+
+    struct PSpec {
+        input: serde_json::Value,
+        schema: Option<serde_json::Value>,
+        caps: WorkerCaps,
+        time: Option<std::time::Duration>,
+        prompt: String,
+    }
+    // Parse all specs up front (needs &mut Context — can't cross into the
+    // async block, where `ctx` isn't available). `fallbacks` runs parallel to
+    // `specs` (same index) so the collect loop can substitute on a worker error.
+    let mut specs: Vec<PSpec> = Vec::with_capacity(len);
+    let mut fallbacks: Vec<serde_json::Value> = Vec::with_capacity(len);
+    for i in 0..len {
+        let spec_val = arr_obj.get(i as u32, ctx)?;
+        let one = [spec_val];
+        let prompt = extract_prompt(&one, ctx);
+        let budget = extract_budget(&one, ctx);
+        let caps = extract_caps(&one, ctx);
+        let agent_name = extract_agent_name(&one, ctx);
+        let fallback = one
+            .first()
+            .and_then(|v| v.as_object())
+            .and_then(|o| o.get(js_string!("fallback"), ctx).ok())
+            .and_then(|v| v.to_json(ctx).ok().flatten())
+            .unwrap_or(serde_json::Value::Null);
+        fallbacks.push(fallback);
+        let schema = extract_schema(&one, ctx).or_else(|| {
+            let name = agent_name.as_ref()?;
+            task_tool.as_ref()?.subagent_output_schema(name)
+        });
+        let augmented = match &schema {
+            Some(s) => format!(
+                "{prompt}\n\nReturn ONLY a JSON value matching this JSON Schema. \
+                 No prose, no markdown fences:\n{s}"
+            ),
+            None => prompt.clone(),
+        };
+        let input = match &agent_name {
+            Some(name) => serde_json::json!({ "prompt": augmented, "agent": name }),
+            None => serde_json::json!({ "prompt": augmented }),
+        };
+        specs.push(PSpec {
+            input,
+            schema,
+            caps,
+            time: budget.time,
+            prompt,
+        });
+    }
+
+    let Some(tool) = task_tool else {
+        if is_inside_workflow() {
+            return Err(js_error(
+                "thclaws.parallel: no Task tool on this surface — subagent calls aren't \
+                 available here (the `-p` / `/v1` footgun). Run on `--cli`, `--serve`, or the GUI.",
+            ));
+        }
+        // Outside a real run (sandbox eval in tests): deterministic stubs.
+        let stubs: Vec<serde_json::Value> = specs
+            .iter()
+            .map(|s| serde_json::Value::String(format!("(stub for: {})", s.prompt)))
+            .collect();
+        return JsValue::from_json(&serde_json::Value::Array(stubs), ctx);
+    };
+
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| js_error("workflow: no tokio runtime available for parallel spawn"))?;
+    let cancel = workflow_cancel_clone();
+    let cap = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(2))
+        .unwrap_or(4)
+        .clamp(1, 16);
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(cap));
+
+    let results: Vec<Result<WorkerOut, String>> = handle.block_on(async move {
+        let futs = specs.into_iter().map(|s| {
+            let tool = tool.clone();
+            let sem = sem.clone();
+            let cancel = cancel.clone();
+            async move {
+                let _permit = sem.acquire().await.ok();
+                WORKER_CAPS_TASK
+                    .scope(
+                        s.caps,
+                        run_one_parallel(tool, s.input, s.schema, s.time, cancel),
+                    )
+                    .await
+            }
+        });
+        futures::future::join_all(futs).await
+    });
+
+    // Settle: a failed worker becomes its `fallback` (default null) so the
+    // batch keeps every successful result. Never throws on a worker error.
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(results.len());
+    let mut failed: Vec<(usize, String)> = Vec::new();
+    for (i, r) in results.into_iter().enumerate() {
+        match r {
+            Ok(WorkerOut::Json(v)) => out.push(v),
+            Ok(WorkerOut::Text(t)) => out.push(serde_json::Value::String(t)),
+            Err(e) => {
+                failed.push((i, e));
+                out.push(fallbacks.get(i).cloned().unwrap_or(serde_json::Value::Null));
+            }
+        }
+    }
+    if !failed.is_empty() {
+        use std::io::Write as _;
+        println!(
+            "  · thclaws.parallel: {}/{} worker(s) failed → fallback (first: #{} {})",
+            failed.len(),
+            out.len(),
+            failed[0].0,
+            failed[0].1.chars().take(120).collect::<String>()
+        );
+        let _ = std::io::stdout().flush();
+    }
+    JsValue::from_json(&serde_json::Value::Array(out), ctx)
+}
+
+/// One parallel worker: tool.call with optional time budget + cancel,
+/// a small transient retry, and schema validation. Runs inside the
+/// caller's `WORKER_CAPS_TASK` scope (so KMS-write gating sees this
+/// worker's caps, not a neighbour's).
+async fn run_one_parallel(
+    tool: Arc<dyn crate::tools::Tool>,
+    input: serde_json::Value,
+    schema: Option<serde_json::Value>,
+    time: Option<std::time::Duration>,
+    cancel: Option<crate::cancel::CancelToken>,
+) -> Result<WorkerOut, String> {
+    let compiled = match &schema {
+        Some(s) => Some(jsonschema::validator_for(s).map_err(|e| format!("invalid schema: {e}"))?),
+        None => None,
+    };
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_err = String::from("worker produced no result");
+    for _ in 1..=MAX_ATTEMPTS {
+        if let Some(tok) = cancel.as_ref() {
+            if tok.is_cancelled() {
+                return Err(WORKFLOW_CANCELLED_MSG.into());
+            }
+        }
+        let call = tool.call(input.clone());
+        let result: crate::Result<String> = match (time, cancel.as_ref()) {
+            (Some(t), Some(tok)) => tokio::select! {
+                biased;
+                _ = tok.cancelled() => Err(crate::Error::Agent(WORKFLOW_CANCELLED_MSG.into())),
+                r = tokio::time::timeout(t, call) => r.unwrap_or_else(|_| Err(crate::Error::Agent(format!(
+                    "worker exceeded time budget of {}", crate::tool_display::format_duration(t))))),
+            },
+            (Some(t), None) => tokio::time::timeout(t, call).await.unwrap_or_else(|_| {
+                Err(crate::Error::Agent(format!(
+                    "worker exceeded time budget of {}",
+                    crate::tool_display::format_duration(t)
+                )))
+            }),
+            (None, Some(tok)) => tokio::select! {
+                biased;
+                _ = tok.cancelled() => Err(crate::Error::Agent(WORKFLOW_CANCELLED_MSG.into())),
+                r = call => r,
+            },
+            (None, None) => call.await,
+        };
+        match result {
+            Ok(text) => match &compiled {
+                Some(v) => match extract_json_from_text(&text) {
+                    Some(jv) if v.is_valid(&jv) => return Ok(WorkerOut::Json(jv)),
+                    _ => {
+                        last_err = "worker output did not match the schema".into();
+                        continue;
+                    }
+                },
+                None => return Ok(WorkerOut::Text(text)),
+            },
+            Err(e) => {
+                last_err = e.to_string();
+                continue;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 fn extract_prompt(args: &[JsValue], ctx: &mut Context) -> String {
@@ -1644,6 +1977,116 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
         assert_eq!(result.unwrap(), "2:a,b");
     }
 
+    /// 48.1: `thclaws.parallel` runs specs CONCURRENTLY (wall-clock ≈ the
+    /// slowest worker, not the sum) and returns results in input order.
+    #[tokio::test]
+    async fn parallel_runs_concurrently_and_preserves_order() {
+        struct EchoTask;
+        #[async_trait]
+        impl Tool for EchoTask {
+            fn name(&self) -> &'static str {
+                "echo"
+            }
+            fn description(&self) -> &'static str {
+                "echo the prompt after a delay"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            async fn call(&self, input: Value) -> crate::Result<String> {
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                Ok(input
+                    .get("prompt")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string())
+            }
+        }
+        let mock: Arc<dyn Tool> = Arc::new(EchoTask);
+        let script = r#"
+            const rs = thclaws.parallel([{ prompt: "a" }, { prompt: "b" }, { prompt: "c" }]);
+            rs.join(",")
+        "#
+        .to_string();
+        let (result, elapsed) = tokio::task::spawn_blocking(move || {
+            set_task_tool(Some(mock));
+            set_usage_sink(true);
+            let start = std::time::Instant::now();
+            let r = WorkflowSandbox::new()
+                .unwrap()
+                .run(&script)
+                .map_err(|e| e.to_string());
+            let el = start.elapsed();
+            set_usage_sink(false);
+            set_task_tool(None);
+            (r, el)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result.unwrap(),
+            "a,b,c",
+            "results must come back in input order"
+        );
+        // 3 workers × 60ms each: serial would be ~180ms; concurrent ~60ms.
+        assert!(
+            elapsed < std::time::Duration::from_millis(150),
+            "expected concurrency, took {elapsed:?}"
+        );
+    }
+
+    /// dev-plan/50: a failed worker settles to its `fallback` (default null)
+    /// instead of aborting the batch — partial results are preserved.
+    #[tokio::test]
+    async fn parallel_settles_failed_worker_to_fallback() {
+        struct FlakyTask;
+        #[async_trait]
+        impl Tool for FlakyTask {
+            fn name(&self) -> &'static str {
+                "flaky"
+            }
+            fn description(&self) -> &'static str {
+                "ok unless prompt contains BOOM"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            async fn call(&self, input: Value) -> crate::Result<String> {
+                let p = input.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
+                if p.contains("BOOM") {
+                    Err(crate::Error::Agent("boom".into()))
+                } else {
+                    Ok(p.to_string())
+                }
+            }
+        }
+        let mock: Arc<dyn Tool> = Arc::new(FlakyTask);
+        let script = r#"
+            const rs = thclaws.parallel([
+              { prompt: "a" },
+              { prompt: "BOOM", fallback: { failed: true } },
+              { prompt: "c" }
+            ]);
+            JSON.stringify(rs)
+        "#
+        .to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            set_task_tool(Some(mock));
+            set_usage_sink(true);
+            let r = WorkflowSandbox::new()
+                .unwrap()
+                .run(&script)
+                .map_err(|e| e.to_string());
+            set_usage_sink(false);
+            set_task_tool(None);
+            r
+        })
+        .await
+        .unwrap();
+        // Successful workers keep their values; the failed one gets its fallback.
+        assert_eq!(result.unwrap(), r#"["a",{"failed":true},"c"]"#);
+    }
+
     /// 47.4: `thclaws.log()` is callable, returns undefined, and doesn't
     /// disturb the script's result (it's a side-effecting narrator).
     #[test]
@@ -1653,6 +2096,42 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
             .run(r#"const r = thclaws.log("stage 1 done"); `${r === undefined}`"#)
             .unwrap();
         assert_eq!(out, "true");
+    }
+
+    /// 48.5: `thclaws.pollUntil` calls the check fn until `until` is truthy,
+    /// returns that result; and throws on timeout.
+    #[tokio::test]
+    async fn poll_until_polls_then_returns_and_times_out() {
+        let ok_script = r#"
+            let n = 0;
+            const r = thclaws.pollUntil(() => { n = n + 1; return { n: n }; },
+                                        { interval: "1ms", timeout: "5s", until: (r) => r.n >= 3 });
+            `${r.n}`
+        "#
+        .to_string();
+        let got = tokio::task::spawn_blocking(move || {
+            WorkflowSandbox::new()
+                .unwrap()
+                .run(&ok_script)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!(got.unwrap(), "3");
+
+        let timeout_script =
+            r#"thclaws.pollUntil(() => ({ done: false }), { interval: "2ms", timeout: "15ms", until: (r) => r.done })"#
+                .to_string();
+        let err = tokio::task::spawn_blocking(move || {
+            WorkflowSandbox::new()
+                .unwrap()
+                .run(&timeout_script)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(err.contains("timed out"), "expected timeout, got: {err}");
     }
 
     /// 47.3: `args` defaults to null, and `set_args` exposes structured

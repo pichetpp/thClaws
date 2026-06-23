@@ -38,6 +38,7 @@ pub mod codex_auth_store;
 pub mod commands;
 pub mod compaction;
 pub mod config;
+pub mod confine;
 pub mod context;
 #[cfg(feature = "cost_bridge")]
 pub mod cost_bridge;

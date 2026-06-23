@@ -50,7 +50,13 @@ crates/core/src/cloud/
   pack.rs      — Tarball encode/decode. STRIP_PREFIXES + STRIP_SUFFIXES rules,
                  sha256, peek_manifest_uuid (for the get-safety check),
                  verify_sha256, unpack with --force gate.
-  cmd.rs       — Verb handlers (login/logout/publish/get/list/status/
+  agent_cli.rs — dev-plan/47.5 headless pack/validate over pack.rs + manifest.rs.
+                 pack_to_file() (READ-ONLY identity resolve → fuse → pack → write
+                 the exact bytes /cloud publish uploads) + validate_folder()
+                 (AGENTS.md present, manifest fuses, shell_execution sandboxed/none,
+                 subagent output/input_schema valid JSON Schema, writePaths globs
+                 compile, workflow scripts avoid stripped globals).
+  cmd.rs       — Verb handlers (login/logout/publish/get/status/
                  unbind). Returns Vec<String> of lines for the REPL +
                  CLI binary to render uniformly.
 ```
@@ -61,6 +67,18 @@ publish|get|list|status|unbind}` subcommands (`Command::Cloud` arm).
 mutating verbs (`login`/`logout`/`publish`/`unbind`) intentionally stay
 CLI-only because they touch the secrets backend and we don't want
 slash-command typos rotating tokens.
+
+`bin/app.rs` also exposes `thclaws agent {new|run|pack|validate} <dir>`
+(`Command::Agent` arm) — the headless, network-free authoring loop:
+
+- `new --pattern static-pipeline|batch-fanout|dynamic` (`cloud::agent_scaffold`, dev-plan/48.6) — scaffold a best-practice skeleton (planner/worker/read-only verifier + schemas + workflow) that validates green out of the box.
+- `validate` (`cloud::agent_cli`, dev-plan/47.5 + 48.3/.4) — lint a folder before publish: manifest fuses, subagent schemas/globs, **`.thclaws/scripts/*.py` py_compile**, **MCP/skills declared**, **writePaths+Bash warning**.
+- `run [--workflow X --args {…}] [--dry-tools]` (`repl::run_agent_workflow`, dev-plan/48.2) — execute the agent's workflow headlessly with Task + MCP registered (delegates to `WorkflowRunTool` with `script_path`+`args`), for behavioral smoke-testing.
+- `pack` (`cloud::agent_cli`) — write the fused tarball (identical bytes to `/cloud publish`).
+
+`new`/`validate`/`pack` reuse the canonical `pack.rs`/`manifest.rs`/`agent_cli`
+code so scripts/CI never re-derive the strip rules. (`thclaws-agents/publish.py`
+uses this contract to publish the example agents as the platform account.)
 
 ## Settings.json shape
 

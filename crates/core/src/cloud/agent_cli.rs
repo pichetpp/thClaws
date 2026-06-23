@@ -122,6 +122,23 @@ pub fn validate_folder(folder: &Path) -> ValidateReport {
         Err(e) => r.errors.push(e),
     }
 
+    // 48.3: MCP servers a subagent scopes to (`mcp:`) must be declared in the
+    // manifest (so installers know what to connect); bundled skills must exist.
+    let declared_mcp: std::collections::HashSet<String> =
+        std::fs::read_to_string(folder.join("manifest.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| {
+                v.get("requires")
+                    .and_then(|r| r.get("mcp_servers"))
+                    .cloned()
+            })
+            .and_then(|m| serde_json::from_value::<Vec<String>>(m).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+    let skills_dir = folder.join(".thclaws/skills");
+
     // Subagent defs: output_schema / input_schema must be valid JSON Schema.
     let agents_dir = folder.join(".thclaws/agents");
     if let Ok(entries) = std::fs::read_dir(&agents_dir) {
@@ -153,6 +170,36 @@ pub fn validate_folder(folder: &Path) -> ValidateReport {
                             ));
                         }
                     }
+                    // 48.4: writePaths confines the file-write tools (Write/Edit/
+                    // office) but NOT Bash — a role with both can write outside
+                    // its lane via a shell command. Warn so the lever isn't read
+                    // as a guarantee it can't keep (empty `tools` inherits Bash).
+                    if !def.write_paths.is_empty()
+                        && (def.tools.is_empty()
+                            || def.tools.iter().any(|t| t.eq_ignore_ascii_case("bash")))
+                    {
+                        r.warnings.push(format!(
+                            "subagent {file}: has writePaths AND Bash — writePaths confines Write/Edit \
+                             to its globs but NOT Bash; bash.sandbox (default on) confines Bash writes \
+                             to the workspace OS-level, but not to these specific globs"
+                        ));
+                    }
+                    // 48.3: an MCP server the subagent scopes to must be declared.
+                    for srv in &def.mcp {
+                        if !declared_mcp.contains(srv) {
+                            r.warnings.push(format!(
+                                "subagent {file}: scopes to MCP server '{srv}' not in manifest.requires.mcp_servers"
+                            ));
+                        }
+                    }
+                    // 48.3: a skill the subagent scopes to must be bundled.
+                    for sk in &def.skills {
+                        if !skills_dir.join(sk).is_dir() {
+                            r.warnings.push(format!(
+                                "subagent {file}: skill '{sk}' not bundled under .thclaws/skills/"
+                            ));
+                        }
+                    }
                 }
                 None => r
                     .warnings
@@ -179,6 +226,44 @@ pub fn validate_folder(folder: &Path) -> ValidateReport {
                         "workflow {file}: uses `{banned}` — stripped from the sandbox, will fail at runtime"
                     ));
                 }
+            }
+        }
+    }
+
+    // 48.3: syntax-check the deterministic Python scripts the subagents drive.
+    // The real work usually lives there, but validate was blind to it — a broken
+    // script shipped green. Best-effort: skipped with a note when python3 is absent.
+    let scripts_dir = folder.join(".thclaws/scripts");
+    if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
+        let py: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("py"))
+            .collect();
+        if !py.is_empty() {
+            match std::process::Command::new("python3")
+                .arg("-m")
+                .arg("py_compile")
+                .args(&py)
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    r.info
+                        .push(format!("{} python script(s) compile", py.len()));
+                }
+                Ok(out) => {
+                    let msg = String::from_utf8_lossy(&out.stderr);
+                    let last = msg
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .trim();
+                    r.errors.push(format!("python script syntax error: {last}"));
+                }
+                Err(_) => r
+                    .warnings
+                    .push("skipped python script syntax check (python3 not on PATH)".into()),
             }
         }
     }
@@ -213,6 +298,57 @@ mod tests {
 
     const MIN_MANIFEST: &str =
         r#"{"version":"0.1.0","id":"demo","name":"Demo","description":"a demo agent"}"#;
+
+    #[test]
+    fn validate_warns_on_writepaths_with_bash() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "AGENTS.md", "# Demo\n");
+        write(d.path(), "manifest.json", MIN_MANIFEST);
+        write(
+            d.path(),
+            ".thclaws/agents/writer.md",
+            "---\nname: writer\ntools: Read, Write, Bash\nwritePaths: out/**\n---\nwork\n",
+        );
+        let r = validate_folder(d.path());
+        assert!(r.ok(), "warning only: {:?}", r.errors);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("writePaths") && w.contains("Bash")),
+            "expected writePaths+Bash warning, got {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn validate_warns_on_undeclared_mcp_and_missing_skill() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "AGENTS.md", "# Demo\n");
+        // manifest declares NO mcp_servers
+        write(d.path(), "manifest.json", MIN_MANIFEST);
+        // subagent scopes to an MCP server + a skill that aren't present
+        write(
+            d.path(),
+            ".thclaws/agents/worker.md",
+            "---\nname: worker\nmcp: pinn-ai\nskills: brand-voice\n---\ndo work\n",
+        );
+        let r = validate_folder(d.path());
+        assert!(r.ok(), "warnings only, not errors: {:?}", r.errors);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("pinn-ai") && w.contains("mcp_servers")),
+            "expected undeclared-MCP warning, got {:?}",
+            r.warnings
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("brand-voice") && w.contains("skills/")),
+            "expected missing-skill warning, got {:?}",
+            r.warnings
+        );
+    }
 
     #[test]
     fn validate_passes_minimal_agent_with_valid_schema() {

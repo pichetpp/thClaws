@@ -9,9 +9,10 @@ model — which means rerunning the same workflow gives the same shape
 of work every time and a long-running job leaves a checkpoint on disk.
 
 Fan-out, JSON-schema validation, per-worker token/time budgets,
-retries, KMS-write grants, and resume all work today. The main
-remaining gap is **true parallel execution** — workers still run one
-at a time even inside `Promise.all` (see "Current limitations" below).
+retries, KMS-write grants, and resume all work today. For **genuine
+concurrency** use `thclaws.parallel([...])` (workers run at once, capped
+at `min(16, cores-2)`); plain `Promise.all` over `thclaws.subagent`
+still runs serially (that host call blocks per spawn).
 
 ## When to use workflows
 
@@ -58,8 +59,26 @@ to …" in chat.
 
 Both paths reject nested calls: a script that tries to invoke
 `WorkflowRun` inside itself fails with a clear error — orchestrate
-through `thclaws.subagent(...)` instead (the script's only fan-out
-primitive; there is no `thclaws.parallel`).
+through `thclaws.subagent(...)` (serial) or `thclaws.parallel([...])`
+(concurrent) instead.
+
+**Run a pre-authored workflow with structured input.** Ship a `.js` with your
+agent and run it verbatim (no authoring) with typed input:
+
+```
+WorkflowRun({ script_path: ".thclaws/workflows/research.js",
+              args: { query: "AI agent frameworks", kms: "ai-agents", min_iter: 2 } })
+```
+
+The script reads `args` directly (e.g. `const q = args.query`). This replaces
+the older pattern of writing the brief to a `.thclaws/TASK.md` file for the
+script to re-parse.
+
+> **Surface note.** `thclaws.subagent(...)` inside a workflow needs the `Task`
+> tool, which is registered on `--cli`, `--serve`, and the GUI — **not** on
+> `-p` (print) or the `/v1` API. On those surfaces a subagent call now fails
+> loud (a clear error) rather than silently returning a stub, so test workflows
+> on a surface that actually has subagents.
 
 ## Quick start
 
@@ -156,10 +175,59 @@ thclaws.subagent({
 }) → string | parsed_value
 ```
 
-The script also gets `thclaws.include(path)` — pull in another `.js`
-file (helpers, shared prompt strings) relative to the script's
-directory. Path traversal (`..`), absolute paths, and symlinks that
-escape the base dir are rejected.
+**Schema from the agent def (no per-call `schema`).** If the named `agent`
+declares an `output_schema` in its frontmatter (Chapter 15) and the call omits
+`schema`, the worker's output is validated against the def's schema and the
+parsed value is returned. Write the contract once on the agent, not in every
+workflow that calls it. An explicit per-call `schema` still wins.
+
+**`thclaws.parallel([spec, …])` — genuine fan-out.** Pass an **array** of the
+same `{prompt, agent?, schema?, caps?, budget?, fallback?}` spec objects and the
+workers run **concurrently** (capped at `min(16, cores-2)`), returning an array
+of results in input order. This is the only true-parallel primitive —
+`Promise.all` over `thclaws.subagent` runs serially.
+
+**It settles, it doesn't reject.** A worker that fails after its retries does
+**not** abort the batch — that slot becomes the spec's **`fallback`** value
+(default `null`), so a 50-item render where one worker dies keeps the other 49.
+Give each spec a `fallback` record (carrying whatever id the downstream needs)
+so a failure is identifiable rather than a bare `null`. The call only throws on a
+programmer error (arg isn't an array, no Task tool on this surface).
+
+Each worker's `caps` are isolated per-future, so KMS-write grants never bleed
+across the batch. Note: the per-worker token-budget soft-cap and resume
+replay-cache that `thclaws.subagent` applies are **not** applied on the parallel
+path (total usage is still metered).
+
+```js
+const images = thclaws.parallel(
+  subjects.map((s) => ({
+    agent: "image-smith",
+    prompt: `render ${s.name}`,
+    budget: { time: "5m" },
+    fallback: { slug: s.slug, status: "failed" }, // this slot on a worker failure
+  }))
+);
+```
+
+**`thclaws.pollUntil(checkFn, opts)` — submit→poll→done.** Calls `checkFn()`
+every `opts.interval` until `opts.until(result)` is truthy (or the result itself
+is truthy), returns that result; throws on `opts.timeout`. Bounded +
+cancellation-aware — the blessed way to wait on an async job (image/video/TTS)
+without a hand-rolled loop. `{ interval: "10s", timeout: "10m", until: r => r.state === "done" }`.
+
+The script also gets two more globals:
+
+- **`thclaws.log(msg)`** — emit a narrator line for observability (the sandbox
+  strips `console`, so this is the blessed way to trace a multi-stage run).
+  Returns nothing.
+- **`thclaws.include(path)`** — pull in another `.js` file (helpers, shared
+  prompt strings) relative to the script's directory. Path traversal (`..`),
+  absolute paths, and symlinks that escape the base dir are rejected.
+- **`args`** — the structured input passed via `WorkflowRun({ script_path, args })`
+  (any JSON value; `null` when none was given). Read it directly —
+  `const q = args.query;` — instead of a `.thclaws/TASK.md` side-channel. See
+  "Two ways to invoke" below.
 
 **`caps.kms.write` controls what a worker can write.** Outside a
 workflow run KMS write tools work as before. Inside `/workflow run`,
@@ -182,10 +250,10 @@ the same `DEFAULT_MAX_DEPTH = 3` ceiling sub-agents already honour.
 
 **Async syntax works** — scripts that use `await` / `async` /
 `Promise.all` route through Boa Module mode. `thclaws.subagent` is
-still synchronous internally, so `Promise.all([...])` resolves
-correctly but workers execute in source order (one at a time).
-Genuine parallel execution is still pending (see "Current
-limitations").
+still synchronous internally, so `Promise.all([...])` over it resolves
+correctly but workers execute in source order (one at a time). For
+genuine concurrency, hand the specs to `thclaws.parallel([...])`
+instead (above).
 
 ### What you can write in the script
 
@@ -316,13 +384,13 @@ operator-vetted, so only run scripts you trust.
 These are documented gaps, not bugs — tracked in
 [dev-plan/32](../dev-plan/32-dynamic-workflows.md) (workspace-only):
 
-- **`Promise.all` resolves but doesn't truly parallelise.** Boa runs
-  scripts that use `await` / `Promise.all` in Module mode, so the
-  syntax parses and `await thclaws.subagent(...)` returns the worker's
-  text. But the host function still blocks the JS thread per-call, so
-  each subagent call inside `Promise.all` runs sequentially. Wall-clock
-  = sum of latencies, not max. A tokio-integrated executor for genuine
-  parallelism is still pending.
+- **`Promise.all` over `thclaws.subagent` doesn't truly parallelise.**
+  That host function blocks the JS thread per-call, so subagent calls
+  inside `Promise.all` run sequentially (wall-clock = sum, not max). Use
+  **`thclaws.parallel([...])`** for genuine concurrency — it runs the
+  workers on the tokio runtime (capped at `min(16, cores-2)`). The
+  remaining gap is making `Promise.all` itself overlap; until then,
+  `thclaws.parallel` is the explicit opt-in.
 - **No verification phase.** A dedicated `thclaws.verify({...})`
   primitive doesn't exist yet — scripts that want a check step author
   it as another `thclaws.subagent` call.

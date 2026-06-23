@@ -96,6 +96,19 @@ pub struct AppConfig {
     /// Lifecycle hooks — shell commands fired on agent events.
     pub hooks: crate::hooks::HooksConfig,
 
+    /// dev-plan/49: OS-level Bash confinement mode — `workspace` (default:
+    /// writes confined to workspace + tmp + package-manager caches), `strict`
+    /// (workspace + tmp only), or `off`. settings.json `bash.sandbox`. Falls
+    /// back to unconfined (with a warning) on hosts where no OS confiner can
+    /// enforce, so the default never breaks a command.
+    pub bash_sandbox: String,
+    /// Extra absolute (or `~/`) paths the confined Bash may write to.
+    /// settings.json `bash.sandbox_write_paths`.
+    pub bash_sandbox_write_paths: Vec<String>,
+    /// Extra paths the confined Bash must NOT read. settings.json
+    /// `bash.sandbox_deny_read`.
+    pub bash_sandbox_deny_read: Vec<String>,
+
     /// Maximum agent loop iterations per turn (0 = unlimited).
     /// Default 200 — high enough for complex multi-step tasks.
     pub max_iterations: usize,
@@ -506,6 +519,9 @@ impl Default for AppConfig {
             disallowed_tools: None,
             resume_session: None,
             hooks: crate::hooks::HooksConfig::default(),
+            bash_sandbox: "workspace".to_string(),
+            bash_sandbox_write_paths: Vec::new(),
+            bash_sandbox_deny_read: Vec::new(),
             // 50 tool-use rounds is enough for everything short of
             // teammate-orchestrated multi-agent flows, and surfaces
             // runaway loops earlier than the old 200.
@@ -725,6 +741,9 @@ pub struct ProjectConfig {
     pub show_raw_response: Option<bool>,
     /// Knowledge-base settings — `{ "active": ["name1", ...] }`.
     pub kms: Option<KmsSettings>,
+    /// dev-plan/49 OS-level Bash confinement —
+    /// `{ "sandbox": "workspace", "sandbox_write_paths": [...], ... }`.
+    pub bash: Option<BashSettings>,
     /// Auto-learn — file each ended session as a page in a dedicated
     /// KMS and periodically reconcile it. See
     /// [`AppConfig::auto_learn`] for the full design. Default off
@@ -851,6 +870,7 @@ impl Default for ProjectConfig {
             browser_headless: None,
             show_raw_response: None,
             kms: None,
+            bash: None,
             auto_learn: None,
             auto_learn_kms: None,
             auto_learn_reconcile_hours: None,
@@ -874,6 +894,18 @@ pub struct KmsSettings {
     /// every name in the list gets its `index.md` spliced into the
     /// system prompt.
     pub active: Vec<String>,
+}
+
+/// dev-plan/49: `bash` block in settings.json — OS-level Bash confinement.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BashSettings {
+    /// `off` | `workspace` | `strict`.
+    pub sandbox: Option<String>,
+    /// Extra paths the confined Bash may write (absolute or `~/`).
+    pub sandbox_write_paths: Option<Vec<String>>,
+    /// Extra paths the confined Bash must not read.
+    pub sandbox_deny_read: Option<Vec<String>>,
 }
 
 /// Shallow-overlay merge for `save()`'s non-destructive write. Two
@@ -1128,6 +1160,17 @@ impl ProjectConfig {
         }
         if let Some(ref kms) = self.kms {
             config.kms_active = kms.active.clone();
+        }
+        if let Some(ref bash) = self.bash {
+            if let Some(ref s) = bash.sandbox {
+                config.bash_sandbox = s.clone();
+            }
+            if let Some(ref w) = bash.sandbox_write_paths {
+                config.bash_sandbox_write_paths = w.clone();
+            }
+            if let Some(ref d) = bash.sandbox_deny_read {
+                config.bash_sandbox_deny_read = d.clone();
+            }
         }
         if let Some(b) = self.auto_learn {
             config.auto_learn = b;

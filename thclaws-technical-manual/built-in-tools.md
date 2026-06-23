@@ -182,12 +182,14 @@ Search file contents for a regex pattern. Optional `glob` filter restricts to ma
 | Name | `Bash` |
 | Approval | always (`requires_approval` returns true unconditionally) |
 | Schema | `{command: string, cwd?: string, timeout?: integer, timeout_secs?: integer (legacy), description?: string}` |
-| Path validation | `Sandbox::check` for `cwd` |
+| Path validation | `Sandbox::check` for `cwd` (the command itself is **not** path-checked — see OS confinement below) |
 | Default timeout | 120000 ms (max 600000 ms) |
 
 Run a shell command via `/bin/sh -c`. Captures stdout + stderr, interleaves in the returned string. On timeout, kills the child and reports the timeout (partial output discarded).
 
-**Hard-coded denylists** (run AFTER approval, BEFORE exec):
+**OS-level confinement (dev-plan/49).** `run_shell_command` builds the `sh -c` invocation through `crate::confine::shell_command_async` rather than `util::shell_command_async` directly — one chokepoint, so subagent/workflow Bash is confined identically. When `bash.sandbox` (settings.json) is `workspace`/`strict` and a confiner is available, the command is wrapped in **macOS `sandbox-exec`** (Seatbelt profile: `deny file-write*` except workspace + `/tmp` + `/dev` char-devices + package-manager caches; `deny file-read*` on `~/.ssh`/`~/.aws`/secrets) or **Linux `bwrap`** (ro-bind `/`, re-bind the write-roots, tmpfs the deny-read paths). Default `off` = plain `sh -c` (unchanged). The write root is `Sandbox::root()` / `workdir::current_workdir()` (per-session in multi-tenant). This is the **hard** boundary under the soft `pre_tool_use` hook gate (dev-plan/48) — `Sandbox::check` only scopes the `cwd` *argument*, so `echo x > /abs` would otherwise escape.
+
+**Hard-coded denylists** (run AFTER approval, BEFORE exec) — a tripwire layer, not the boundary:
 - `lead_forbidden_command` — when running as team lead, blocks `git reset --hard`, `git clean -f/-d`, `git push --force`, `git rebase`, `git worktree remove/prune`, `git checkout -- / .`, `git restore --worktree / .`, `git merge --abort`, `rm -rf / -fr / -r`. Reason: lead is a coordinator; destructive ops belong to teammates inside their own worktrees.
 - `teammate_forbidden_command` — when running as a teammate, blocks `git reset --hard <other-branch-or-remote>`. `HEAD`, `HEAD~N`, `HEAD^`, `HEAD@{N}`, hex SHAs ≥7 chars, `tags/...` are allowed (legitimate same-branch recovery).
 - `is_destructive_command` — yellow `⚠` print but doesn't block (already approved). 80+ patterns for defense-in-depth: `rm -rf`, `sudo`, `kill -9`, `mkfs`, `dd if=`, `drop database`, `kubectl delete`, `terraform destroy`, `aws s3 rm`, `curl ... | sh`, etc.
@@ -509,7 +511,7 @@ Same intentional sandbox carve-out as KMS / Memory writes — `.thclaws/` is res
 |---|---|
 | Name | `WorkflowRun` |
 | Approval | **yes** — every call prompts (same posture as `Bash`; runs LLM-authored JavaScript) |
-| Schema | `{prompt: string}` — natural-language goal for the workflow author |
+| Schema | `{prompt?: string, script_path?: string, args?: any}` — `prompt` = NL goal for the author; `script_path` = run a pre-authored `.js` verbatim (no authoring); `args` = structured input exposed to the script as the global `args` (dev-plan/47) |
 | Source | `crates/core/src/tools/workflow_run.rs` |
 | Returns | Script's final-expression value as a string, plus a one-line token rollup `[workflow: N subagent turn(s), X in / Y out tokens]` |
 
@@ -536,6 +538,17 @@ Internally:
 | GUI / `--serve` (worker) | yes | yes |
 | Print mode (`thclaws -p`) | yes | no |
 | `agent_runtime` HTTP (`/v1`) | yes | no |
+
+**dev-plan/47 runtime additions** (`crates/core/src/workflow/runtime.rs`):
+- **`args` global** — `WorkflowRun({script_path, args})` injects `args` via `WorkflowSandbox::set_args` (a writable global, defaults to `null`). Lets a pre-authored workflow take typed input instead of a `.thclaws/TASK.md` side-channel.
+- **`thclaws.log(msg)`** — registered alongside `subagent`/`include`; emits a stdout narrator line (+ a GUI chat indicator under `feature="gui"`). The blessed observability channel since `console` is stripped.
+- **Schema-from-def** — when `thclaws.subagent({agent})` omits `schema`, the runtime calls `Tool::subagent_output_schema(agent)` (overridden by `SubAgentTool` to read `AgentDef::output_schema`) and validates against it. One source of truth instead of duplicating the schema per call.
+- **Loud surface guard** — when no `Task` tool is wired (`Subagent threaded = no` above) **and** `is_inside_workflow()`, `thclaws.subagent` returns a hard error (not the old silent `(stub for: …)`), so a `-p` / `/v1` run fails clearly instead of role-playing the subagent.
+- **Per-subagent `writePaths`** — `AgentDef::write_paths` globs wrap the file-write tools (`PathScopedWriteTool` in `subagent.rs`) so a worker can't write outside its lane (file-write tools only, not `Bash`).
+
+**dev-plan/48 runtime additions** (`crates/core/src/workflow/runtime.rs`):
+- **`thclaws.parallel([spec, …])`** (48.1) — the genuine fan-out primitive: builds one future per spec and runs them via `futures::join_all` under a `Semaphore(min(16, cores-2))` on the workflow's tokio handle, returning results in input order (throws on first worker failure). Plain `Promise.all` over `subagent` stays serial (that host fn `block_on`s per call). **Caps isolation:** each future is `WORKER_CAPS_TASK.scope(...)`'d (a `tokio::task_local!`); `check_kms_write_capability` prefers the task-local over the thread-local, so concurrent workers' KMS-write grants can't bleed. The parallel path skips the per-worker token-budget soft-cap + replay-cache `subagent` applies (total usage still metered).
+- **`thclaws.pollUntil(checkFn, opts)`** (48.5) — bounded (`opts.timeout`) + Stop-token-aware submit→poll→done loop; calls `checkFn()` every `opts.interval` until `opts.until(result)` is truthy. `checkFn` is synchronous from the host's view (may call `subagent`), so the loop only `block_on`s the inter-poll sleep.
 
 **Tests** in `crates/core/src/tools/workflow_run.rs::tests`:
 - `workflow_run_executes_authored_script_and_returns_result` — stub provider returns `"'hi'"`, tool runs end-to-end through `spawn_blocking` + Boa, returns `"hi"` + token rollup. Pins the pipeline composes from the tool layer, not just from the slash-command handler.

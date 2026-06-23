@@ -83,6 +83,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    // dev-plan/49: handle the internal `__confine` re-exec (Linux Landlock).
+    thclaws_core::confine::maybe_handle_confine_subcommand();
     secrets::load_into_env();
     endpoints::load_into_env();
     load_dotenv();

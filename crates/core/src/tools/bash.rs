@@ -208,7 +208,11 @@ async fn run_shell_command(
     timeout_ms: u64,
     is_server: bool,
 ) -> Result<String> {
-    let mut cmd = crate::util::shell_command_async(command);
+    // dev-plan/49: route through the OS confiner — returns a sandbox-exec /
+    // bwrap-wrapped `sh -c` when bash.sandbox is on and a confiner is
+    // available, else a plain `sh -c` (unchanged). One chokepoint, so
+    // subagent/workflow Bash is confined identically.
+    let mut cmd = crate::confine::shell_command_async(command);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -305,7 +309,13 @@ async fn run_shell_command(
             let stdout = String::from_utf8_lossy(&stdout_bytes);
             let stderr = String::from_utf8_lossy(&stderr_bytes);
             let exit_code = status.code().unwrap_or(-1);
-            Ok(format_output(&stdout, &stderr, exit_code))
+            let out = format_output(&stdout, &stderr, exit_code);
+            // dev-plan/49: if the OS sandbox likely blocked a write, tell the
+            // model it's the sandbox (not a real perms error) + how to allow it.
+            Ok(match crate::confine::denied_hint(&out) {
+                Some(hint) => format!("{out}\n\n{hint}"),
+                None => out,
+            })
         }
     }
 }

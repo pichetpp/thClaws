@@ -4758,6 +4758,146 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     Ok(())
 }
 
+/// dev-plan/48.2: run an agent's pre-authored workflow headlessly with the
+/// Task tool + MCP registered (unlike `-p`), so authors + CI can behaviorally
+/// smoke-test a pipeline instead of only structurally linting it. Returns a
+/// process exit code (0 = ok). `--dry-tools` skips MCP + the native media
+/// tools so control-flow runs without real generation / external spend (Bash
+/// still runs — full per-tool mocking is dev-plan/48.2's open question).
+pub async fn run_agent_workflow(
+    config: AppConfig,
+    workflow_path: std::path::PathBuf,
+    args: Option<serde_json::Value>,
+    dry_tools: bool,
+) -> i32 {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut tool_registry = ToolRegistry::with_builtins();
+
+    // Always-on KMS + memory + session tools (mirror run_print_mode's set so
+    // subagents inherit the same base toolset they'd have on any surface).
+    tool_registry.register(Arc::new(crate::tools::KmsReadTool));
+    tool_registry.register(Arc::new(crate::tools::KmsSearchTool));
+    tool_registry.register(Arc::new(crate::tools::KmsWriteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsAppendTool));
+    tool_registry.register(Arc::new(crate::tools::KmsDeleteTool));
+    tool_registry.register(Arc::new(crate::tools::KmsCreateTool));
+    tool_registry.register(Arc::new(crate::tools::MemoryReadTool));
+    tool_registry.register(Arc::new(crate::tools::MemoryWriteTool));
+    tool_registry.register(Arc::new(crate::tools::MemoryAppendTool));
+    tool_registry.register(Arc::new(crate::tools::SessionRenameTool));
+    if config.search_engine != "auto" {
+        tool_registry.register(Arc::new(crate::tools::WebSearchTool::new(
+            &config.search_engine,
+        )));
+    }
+    if config.image_tools_enabled && !dry_tools {
+        tool_registry.register(Arc::new(crate::tools::TextToImageTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToImageTool));
+        tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
+        tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
+        tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+    }
+    let _task_store = crate::tools::tasks::register_task_tools(&mut tool_registry);
+
+    let plugin_skill_dirs = crate::plugins::plugin_skill_dirs();
+    let skill_store = crate::skills::SkillStore::discover_with_extra(&plugin_skill_dirs);
+    let skill_tool = crate::skills::SkillTool::new(skill_store.clone());
+    let store_handle = skill_tool.store_handle();
+    tool_registry.register(Arc::new(skill_tool));
+    tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
+        store_handle.clone(),
+    )));
+    tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
+        store_handle,
+    )));
+    let store_ref = if skill_store.skills.is_empty() {
+        None
+    } else {
+        Some(&skill_store)
+    };
+
+    let mcp_instructions = if dry_tools {
+        eprintln!("· --dry-tools: skipping MCP + media tools (control-flow only)");
+        Vec::new()
+    } else {
+        let mut merged_mcp = config.mcp_servers.clone();
+        for p_mcp in crate::plugins::plugin_mcp_servers() {
+            if !merged_mcp.iter().any(|s| s.name == p_mcp.name) {
+                merged_mcp.push(p_mcp);
+            }
+        }
+        let (mcp_clients, _) = load_mcp_servers(&merged_mcp, &mut tool_registry).await;
+        crate::mcp::collect_mcp_instructions(&mcp_clients)
+    };
+
+    let system = crate::prompts::build_full_system_prompt(
+        &config,
+        &cwd,
+        store_ref,
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Headless,
+    );
+
+    let provider = match build_provider(&config) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("✗ provider: {e}");
+            return 1;
+        }
+    };
+
+    // Headless → auto-approve (no interactive prompts).
+    let approver: Arc<dyn crate::permissions::ApprovalSink> =
+        Arc::new(crate::permissions::AutoApprover);
+    let hooks_arc = std::sync::Arc::new(config.hooks.clone());
+    let mut agent_defs =
+        crate::agent_defs::AgentDefsConfig::load_with_extra(&crate::plugins::plugin_agent_dirs());
+    agent_defs.apply_builtin_subagent_overrides(&config);
+    let snapshot = std::sync::Arc::new(std::sync::RwLock::new(crate::subagent::FactorySnapshot {
+        system: system.clone(),
+        tools: tool_registry.clone(),
+    }));
+    let factory = Arc::new(ProductionAgentFactory {
+        provider: provider.clone(),
+        snapshot,
+        model: config.model.clone(),
+        max_iterations: config.max_iterations,
+        max_depth: crate::subagent::DEFAULT_MAX_DEPTH,
+        max_tokens: config.max_tokens,
+        agent_defs: agent_defs.clone(),
+        approver,
+        permission_mode: PermissionMode::Auto,
+        cancel: None,
+        hooks: Some(hooks_arc),
+    });
+    let subagent_arc: Arc<dyn crate::tools::Tool> = Arc::new(
+        SubAgentTool::new(factory)
+            .with_depth(0)
+            .with_agent_defs(agent_defs),
+    );
+
+    let wfrun = crate::tools::WorkflowRunTool::new(
+        provider.clone(),
+        config.model.clone(),
+        Some(subagent_arc),
+    );
+    let input = serde_json::json!({
+        "script_path": workflow_path.to_string_lossy(),
+        "args": args.unwrap_or(serde_json::Value::Null),
+    });
+    eprintln!("· running workflow {} …", workflow_path.display());
+    match crate::tools::Tool::call(&wfrun, input).await {
+        Ok(out) => {
+            println!("{out}");
+            0
+        }
+        Err(e) => {
+            eprintln!("✗ workflow failed: {e}");
+            1
+        }
+    }
+}
+
 /// Recompose the REPL agent's system prompt from current project
 /// state. Mirrors what `shared_session::rebuild_system_prompt` does
 /// for the GUI worker — pre-fix the CLI captured `self.system` once

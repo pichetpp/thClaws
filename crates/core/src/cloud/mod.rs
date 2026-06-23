@@ -21,6 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agent_cli;
+pub mod agent_scaffold;
 pub mod client;
 pub mod cmd;
 pub mod manifest;

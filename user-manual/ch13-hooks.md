@@ -83,10 +83,42 @@ macOS: replace with `osascript -e 'display notification "Session done" with titl
 }
 ```
 
+## The `pre_tool_use` gate — block a tool
+
+`pre_tool_use` runs **synchronously before the tool**, so it can *deny* the
+call: **`exit 2` blocks it** (the tool never runs; the hook's **stderr** is
+shown to the model as the reason). Every other exit allows it — so a plain
+audit hook (the logging recipe above, exit 0) never blocks. The gate fires for
+**every** tool, on every surface, and is inherited by subagents/workflows.
+
+**Read the full command on stdin.** `$THCLAWS_TOOL_INPUT` is capped (~8 KB) —
+a long command could hide its tail past the cutoff. The **complete**,
+untruncated tool input (JSON) is piped on **stdin** (with
+`$THCLAWS_TOOL_INPUT_ON_STDIN=1` set). Screen *that*:
+
+```json
+{
+  "hooks": {
+    "pre_tool_use": "in=$(cat); [ \"$THCLAWS_TOOL_NAME\" = Bash ] && echo \"$in\" | grep -Eq '> *(/etc|/Users/[^/]+/[.])' && { echo 'write outside the project blocked' >&2; exit 2; }; exit 0",
+    "fail_closed": true
+  }
+}
+```
+
+**`fail_closed`** (default `false`): when `true`, the gate **fails closed** — a
+timeout, a spawn failure, or any non-`exit 0` outcome **denies** the call
+instead of allowing it. Turn it on when the hook *is* your boundary.
+
+> A screening hook is a **soft** layer — obfuscation (`$(printf …)`, `eval`,
+> `base64|sh`) can defeat string-matching. For a hard, OS-enforced "no writes
+> outside the workspace" boundary, use **`bash.sandbox`**
+> ([Chapter 5](ch05-permissions.md#bash-sandbox)) underneath it.
+
 ## Failure handling
 
 Hooks that exit with a non-zero status print a warning to stderr but
-don't stop the agent. They run in the same cwd as thClaws, so file
+don't stop the agent (unless `fail_closed` is set on the `pre_tool_use`
+gate — see above). They run in the same cwd as thClaws, so file
 paths in the script are relative to the sandbox root. Long-running
 hooks block the turn — keep them fast or background them
 (`command &`).

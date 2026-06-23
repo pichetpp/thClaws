@@ -10,10 +10,28 @@
 //!     "post_tool_use": "echo \"done: $THCLAWS_TOOL_NAME\" >> /tmp/thclaws.log",
 //!     "session_start": "notify-send 'thClaws started'",
 //!     "session_end":   "notify-send 'thClaws ended'",
-//!     "timeout_secs":  5
+//!     "timeout_secs":  5,
+//!     "fail_closed":   false
 //!   }
 //! }
 //! ```
+//!
+//! ## `pre_tool_use` gate (the security-relevant one)
+//!
+//! `pre_tool_use` runs **synchronously as a gate** before every tool call
+//! (including Bash, on every surface, and inherited by subagents). The hook
+//! receives the tool name in `$THCLAWS_TOOL_NAME`, a *truncated* preview in
+//! `$THCLAWS_TOOL_INPUT`, and — since the dev-plan/48 audit — the **FULL,
+//! untruncated** tool input as JSON on **stdin** (`$THCLAWS_TOOL_INPUT_ON_STDIN=1`).
+//! Read stdin to screen the complete command; the env var alone is capped at
+//! [`MAX_HOOK_ENV_BYTES`] and a long command could hide its tail past it.
+//!
+//! Decision: `exit 2` **denies** (stderr is shown to the model as the reason).
+//! By default everything else **allows** (fail-open — accidents/audit). Set
+//! `"fail_closed": true` to make the gate your boundary: then a timeout, spawn
+//! failure, or any non-`exit 0` outcome **denies**. Note: command screening is
+//! still not a hard sandbox (obfuscation / absolute-path writes) — OS-level
+//! confinement remains the real boundary.
 //!
 //! Hook commands run via `/bin/sh -c` (or platform default — see
 //! [`crate::util::shell_command_sync`]). Hooks are fire-and-forget — the
@@ -64,6 +82,13 @@ pub struct HooksConfig {
     /// Per-hook timeout. M6.35 HOOK7. Defaults to
     /// [`DEFAULT_HOOK_TIMEOUT_SECS`] when None / unset.
     pub timeout_secs: Option<u64>,
+    /// dev-plan/48 security audit #2: when true, the `pre_tool_use` GATE
+    /// fails **closed** — a timeout, spawn failure, or any non-zero /
+    /// non-`exit 0` outcome **denies** the tool call instead of allowing
+    /// it. Default `false` (fail-open, backward compatible) so a plain
+    /// audit hook still behaves as before. Turn on when the hook IS your
+    /// boundary and "the gate couldn't cleanly approve" must mean "block".
+    pub fail_closed: bool,
 }
 
 impl Default for HooksConfig {
@@ -78,6 +103,7 @@ impl Default for HooksConfig {
             pre_compact: None,
             post_compact: None,
             timeout_secs: None,
+            fail_closed: false,
         }
     }
 }
@@ -302,37 +328,98 @@ pub async fn fire_pre_tool_use_gate(
     let Some(cmd) = config.get(HookEvent::PreToolUse) else {
         return PreToolDecision::Allow;
     };
+    // Decide what a gate that COULDN'T cleanly approve means: deny when
+    // `fail_closed`, else allow (the historical fail-open default).
+    let on_gate_failure = |why: String| -> PreToolDecision {
+        report_error(format!(
+            "{why} — {}",
+            if config.fail_closed {
+                "denying (fail-closed)"
+            } else {
+                "allowing (fail-open)"
+            }
+        ));
+        if config.fail_closed {
+            PreToolDecision::Deny(format!("pre_tool_use gate could not approve: {why}"))
+        } else {
+            PreToolDecision::Allow
+        }
+    };
+
     let mut command = crate::util::shell_command_async(cmd);
     command.env("THCLAWS_HOOK_EVENT", HookEvent::PreToolUse.name());
     command.env("THCLAWS_TOOL_NAME", tool_name);
+    // The env var stays truncated (per-arg env limits), but the FULL,
+    // untruncated tool input is also piped on STDIN — so a screening hook
+    // sees the entire command even when it exceeds MAX_HOOK_ENV_BYTES (an
+    // env-only hook could otherwise be bypassed by padding the command past
+    // 8KB and hiding the dangerous tail). `THCLAWS_TOOL_INPUT_ON_STDIN=1`
+    // tells the hook the full payload is available there.
     command.env(
         "THCLAWS_TOOL_INPUT",
         truncate_for_env(input, MAX_HOOK_ENV_BYTES),
     );
-    command.stdin(std::process::Stdio::null());
-    let out = match tokio::time::timeout(config.timeout(), command.output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            report_error(format!("pre_tool_use gate spawn failed: {e} — allowing"));
-            return PreToolDecision::Allow;
-        }
-        Err(_) => {
-            report_error(format!(
-                "pre_tool_use gate timed out after {}s — allowing",
-                config.timeout().as_secs()
-            ));
-            return PreToolDecision::Allow;
-        }
+    command.env("THCLAWS_TOOL_INPUT_ON_STDIN", "1");
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => return on_gate_failure(format!("spawn failed: {e}")),
     };
-    if out.status.code() == Some(2) {
-        let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return PreToolDecision::Deny(if reason.is_empty() {
-            "blocked by pre_tool_use hook".to_string()
-        } else {
-            reason
+    // Stream the full input on stdin from a detached task so a hook that
+    // writes a lot to stdout can't deadlock against our write.
+    if let Some(mut stdin) = child.stdin.take() {
+        let full = input.to_string();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let _ = stdin.write_all(full.as_bytes()).await;
+            let _ = stdin.shutdown().await;
         });
     }
-    PreToolDecision::Allow
+
+    let out = match tokio::time::timeout(config.timeout(), child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return on_gate_failure(format!("wait failed: {e}")),
+        Err(_) => {
+            return on_gate_failure(format!("timed out after {}s", config.timeout().as_secs()))
+        }
+    };
+
+    match out.status.code() {
+        // Explicit deny (Claude-Code convention) — stderr is the reason.
+        Some(2) => {
+            let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            PreToolDecision::Deny(if reason.is_empty() {
+                "blocked by pre_tool_use hook".to_string()
+            } else {
+                reason
+            })
+        }
+        // Clean approve.
+        Some(0) => PreToolDecision::Allow,
+        // Any other outcome: fail-open allows (historical), fail-closed
+        // denies (the hook didn't cleanly approve).
+        other => {
+            if config.fail_closed {
+                let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let code = other
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into());
+                PreToolDecision::Deny(format!(
+                    "pre_tool_use gate exited {code} without approving (fail-closed){}",
+                    if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {reason}")
+                    }
+                ))
+            } else {
+                PreToolDecision::Allow
+            }
+        }
+    }
 }
 
 /// Fire a post_tool_use (or _failure) hook with tool name and output.
@@ -427,6 +514,60 @@ mod tests {
             PreToolDecision::Deny(reason) => assert!(reason.contains("nope"), "reason={reason}"),
             PreToolDecision::Allow => panic!("exit 2 must deny"),
         }
+    }
+
+    /// audit #1: the FULL command reaches the hook on stdin, even when the
+    /// dangerous part is PAST the 8KB env-var cutoff (the env-only bypass).
+    #[tokio::test]
+    async fn gate_sees_full_command_via_stdin_beyond_env_truncation() {
+        // Hook screens stdin (default grep input) and blocks on FORBIDDEN.
+        let cfg = HooksConfig {
+            pre_tool_use: Some("grep -q FORBIDDEN && exit 2 || exit 0".into()),
+            ..Default::default()
+        };
+        // FORBIDDEN sits AFTER >8KB of padding — truncated out of the env var,
+        // but stdin carries the whole thing.
+        let padding = "x".repeat(MAX_HOOK_ENV_BYTES + 500);
+        let input = format!("{{\"command\":\"echo {padding}; : FORBIDDEN\"}}");
+        match fire_pre_tool_use_gate(&cfg, "Bash", &input).await {
+            PreToolDecision::Deny(_) => {}
+            PreToolDecision::Allow => {
+                panic!(
+                    "gate missed FORBIDDEN past the env cutoff — stdin not delivering full input"
+                )
+            }
+        }
+    }
+
+    /// audit #2: fail_closed denies on a non-0/non-2 exit and on timeout.
+    #[tokio::test]
+    async fn gate_fail_closed_denies_on_nonzero_and_timeout() {
+        let cfg = HooksConfig {
+            pre_tool_use: Some("exit 1".into()),
+            fail_closed: true,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                fire_pre_tool_use_gate(&cfg, "Bash", "{}").await,
+                PreToolDecision::Deny(_)
+            ),
+            "fail_closed must deny a non-zero exit"
+        );
+
+        let cfg_timeout = HooksConfig {
+            pre_tool_use: Some("sleep 5".into()),
+            fail_closed: true,
+            timeout_secs: Some(1),
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                fire_pre_tool_use_gate(&cfg_timeout, "Bash", "{}").await,
+                PreToolDecision::Deny(_)
+            ),
+            "fail_closed must deny on timeout"
+        );
     }
 
     #[test]
