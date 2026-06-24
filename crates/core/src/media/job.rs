@@ -81,9 +81,8 @@ fn append(job: &MediaJob) -> Result<()> {
 }
 
 /// Fold the append-log into the latest state per id.
-fn load_all() -> Result<Vec<MediaJob>> {
-    let path = log_path();
-    let raw = match std::fs::read_to_string(&path) {
+fn load_at(path: &PathBuf) -> Result<Vec<MediaJob>> {
+    let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(Error::Tool(format!("read {}: {e}", path.display()))),
@@ -109,6 +108,54 @@ fn load_all() -> Result<Vec<MediaJob>> {
         .collect())
 }
 
+fn load_all() -> Result<Vec<MediaJob>> {
+    load_at(&log_path())
+}
+
+/// Compact the log file at `path` to one entry per job id.
+/// Returns the number of duplicate lines removed.
+/// Caller must NOT hold LOCK.
+fn prune_at(path: &PathBuf) -> Result<usize> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(Error::Tool(format!("read {}: {e}", path.display()))),
+    };
+    let original = raw.lines().filter(|l| !l.trim().is_empty()).count();
+    let jobs = load_at(path)?;
+    if jobs.len() == original {
+        return Ok(0);
+    }
+    let mut content = String::new();
+    for job in &jobs {
+        let line = serde_json::to_string(job)
+            .map_err(|e| Error::Tool(format!("serialize media job: {e}")))?;
+        content.push_str(&line);
+        content.push('\n');
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, &content)
+        .map_err(|e| Error::Tool(format!("write {}: {e}", tmp.display())))?;
+    if std::fs::rename(&tmp, path).is_err() {
+        // cross-device fallback
+        std::fs::copy(&tmp, path)
+            .map_err(|e| Error::Tool(format!("copy to {}: {e}", path.display())))?;
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(original - jobs.len())
+}
+
+fn prune_unlocked() -> Result<usize> {
+    prune_at(&log_path())
+}
+
+/// Compact the log to one entry per job id.
+/// Returns the number of lines removed.
+pub fn prune() -> Result<usize> {
+    let _g = LOCK.lock().unwrap();
+    prune_unlocked()
+}
+
 /// Persist a newly-submitted job.
 pub fn create(job: &MediaJob) -> Result<()> {
     let _g = LOCK.lock().unwrap();
@@ -124,7 +171,11 @@ pub fn get(id: &str) -> Result<Option<MediaJob>> {
 /// Append a new state snapshot for an existing job.
 pub fn update(job: &MediaJob) -> Result<()> {
     let _g = LOCK.lock().unwrap();
-    append(job)
+    append(job)?;
+    if job.is_terminal() {
+        let _ = prune_unlocked();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -139,6 +190,40 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert!(a.starts_with("vid-"));
+    }
+
+    #[test]
+    fn prune_compacts_duplicate_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("media-jobs.jsonl");
+        let job = MediaJob {
+            id: "vid-aabbcc".into(),
+            kind: "text2video".into(),
+            provider: "veo".into(),
+            model: "veo-3.1-fast-generate-preview".into(),
+            op: "operations/test".into(),
+            status: STATUS_RUNNING.into(),
+            asset_path: None,
+            error: None,
+            duration_seconds: 8,
+            created_at: "2026-06-24".into(),
+        };
+        // write 3 entries for the same id
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        use std::io::Write as _;
+        for _ in 0..3 {
+            writeln!(f, "{}", serde_json::to_string(&job).unwrap()).unwrap();
+        }
+        drop(f);
+
+        let removed = super::prune_at(&path).unwrap();
+        assert_eq!(removed, 2);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.lines().filter(|l| !l.trim().is_empty()).count(), 1);
     }
 
     #[test]
