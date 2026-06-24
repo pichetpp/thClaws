@@ -118,7 +118,7 @@ export function SettingsMenu({
       id: "api-keys",
       icon: <KeyRound size={12} />,
       label: "Settings & API keys",
-      hint: "Provider keys, gateway, deploy target, auto-learn",
+      hint: "Provider keys, gateway, thClaws.cloud, auto-learn",
     },
   ];
 

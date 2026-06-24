@@ -648,6 +648,15 @@ export function ChatView({ active, modalOpen }: Props) {
             { role: "system", content: msg.text as string },
           ]);
           break;
+        case "chat_turn_usage":
+          // Per-turn token/cost footer (parity with the CLI REPL's
+          // `[tokens: …in/…out · …s · $… session]`). Rendered as the same
+          // muted system line as skill notes / slash output.
+          setMessages((prev) => [
+            ...prev,
+            { role: "system", content: msg.text as string },
+          ]);
+          break;
         case "chat_done":
           setStreaming(false);
           setAskPrompt(null);

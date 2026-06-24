@@ -101,6 +101,11 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
             "revision": revision,
         })
         .to_string()],
+        ViewEvent::TurnUsage(text) => vec![serde_json::json!({
+            "type": "chat_turn_usage",
+            "text": strip_ansi(text),
+        })
+        .to_string()],
         ViewEvent::TurnDone => vec![serde_json::json!({"type": "chat_done"}).to_string()],
         ViewEvent::BusyChanged => {
             // Snapshot busy state inline so subscribers don't need a
@@ -556,6 +561,10 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
         ViewEvent::SlashOutput(text) => {
             let body = text.replace('\n', "\r\n");
             Some(format!("\x1b[2m{body}\x1b[0m\r\n"))
+        }
+        ViewEvent::TurnUsage(text) => {
+            // Dim per-turn token/cost footer on its own line (CLI parity).
+            Some(format!("\r\n\x1b[2m{}\x1b[0m\r\n", text.replace('\n', "\r\n")))
         }
         ViewEvent::WorkflowReviewRequest {
             id,

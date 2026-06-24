@@ -382,27 +382,66 @@ const { runId } = await thclaws.run("Summarise this in one line.");
 // Cancel an in-flight turn (equivalent of Cmd+. in Chat)
 thclaws.cancel(runId);
 
-// Subscribe to streaming events
+// Subscribe to streaming events. on() returns an unsubscribe function.
 const unsubscribe = thclaws.on("text", (chunk) => render(chunk));
+thclaws.on("ready",       ()        => …);   // bridge ready (Mode A)
 thclaws.on("tool_call",   (call)   => …);   // Tier 2
 thclaws.on("tool_result", (result) => …);   // Tier 2
 thclaws.on("done",        ()        => …);
 thclaws.on("error",       (err)     => …);
 
-// Direct tool invocation — bypass the agent loop for deterministic actions
-// (Tier 2; manifest must declare `tools.invoke:<name>` in Tier 3).
-// `<name>` is whatever tool you've registered — typically an MCP tool
-// like `mcp__pinn_ai__text2image` (sanitised from the server name) or
-// a built-in like `Ls`. Prefer thclaws.run() + an AGENTS.md playbook
-// for most shells — it composes with whatever provider stack the
-// user has configured. See the Image Generator example shell.
-const result = await thclaws.tools.invoke("mcp__your_server__your_tool", { … });
+// Or consume a turn as an async stream (sugar over run() + on()).
+for await (const ev of thclaws.streamTurn("Summarise this.")) {
+  if (ev.value?.type === "text") render(ev.value.delta);
+}
+
+// Direct tool invocation — bypass the agent loop for deterministic actions.
+// callTool() is the name to target going forward; tools.invoke() is the
+// older alias and behaves identically. `<name>` is whatever tool you've
+// registered — typically an MCP tool like `mcp__pinn_ai__text2image`
+// (sanitised from the server name) or a built-in like `Ls`. Read-only
+// tools work directly; mutating tools (Bash/Write/Edit/…) reject with
+// "requires approval". Prefer thclaws.run() + an AGENTS.md playbook for
+// most shells — it composes with whatever provider stack the user has
+// configured. See the Image Generator example shell.
+const result = await thclaws.callTool("mcp__your_server__your_tool", { … });
+
+// Turn an agent-produced file path into a URL the browser can load —
+// e.g. <img src={thclaws.fileUrl(payload.file)}>. Mode B accepts a path
+// relative to the shell's project root; Mode A needs an absolute path
+// (returns null otherwise).
+const src = thclaws.fileUrl("output/diagram.svg");
 
 // Per-shell, per-session storage
 // (Tier 2; file-backed at <shell-root>/state/<sessionId>.json)
 await thclaws.storage.set("last_query", query);
 const last = await thclaws.storage.get("last_query");
+await thclaws.storage.set("last_query", null);  // delete by writing null
+
+// Host UI integration — theme + full-screen. The bridge also mirrors the
+// host theme onto document.documentElement[data-theme] + color-scheme,
+// so most shells can theme in CSS alone and never touch these.
+thclaws.ui.theme            // "light" | "dark" (host's resolved theme)
+thclaws.ui.isFullscreen     // true while the host shows this shell full-screen
+thclaws.ui.onTheme((t)   => repaint(t));         // fires immediately + on change
+thclaws.ui.onFullscreen((active) => {            // fires immediately + on change
+  myExitButton.hidden = !active;
+  if (active) thclaws.ui.claimExitControl();     // hide host's fallback exit chip
+});
+myExitButton.onclick = () => thclaws.ui.exitFullscreen();
 ```
+
+> **On the bridge object but not yet wired.** A few methods are part of
+> the published contract so shells can code against them, but the engine
+> handler hasn't landed yet — don't ship a shell that depends on them:
+> `thclaws.storage.delete(key)` (use `storage.set(key, null)` instead),
+> `thclaws.permissions.list()` / `.has(action)` (read the granted set),
+> `thclaws.awaitApproval(request)` (inline approval widget — falls back
+> to the system approval modal), and `thclaws.uploadFile(blob, name)`
+> (push a blob into the asset store — use `thclaws.fileUrl()` on an
+> agent-written file instead). Today only `run`, `cancel`, `on`,
+> `callTool` / `tools.invoke`, `storage.get` / `storage.set`, `fileUrl`,
+> `streamTurn`, and the `ui.*` surface are backed end-to-end.
 
 The bridge is **the only API**. Shells cannot reach the workspace
 filesystem, the network (unless `network.outbound:<host>` is
@@ -416,7 +455,7 @@ Declare what your shell does in `manifest.json::permissions`:
 | Permission | Allows |
 |---|---|
 | `agent.run` | `thclaws.run()` and event subscription |
-| `tools.invoke:<name>` | direct `thclaws.tools.invoke("<name>", …)` per tool |
+| `tools.invoke:<name>` | direct `thclaws.callTool("<name>", …)` / `thclaws.tools.invoke(…)` per tool |
 | `session.read` / `session.list` | read sidecar session data |
 | `fs.shell-scoped` | read/write inside the shell's resolved root |
 | `network.outbound:<host>` | `fetch()` to that host (CSP injected at serve time) |

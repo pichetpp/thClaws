@@ -304,6 +304,11 @@ pub enum ViewEvent {
         revision: u32,
     },
     TurnDone,
+    /// Per-turn token/cost footer (GUI parity with the CLI REPL's
+    /// `[tokens: …in/…out · …s · $… session]` line). Carries the plain
+    /// text; the chat surface renders it as a dim footer line and the
+    /// terminal surface prints it dim. Emitted just before `TurnDone`.
+    TurnUsage(String),
     /// The process-wide agent_activity busy state transitioned. The
     /// event-translator turns this into a `gui_busy_changed` IPC
     /// envelope carrying the current `busy_meta()` so the workspace
@@ -3013,33 +3018,58 @@ async fn run_worker(
                 // stale state. No-op if the deleted id wasn't
                 // current.
                 if state.session.id == id {
-                    save_history(&state.agent, &mut state.session, &state.session_store);
+                    // Drop the deleted session's in-memory history first so
+                    // neither the fallback load nor the fresh mint can
+                    // resurrect the just-deleted file via `save_history`
+                    // (which no-ops on empty history).
                     state.agent.clear_history();
-                    state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
-                    state.warned_file_size = false;
-                    if let (Some(store), Ok(mut g)) =
-                        (state.session_store.as_ref(), plan_persist_path.lock())
-                    {
-                        let path = store.path_for(&state.session.id);
-                        let _ = state.session.write_header_if_missing(&path);
-                        *g = Some(path);
+                    // Prefer activating the most recent *remaining* session
+                    // over minting a blank one — deleting a session and
+                    // landing on a surprise empty session is poor UX. The
+                    // store's `list()` is sorted newest-first and the
+                    // deleted id is already gone from disk.
+                    let latest_id = state
+                        .session_store
+                        .as_ref()
+                        .and_then(|s| s.list().ok())
+                        .and_then(|metas| metas.into_iter().next().map(|m| m.id));
+                    if let Some(next_id) = latest_id {
+                        // Reuse the full LoadSession path (provider auto-
+                        // switch, history rehydrate, plan/goal restore,
+                        // HistoryReplaced + sidebar refresh). Re-queued so
+                        // the current handler returns first.
+                        let _ = input_tx_self.send(ShellInput::LoadSession(next_id));
+                    } else {
+                        // Nothing left to fall back to — mint a fresh one.
+                        state.session =
+                            Session::new(&state.config.model, state.cwd.to_string_lossy());
+                        state.warned_file_size = false;
+                        if let (Some(store), Ok(mut g)) =
+                            (state.session_store.as_ref(), plan_persist_path.lock())
+                        {
+                            let path = store.path_for(&state.session.id);
+                            let _ = state.session.write_header_if_missing(&path);
+                            *g = Some(path);
+                        }
+                        crate::tools::plan_state::clear();
+                        // M6.20 BUG M2 + M3: same reset on external delete
+                        // of the active session (sidebar trash icon while
+                        // in yolo mode would otherwise carry the flag into
+                        // the freshly-minted replacement).
+                        state.approver.reset_session_flag();
+                        let _ = crate::permissions::take_pre_plan_mode();
+                        crate::permissions::set_current_mode_and_broadcast(
+                            state.agent.permission_mode,
+                        );
+                        let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
+                        let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
+                            &state.session_store,
+                            &state.session.id,
+                        )));
+                        let _ = events_tx.send(ViewEvent::SlashOutput(
+                            "(deleted the last session; minted a fresh one)".into(),
+                        ));
                     }
-                    crate::tools::plan_state::clear();
-                    // M6.20 BUG M2 + M3: same reset on external delete
-                    // of the active session (sidebar trash icon while
-                    // in yolo mode would otherwise carry the flag into
-                    // the freshly-minted replacement).
-                    state.approver.reset_session_flag();
-                    let _ = crate::permissions::take_pre_plan_mode();
-                    crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
-                    let _ = events_tx.send(ViewEvent::HistoryReplaced(Vec::new()));
-                    let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
-                        &state.session_store,
-                        &state.session.id,
-                    )));
-                    let _ = events_tx.send(ViewEvent::SlashOutput(
-                        "(active session was deleted; minted a fresh session)".into(),
-                    ));
                 }
             }
             ShellInput::SessionRenamedExternal { id, title } => {
@@ -4358,6 +4388,10 @@ async fn drive_turn_stream_inner(
         },
     };
 
+    // Wall-clock start so the per-turn usage footer (emitted on Done)
+    // can report elapsed time, matching the CLI REPL's token line.
+    let turn_start = std::time::Instant::now();
+
     // Rolling buffer for progress-line extraction. Bounded so the
     // regex doesn't scan unbounded text on long turns; we only care
     // about the LATEST `[i/N]` line, so a small window is enough.
@@ -4525,6 +4559,29 @@ async fn drive_turn_stream_inner(
                     &state.session_store,
                     &state.session.id,
                 )));
+
+                // Per-turn usage footer (GUI parity with the CLI REPL).
+                let cache_info = match (
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                ) {
+                    (Some(c), Some(r)) if c > 0 || r > 0 => format!(" · cache: +{c}w/{r}r"),
+                    _ => String::new(),
+                };
+                let cost_str = if state.session_cost_usd > 0.0 {
+                    format!(" · ${:.4} session", state.session_cost_usd)
+                } else {
+                    String::new()
+                };
+                let _ = events_tx.send(ViewEvent::TurnUsage(format!(
+                    "[tokens: {}in/{}out{} · {}{}]",
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    cache_info,
+                    crate::tool_display::format_duration(turn_start.elapsed()),
+                    cost_str
+                )));
+
                 let _ = events_tx.send(ViewEvent::TurnDone);
             }
             Err(e) => {

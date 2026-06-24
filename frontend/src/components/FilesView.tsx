@@ -11,6 +11,7 @@ import {
   FilePlus,
   FolderPlus,
   Download,
+  Trash2,
 } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
@@ -109,6 +110,57 @@ function extOf(path: string): string {
 
 function isTextEditable(path: string): boolean {
   return TEXT_EDITABLE.has(extOf(path));
+}
+
+// Read a dropped File as base64 (without the `data:…;base64,` prefix) for
+// the `file_upload` IPC, which decodes it back to raw bytes on the Rust
+// side — binary-safe, unlike the text-only `file_write`.
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const r = reader.result;
+      if (typeof r !== "string")
+        return reject(new Error("FileReader: non-string result"));
+      const comma = r.indexOf(",");
+      resolve(comma >= 0 ? r.slice(comma + 1) : r);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+// A context-menu row with a clear hover highlight (accent fill) that works
+// across themes — the old `hover:bg-white/10` was invisible on the light
+// theme. `danger` paints the resting state red (e.g. Delete); hovering any
+// row fills it with the accent and flips the text to the accent foreground.
+function MenuItem({
+  icon,
+  label,
+  danger,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      className="flex items-center gap-2 w-full text-left px-3 py-1.5"
+      style={{
+        background: hover ? "var(--accent)" : undefined,
+        color: hover ? "var(--accent-fg, #fff)" : danger ? "#ef4444" : undefined,
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={onClick}
+    >
+      {icon} {label}
+    </button>
+  );
 }
 
 // Compact path for the explorer header — the viewer navbar already
@@ -214,6 +266,15 @@ export function FilesView({ active }: Props) {
   const [createName, setCreateName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // Rename modal. null = closed; otherwise the entry being renamed.
+  const [renameTarget, setRenameTarget] = useState<{
+    path: string;
+    name: string;
+    isDir: boolean;
+  } | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
   const { resolved: themeMode } = useTheme();
 
   // The file being displayed. `content` is what the backend returned —
@@ -241,6 +302,8 @@ export function FilesView({ active }: Props) {
   const [editorSource, setEditorSource] = useState<string>("");
   const [editorDirty, setEditorDirty] = useState(false);
   const [saveToast, setSaveToast] = useState<string | null>(null);
+  // True while files are being dragged over the tree panel (drop-to-upload).
+  const [dragActive, setDragActive] = useState(false);
   const pendingNavigation = useRef<{ path: string } | null>(null);
 
   useEffect(() => {
@@ -333,6 +396,107 @@ export function FilesView({ active }: Props) {
   // listing flips without waiting for the next 2s tick.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, currentPath, preview?.path, mode, themeMode, showHidden]);
+
+  // Drag-and-drop upload into the directory currently shown in the tree.
+  // Each dropped file is base64-encoded and written via `file_upload`
+  // (binary-safe, refuses to clobber). A per-upload self-unsubscribing
+  // listener captures the *current* path/showHidden so the listing
+  // refreshes correctly even though the mount-time subscriber can't.
+  const uploadDroppedFiles = useCallback(
+    (files: FileList) => {
+      for (const file of Array.from(files)) {
+        const reqId = Date.now() + Math.floor(Math.random() * 100000);
+        const target =
+          currentPath === "." ? file.name : `${currentPath}/${file.name}`;
+        const unsub = subscribe((msg) => {
+          if (msg.type !== "file_upload_result" || msg.id !== reqId) return;
+          unsub();
+          if (msg.ok) {
+            setSaveToast(`uploaded ${file.name}`);
+            send({ type: "file_list", path: currentPath, show_hidden: showHidden });
+          } else {
+            setSaveToast(
+              `upload failed: ${file.name}${msg.error ? ` — ${msg.error}` : ""}`,
+            );
+          }
+          setTimeout(() => setSaveToast(null), 3000);
+        });
+        fileToBase64(file)
+          .then((data) =>
+            send({ type: "file_upload", id: reqId, path: target, data }),
+          )
+          .catch(() => {
+            unsub();
+            setSaveToast(`upload failed: ${file.name}`);
+            setTimeout(() => setSaveToast(null), 3000);
+          });
+      }
+    },
+    [currentPath, showHidden],
+  );
+
+  const onTreeDragOver = (e: React.DragEvent) => {
+    // Only react to OS file drags, not internal element drags.
+    if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    if (!dragActive) setDragActive(true);
+  };
+  const onTreeDragLeave = (e: React.DragEvent) => {
+    // Ignore leaves that just move onto a child element.
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      setDragActive(false);
+    }
+  };
+  const onTreeDrop = (e: React.DragEvent) => {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    setDragActive(false);
+    uploadDroppedFiles(files);
+  };
+
+  // Delete a file or folder from the tree context menu. Confirms first
+  // with the native dialog, then `file_delete` (sandbox-checked; recursive
+  // for folders). On success the listing refreshes and the preview clears
+  // if the deleted path was the one being viewed.
+  const deleteEntry = useCallback(
+    async (path: string, name: string, isDir: boolean) => {
+      const confirmed = await platformConfirm({
+        title: `Delete ${isDir ? "folder" : "file"}?`,
+        message: isDir
+          ? `"${name}" and everything inside it will be permanently deleted.`
+          : `"${name}" will be permanently deleted.`,
+        yesLabel: "Delete",
+        noLabel: "Cancel",
+      });
+      if (!confirmed) return;
+      const reqId = Date.now() + Math.floor(Math.random() * 100000);
+      const unsub = subscribe((msg) => {
+        if (msg.type !== "file_delete_result" || msg.id !== reqId) return;
+        unsub();
+        if (msg.ok) {
+          setSaveToast(`deleted ${name}`);
+          // Clear the preview if it pointed at the deleted path (or, for a
+          // folder, anything inside it).
+          if (
+            preview &&
+            (preview.path === path || preview.path.startsWith(`${path}/`))
+          ) {
+            setPreview(null);
+          }
+          send({ type: "file_list", path: currentPath, show_hidden: showHidden });
+        } else {
+          setSaveToast(
+            `delete failed: ${name}${msg.error ? ` — ${msg.error}` : ""}`,
+          );
+        }
+        setTimeout(() => setSaveToast(null), 3000);
+      });
+      send({ type: "file_delete", id: reqId, path });
+    },
+    [currentPath, showHidden, preview],
+  );
 
   // One-shot file download — sends `file_download` with a unique
   // request id, waits for the matching `file_download_result`, then
@@ -427,6 +591,57 @@ export function FilesView({ active }: Props) {
     });
     return unsub;
   }, [createKind, currentPath]);
+
+  // Open the rename modal for a tree entry, prefilled with its name.
+  const startRename = (path: string, name: string, isDir: boolean) => {
+    setEntryMenu(null);
+    setRenameName(name);
+    setRenameError(null);
+    setRenameTarget({ path, name, isDir });
+  };
+
+  // Submit a rename: same parent directory, new basename. Defined as a
+  // plain function (not memoized) so it always closes over the current
+  // path / preview. Uses a per-request listener keyed by `id`.
+  const submitRename = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (renaming || !renameTarget) return;
+    const n = renameName.trim();
+    if (!n) return setRenameError("name required");
+    if (n.includes("/")) return setRenameError("name can't contain '/'");
+    if (n === renameTarget.name) return setRenameTarget(null);
+    const target = renameTarget;
+    const slash = target.path.lastIndexOf("/");
+    const dir = slash >= 0 ? target.path.slice(0, slash) : "";
+    const newPath = dir ? `${dir}/${n}` : n;
+    const reqId = Date.now() + Math.floor(Math.random() * 100000);
+    setRenaming(true);
+    setRenameError(null);
+    const unsub = subscribe((msg) => {
+      if (msg.type !== "file_rename_result" || msg.id !== reqId) return;
+      unsub();
+      setRenaming(false);
+      if (msg.ok) {
+        // Clear the preview if it pointed at the renamed path (or inside a
+        // renamed folder) — its old path no longer exists.
+        if (
+          preview &&
+          (preview.path === target.path ||
+            preview.path.startsWith(`${target.path}/`))
+        ) {
+          setPreview(null);
+        }
+        setRenameTarget(null);
+        setRenameName("");
+        setSaveToast(`renamed to ${n}`);
+        setTimeout(() => setSaveToast(null), 2500);
+        send({ type: "file_list", path: currentPath, show_hidden: showHidden });
+      } else {
+        setRenameError((msg.error as string) ?? "rename failed");
+      }
+    });
+    send({ type: "file_rename", id: reqId, from: target.path, to: newPath });
+  };
 
   const openFile = useCallback((path: string) => {
     setMode("preview");
@@ -664,7 +879,19 @@ export function FilesView({ active }: Props) {
           the editor stays visible), fixed-width left column at `sm:`+. */}
       <div
         className="w-full sm:w-64 max-sm:max-h-[38%] overflow-y-auto border-b sm:border-b-0 sm:border-r shrink-0 flex flex-col"
-        style={{ borderColor: "var(--border)" }}
+        style={{
+          borderColor: dragActive ? "var(--accent)" : "var(--border)",
+          ...(dragActive
+            ? {
+                outline: "2px dashed var(--accent)",
+                outlineOffset: "-2px",
+                background: "rgba(13,148,136,0.08)",
+              }
+            : {}),
+        }}
+        onDragOver={onTreeDragOver}
+        onDragLeave={onTreeDragLeave}
+        onDrop={onTreeDrop}
       >
         <div
           className="flex items-center gap-1 px-2 py-1.5 border-b text-[10px] font-mono shrink-0"
@@ -719,6 +946,14 @@ export function FilesView({ active }: Props) {
             setExplorerMenu({ x: e.clientX, y: e.clientY });
           }}
         >
+          {dragActive && (
+            <div
+              className="text-[10px] font-mono px-2 py-1 mb-1 rounded text-center"
+              style={{ background: "var(--accent)", color: "#fff" }}
+            >
+              Drop to upload to {shortPath(currentPath)}
+            </div>
+          )}
           {entries.length === 0 ? (
             <div className="text-xs p-2" style={{ color: "var(--text-secondary)" }}>
               Empty directory
@@ -1048,25 +1283,33 @@ export function FilesView({ active }: Props) {
                 folder download would zip on the backend — not worth
                 the surface area until users ask for it. */}
             {!entryMenu.isDir && (
-              <button
-                type="button"
-                className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+              <MenuItem
+                icon={<Download size={13} />}
+                label="Download"
                 onClick={() => {
                   downloadFile(entryMenu.path);
                   setEntryMenu(null);
                 }}
-              >
-                <Download size={13} /> Download
-              </button>
+              />
             )}
-            {entryMenu.isDir && (
-              <div
-                className="px-3 py-1.5"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                No actions for folders yet.
-              </div>
-            )}
+            <MenuItem
+              icon={<Pencil size={13} />}
+              label="Rename"
+              onClick={() => {
+                const m = entryMenu;
+                startRename(m.path, m.name, m.isDir);
+              }}
+            />
+            <MenuItem
+              icon={<Trash2 size={13} />}
+              label="Delete"
+              danger
+              onClick={() => {
+                const m = entryMenu;
+                setEntryMenu(null);
+                deleteEntry(m.path, m.name, m.isDir);
+              }}
+            />
           </div>
         </>
       )}
@@ -1092,20 +1335,16 @@ export function FilesView({ active }: Props) {
               color: "var(--text-primary)",
             }}
           >
-            <button
-              type="button"
-              className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+            <MenuItem
+              icon={<FilePlus size={13} />}
+              label="New file…"
               onClick={() => startCreate("file")}
-            >
-              <FilePlus size={13} /> New file…
-            </button>
-            <button
-              type="button"
-              className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+            />
+            <MenuItem
+              icon={<FolderPlus size={13} />}
+              label="New folder…"
               onClick={() => startCreate("folder")}
-            >
-              <FolderPlus size={13} /> New folder…
-            </button>
+            />
           </div>
         </>
       )}
@@ -1184,6 +1423,85 @@ export function FilesView({ active }: Props) {
                 }}
               >
                 {creating ? "Creating…" : "Create"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {renameTarget && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center"
+          style={{ background: "var(--modal-backdrop, rgba(0,0,0,0.55))" }}
+          onClick={() => setRenameTarget(null)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setRenameTarget(null);
+          }}
+        >
+          <form
+            className="rounded-lg border shadow-xl w-[420px] max-w-[92vw]"
+            style={{
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={submitRename}
+          >
+            <div
+              className="px-4 py-2 border-b text-sm font-semibold flex items-center gap-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <Pencil size={14} style={{ color: "var(--accent)" }} />
+              <span>Rename {renameTarget.isDir ? "folder" : "file"}</span>
+            </div>
+            <div className="px-4 py-3 space-y-2 text-xs">
+              <input
+                autoFocus
+                type="text"
+                value={renameName}
+                onChange={(e) => setRenameName(e.target.value)}
+                onFocus={(e) => e.target.select()}
+                placeholder={renameTarget.name}
+                className="w-full px-2 py-1.5 rounded border font-mono text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-primary)",
+                }}
+              />
+              {renameError && (
+                <div style={{ color: "var(--danger, #e06c75)" }}>{renameError}</div>
+              )}
+            </div>
+            <div
+              className="px-4 py-2.5 border-t flex justify-end gap-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <button
+                type="button"
+                onClick={() => setRenameTarget(null)}
+                className="px-3 py-1.5 rounded border text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={renaming}
+                className="px-3 py-1.5 rounded text-xs font-medium"
+                style={{
+                  background: "var(--accent)",
+                  color: "var(--accent-fg, #fff)",
+                  opacity: renaming ? 0.6 : 1,
+                  cursor: renaming ? "default" : "pointer",
+                }}
+              >
+                {renaming ? "Renaming…" : "Rename"}
               </button>
             </div>
           </form>

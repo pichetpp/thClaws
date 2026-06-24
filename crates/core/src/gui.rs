@@ -913,6 +913,12 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                                 "gif" => "image/gif",
                                 "webp" => "image/webp",
                                 "ico" => "image/x-icon",
+                                // PDFs render in an <iframe src=/file-asset>;
+                                // the WebView only invokes its built-in PDF
+                                // viewer when the Content-Type is correct —
+                                // octet-stream gave a blank/black pane.
+                                "pdf" => "application/pdf",
+                                "epub" => "application/epub+zip",
                                 "woff" => "font/woff",
                                 "woff2" => "font/woff2",
                                 "ttf" => "font/ttf",

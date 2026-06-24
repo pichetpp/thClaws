@@ -10,6 +10,15 @@
 //! pages visually. Both binaries ship together in poppler-utils, so the
 //! fallback adds no new install requirement.
 //!
+//! Thai gets two extra layers. `-layout` sprinkles spurious spaces inside
+//! Thai words (the script has no word boundaries, so every glyph gap reads
+//! as a space); `normalize_thai_spacing` repairs that with script-level
+//! rules — no per-document word lists. And when a PDF's font carries a
+//! broken `ToUnicode` map, pdftotext emits genuinely wrong characters that
+//! no post-processing can recover; `thai_looks_garbled` detects the heavy
+//! cluster fragmentation that comes with it and routes those pages to the
+//! vision path, which reads the rendered glyphs instead of the bad map.
+//!
 //! Why shell-out instead of a pure-Rust pdf crate: extraction quality
 //! across real-world PDFs (tagged structure, form fields, embedded fonts
 //! with non-standard cmaps) is dominated by poppler's twenty-plus years
@@ -56,6 +65,18 @@ mod fallback {
     /// usually ~5s on a modern machine, but spinning rust + complex
     /// fonts can push past 30s.
     pub const RENDER_TIMEOUT: Duration = Duration::from_secs(120);
+
+    /// Thai garble detection. A correctly-extracted Thai text layer
+    /// orphans essentially no combining marks behind a space; a PDF whose
+    /// font has a broken `ToUnicode` map makes pdftotext fragment clusters
+    /// and leaves many. Above BOTH thresholds we treat the text layer as
+    /// untrustworthy and prefer the vision path (which reads the rendered
+    /// glyphs, sidestepping the bad mapping). `MIN_THAI…` keeps short
+    /// snippets from tripping the ratio; AND-ing the two avoids firing on
+    /// a long clean doc with a stray fragment.
+    pub const MIN_THAI_FOR_GARBLE_CHECK: usize = 40;
+    pub const GARBLE_ORPHAN_MARKS: usize = 6;
+    pub const GARBLE_ORPHAN_RATIO: f32 = 0.04;
 }
 
 pub struct PdfReadTool;
@@ -109,17 +130,19 @@ impl Tool for PdfReadTool {
         let pages_spec = input.get("pages").and_then(|v| v.as_str()).unwrap_or("all");
         let (first, last) = parse_page_range(pages_spec)?;
 
-        let text = extract_text(&validated, first, last).await?;
+        let raw = extract_text_raw(&validated, first, last).await?;
 
-        // Heuristic for "looks scanned": split on form-feed (the
-        // page boundary marker pdftotext emits) and average chars per
-        // page. The form-feed split also handles "all" pages
-        // gracefully without needing a separate pdfinfo call.
-        if !text_is_too_sparse(&text) {
-            return Ok(ToolResultContent::Text(text));
+        // Take the text layer when it's both present (not scanned) and
+        // trustworthy (not a garbled Thai font). "Looks scanned" splits on
+        // form-feed and averages chars per page; "looks garbled" counts
+        // Thai combining marks orphaned behind spaces. Either one routes to
+        // vision-OCR, which reads the rendered glyphs directly.
+        if !text_is_too_sparse(&raw) && !thai_looks_garbled(&raw) {
+            return Ok(ToolResultContent::Text(normalize_thai_spacing(&raw)));
         }
 
-        // Fall through to vision-OCR.
+        // Fall through to vision-OCR (scanned, or a text layer too garbled
+        // to trust).
         render_pages_as_image_blocks(&validated, first, last)
             .await
             .map(|blocks| ToolResultContent::Blocks(blocks))
@@ -142,9 +165,84 @@ fn text_is_too_sparse(text: &str) -> bool {
     avg < fallback::MIN_CHARS_PER_PAGE
 }
 
-/// Run pdftotext and return the extracted text. Shared between `call`
-/// and the multimodal entry's text-first path.
+/// True for Thai vowels/tone marks that must attach to a preceding base
+/// character — they can never legitimately start a cluster, so a space
+/// in front of one is always a pdftotext fragmentation artifact.
+/// Covers U+0E30–U+0E3A (sara/phinthu) and U+0E47–U+0E4E (tone marks +
+/// thanthakhat + nikhahit + yamakkan).
+fn is_thai_trailing_mark(c: char) -> bool {
+    matches!(c, '\u{0E30}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}')
+}
+
+/// Any character in the Thai block.
+fn is_thai(c: char) -> bool {
+    ('\u{0E01}'..='\u{0E5B}').contains(&c)
+}
+
+/// Repair Thai clusters that `pdftotext -layout` fragmented by orphaning a
+/// combining mark behind a space (e.g. "ผู ้" → "ผู้", "ก ำหนด" → "กำหนด").
+/// A Thai vowel/tone mark can never legitimately follow a space — it must
+/// attach to the preceding base — so this only ever undoes fragmentation;
+/// it can NEVER merge two real words. That safety is deliberate: the
+/// normalizer also runs on clean Thai that uses real phrase spaces, and
+/// many Thai words end in a vowel, so a rule that also stripped
+/// "mark + space + consonant" would wrongly glue "เวลา ทำงาน" into one
+/// token. The harder consonant-after-space fragmentation is
+/// indistinguishable from a real word break without a segmentation
+/// dictionary, so heavily-fragmented documents route to the vision path
+/// via `thai_looks_garbled` instead of being force-joined here. This is a
+/// script-level rule, not a vocabulary list, so it generalizes to any Thai
+/// document; non-Thai text is untouched (the pattern needs Thai on the
+/// left and a Thai mark on the right).
+fn normalize_thai_spacing(text: &str) -> String {
+    use regex::Regex;
+    let drop_before_mark =
+        Regex::new(r"([\u{0E01}-\u{0E4E}]) +([\u{0E30}-\u{0E3A}\u{0E47}-\u{0E4E}])").unwrap();
+    let mut s = text.to_string();
+    // Two passes close stacked clusters like "ษ ั ้" that one
+    // left-to-right replace_all can't fully collapse.
+    for _ in 0..2 {
+        s = drop_before_mark.replace_all(&s, "$1$2").into_owned();
+    }
+    s
+}
+
+/// True when extracted Thai shows heavy cluster fragmentation — many
+/// combining marks orphaned behind a space, which a correct text layer
+/// never produces. It signals a broken font / `ToUnicode` map whose
+/// character mapping (not just spacing) can't be trusted, so the caller
+/// should prefer the vision path over the text. Computed on the *raw*
+/// pdftotext output, before `normalize_thai_spacing` hides the evidence.
+fn thai_looks_garbled(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let thai_total = chars.iter().filter(|c| is_thai(**c)).count();
+    if thai_total < fallback::MIN_THAI_FOR_GARBLE_CHECK {
+        return false;
+    }
+    let orphan_marks = chars
+        .windows(3)
+        .filter(|w| w[1] == ' ' && is_thai(w[0]) && is_thai_trailing_mark(w[2]))
+        .count();
+    orphan_marks >= fallback::GARBLE_ORPHAN_MARKS
+        && (orphan_marks as f32) / (thai_total as f32) > fallback::GARBLE_ORPHAN_RATIO
+}
+
+/// Text-first extraction with Thai post-processing applied. Used by the
+/// direct `call` path. The multimodal path calls `extract_text_raw`
+/// itself so its garble check can see the unrepaired output, then
+/// normalizes only when it keeps the text.
 async fn extract_text(
+    validated: &std::path::Path,
+    first: Option<u32>,
+    last: Option<u32>,
+) -> Result<String> {
+    let raw = extract_text_raw(validated, first, last).await?;
+    Ok(normalize_thai_spacing(&raw))
+}
+
+/// Run pdftotext and return the raw extracted text. Shared between
+/// `extract_text` and the multimodal entry's text-first path.
+async fn extract_text_raw(
     validated: &std::path::Path,
     first: Option<u32>,
     last: Option<u32>,
@@ -567,5 +665,41 @@ mod tests {
                 panic!("text PDF should not trigger image fallback")
             }
         }
+    }
+
+    #[test]
+    fn normalize_thai_reattaches_orphaned_marks() {
+        // pdftotext -layout orphans combining marks behind spaces;
+        // re-attaching them is unambiguous (a mark can't start a word).
+        assert_eq!(normalize_thai_spacing("ผู ้"), "ผู้"); // orphaned tone over vowel
+        assert_eq!(normalize_thai_spacing("ษ ัท"), "ษัท"); // orphaned mai-han-akat
+        assert_eq!(normalize_thai_spacing("ก ำหนด"), "กำหนด"); // orphaned sara-am
+        assert_eq!(normalize_thai_spacing("ปฏิบ ัติ"), "ปฏิบัติ");
+        assert_eq!(normalize_thai_spacing("ษ ั ้"), "ษั้"); // stacked marks, two passes
+    }
+
+    #[test]
+    fn normalize_thai_never_merges_real_words() {
+        // Non-Thai untouched.
+        assert_eq!(normalize_thai_spacing("Hello world"), "Hello world");
+        // A real phrase space — the next word starts with a consonant, not
+        // an orphaned mark — must survive, even though "เวลา" ends in a
+        // vowel. This is the case a "mark + space + consonant" rule would
+        // wrongly merge.
+        assert_eq!(normalize_thai_spacing("เวลา ทำงาน"), "เวลา ทำงาน");
+        assert_eq!(normalize_thai_spacing("คน รถ"), "คน รถ");
+    }
+
+    #[test]
+    fn garbled_detector_flags_fragmented_thai_not_clean() {
+        // Clean Thai prose: no marks orphaned behind spaces → trustworthy.
+        let clean = "พนักงานทุกคนมีสิทธิได้รับค่าจ้างตามที่กฎหมายกำหนดไว้อย่างเป็นธรรมเสมอ";
+        assert!(!thai_looks_garbled(clean));
+
+        // Heavily fragmented Thai (≥6 marks orphaned behind spaces) → the
+        // text layer is untrustworthy, so route to the vision path.
+        let garbled = "บริ ษ ัท ผู ้ ปฏิบ ัติ หน้ า ค่ าจ้าง ก ำหนด ท ำงาน จ ำเป็น \
+                       สิ ทธิ พนักงานทุกคนในองค์กร";
+        assert!(thai_looks_garbled(garbled));
     }
 }

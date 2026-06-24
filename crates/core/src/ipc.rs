@@ -3821,6 +3821,132 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Upload a dropped file (Files-tab drag-and-drop). Content arrives
+        // base64-encoded so arbitrary binary (images, PDFs, …) round-trips
+        // intact — `file_write` is text-only. Sandbox-checked; refuses to
+        // clobber an existing name, like `file_create`. Echoes `id` so the
+        // frontend can match the result to its per-upload listener.
+        "file_upload" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let data_b64 = msg.get("data").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
+            {
+                Ok(path) => {
+                    if path.exists() {
+                        (false, Some("a file with that name already exists".into()))
+                    } else {
+                        use base64::Engine;
+                        match base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                            Ok(bytes) => {
+                                let parent_made = match path.parent() {
+                                    Some(parent) => std::fs::create_dir_all(parent)
+                                        .map_err(|e| format!("mkdir parent: {e}")),
+                                    None => Ok(()),
+                                };
+                                match parent_made {
+                                    Err(e) => (false, Some(e)),
+                                    Ok(()) => match std::fs::write(&path, &bytes) {
+                                        Ok(()) => (true, None),
+                                        Err(e) => (false, Some(format!("write: {e}"))),
+                                    },
+                                }
+                            }
+                            Err(e) => (false, Some(format!("decode: {e}"))),
+                        }
+                    }
+                }
+                Err(e) => (false, Some(format!("access denied: {e}"))),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "file_upload_result",
+                    "id": id,
+                    "path": raw_path,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+        }
+
+        // Delete a file or folder (Files-tab entry context menu). Sandbox-
+        // checked; folders are removed recursively. Echoes `id` so the
+        // frontend matches the result to its per-delete listener.
+        "file_delete" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
+            {
+                Ok(path) => {
+                    if !path.exists() {
+                        (false, Some("path no longer exists".into()))
+                    } else {
+                        let res = if path.is_dir() {
+                            std::fs::remove_dir_all(&path)
+                        } else {
+                            std::fs::remove_file(&path)
+                        };
+                        match res {
+                            Ok(()) => (true, None),
+                            Err(e) => (false, Some(format!("delete: {e}"))),
+                        }
+                    }
+                }
+                Err(e) => (false, Some(format!("access denied: {e}"))),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "file_delete_result",
+                    "id": id,
+                    "path": raw_path,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+        }
+
+        // Rename / move a file or folder (Files-tab entry context menu).
+        // Both endpoints are sandbox-checked; refuses to clobber an existing
+        // destination. Echoes `id` + the new path for the frontend listener.
+        "file_rename" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let from_raw = msg.get("from").and_then(|v| v.as_str()).unwrap_or("");
+            let to_raw = msg.get("to").and_then(|v| v.as_str()).unwrap_or("");
+            let (ok, error): (bool, Option<String>) = match (
+                crate::sandbox::Sandbox::check(from_raw),
+                crate::sandbox::Sandbox::check(to_raw),
+            ) {
+                (Ok(from), Ok(to)) => {
+                    if !from.exists() {
+                        (false, Some("source no longer exists".into()))
+                    } else if to.exists() {
+                        (
+                            false,
+                            Some("a file or folder with that name already exists".into()),
+                        )
+                    } else {
+                        match std::fs::rename(&from, &to) {
+                            Ok(()) => (true, None),
+                            Err(e) => (false, Some(format!("rename: {e}"))),
+                        }
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => (false, Some(format!("access denied: {e}"))),
+            };
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "file_rename_result",
+                    "id": id,
+                    "to": to_raw,
+                    "ok": ok,
+                    "error": error,
+                })
+                .to_string(),
+            );
+        }
+
         // Create a new directory (Files-tab explorer context menu).
         // Sandbox-checked; refuses to clobber an existing path.
         "file_mkdir" => {
