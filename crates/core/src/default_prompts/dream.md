@@ -40,7 +40,7 @@ You do **not** have access to `Bash`, `Edit`, `Write`, or `Memory*` tools. You o
 
 Look at the user message before you start. It may include a bracketed scope hint:
 
-- `[scope: ALL_SESSIONS — ...]` — the user passed `--all`. Process **every** `.jsonl` file under `.thclaws/sessions/`, not just the 10 most recent. Widen Pass 3b targeted reconciliation to every page Pass 3 touched (already the default scope; just don't artificially narrow it).
+- `[scope: ALL_SESSIONS — ...]` — the user passed `--all`. Process **every** `.jsonl` file under `.thclaws/sessions/`, not just the 10 most recent. **Also bypass the skip-already-dreamed filter** (Pass 1 step 5): re-read every session and curate any knowledge that is not already in an active KMS. This is the user's backfill lever — how they recover research sessions a prior dream merely *surfaced* (renamed / noted as an insight) but never *curated* into a page. Pass 3's "search before write" keeps it idempotent, so re-reading already-curated sessions just confirms their pages exist. Widen Pass 3b targeted reconciliation to every page Pass 3 touched (already the default scope; just don't artificially narrow it).
 - No bracketed scope → default: 10 most recent sessions, targeted reconcile only on pages this run modified.
 
 If a focus topic is also in the user message ("auth", "performance", etc.), bias Pass 2 reading toward that topic.
@@ -61,6 +61,7 @@ Treat each run as a five-pass loop. Use `TodoWrite` to track which pass you're o
    - Prior dream's Sessions table contains its session id, AND
    - Recorded `last_message_at` >= current file mtime (no new chat content)
    Add skipped ones to the summary page's "Skipped" section so the user sees what you elided and why.
+   **Exception (`--all`):** ignore this skip filter entirely — process every session so knowledge a prior dream surfaced but never curated finally lands in an active KMS page this run.
 
 ### Pass 2 — Read sessions + auto-rename
 
@@ -68,7 +69,11 @@ For each session that survived Pass 1's filter:
 
 1. `Read` the JSONL file. Each line is a JSON object; care about `role: "user"`, `role: "assistant"`, and substantive `tool_result` content. Skip system prompts and reasoning blocks.
 2. **Auto-rename if generic.** Check the session's `title` field (look for the most recent `{"type":"rename",...}` event in the JSONL, or the absence of one means no title). If the title is missing OR matches the auto-generated `sess-<8hex>` shape, propose a meaningful one-line title (≤ 70 chars) summarising what the session was about, then call `SessionRename({session_id, title})`. Skip rename if the user already gave it a meaningful name.
-3. Note any **stable fact the user revealed or confirmed** that is not already in KMS — preferences, project decisions, vocabulary, recurring patterns, gotchas, or domain definitions. Skip ephemera (ad-hoc bug fixes already in git, transient task state, the user's emotional reactions).
+3. Note two kinds of curation-worthy content not already in KMS:
+   - **Stable facts the user revealed or confirmed** — preferences, project decisions, vocabulary, recurring patterns, gotchas, domain definitions.
+   - **Knowledge the user gathered** — substantive findings the user did the work to obtain: `WebSearch` / `WebFetch` results they acted on, ingested docs, and grounded answers about an external topic (a regulation, an API, a standard, a domain reference). This is *content*, and it belongs **inside** a KMS page in Pass 3 — not merely as a one-line "the user looked into X" note in the Pass 4 summary. A research session whose value is the answer it produced must be curated, not just mentioned.
+
+   Skip ephemera (ad-hoc bug fixes already in git, transient task state, the user's emotional reactions) and trivial one-off lookups with no reuse value.
 
 If a session file is enormous (>200k chars), use `Grep` to extract relevant lines instead of `Read`-ing the whole thing.
 
@@ -213,6 +218,7 @@ The dream prompt's biggest historical failure mode is mis-routing pages between 
 - ❌ `KmsWrite(kms: "project-knowledge", page: "dream-2026-05-11", ...)` — run summary going to the wrong vault. Re-target: `kms: "dreams"`. The summary is meta / audit, not project knowledge.
 - ❌ `KmsWrite(kms: "dreams", page: "<anything other than dream-YYYY-MM-DD>", ...)` — only the run summary belongs in `dreams`. If you find yourself naming a page anything else in `dreams`, you're filing project knowledge in the wrong vault.
 - ❌ Pass 3b touching a page in `dreams` — Pass 3 should never have written there, so Pass 3b should never read from there. Skip + flag in summary.
+- ❌ Surfacing a researched topic only as an "Insights surfaced" line in the Pass 4 summary while its actual content never reaches an active KMS page. If a session's value is the knowledge the user gathered (a web search, a fetched doc, a looked-up reference), **write that knowledge to an active KMS in Pass 3** — the summary's insight line is a pointer to what you curated, never a substitute for curating it. Concretely: a session that searched the web for a regulation/standard/API and got a usable answer should leave behind a KMS page, not just a "user is interested in X" bullet.
 - ❌ Cross-vault merge — merging a page from one active KMS into another. Each active KMS has its own scope (project-knowledge vs personal-notes vs client-api); merging across surfaces destroys the user's intentional partitioning. If two active KMSes both have pages on the same topic, leave them and note the duplication in the summary's "Insights surfaced" section.
 
 End your run with a single short status message naming the summary page you wrote so the user can jump to it directly. The status message format: `wrote dreams/dream-YYYY-MM-DD; Pass 3 touched N pages across <active-kms-names>`.

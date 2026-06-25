@@ -511,7 +511,7 @@ pub fn ingest(
     let alias = sanitize_alias(&raw_alias);
     if alias.is_empty() {
         return Err(Error::Tool(format!(
-            "alias '{raw_alias}' sanitises to empty — use [A-Za-z0-9_-] characters"
+            "alias '{raw_alias}' sanitises to empty — use letters, numbers, '-' or '_'"
         )));
     }
     if RESERVED_PAGE_STEMS
@@ -853,10 +853,24 @@ pub fn sanitize_alias(raw: &str) -> String {
         .trim()
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            if c == '-' || c == '_' {
                 c
-            } else {
+            } else if c.is_ascii() {
+                // ASCII: keep alphanumerics, fold everything else (spaces,
+                // path separators, punctuation, the Windows-reserved set) to
+                // '_'. The '.' folds too so it can't split the stem/extension.
+                if c.is_ascii_alphanumeric() {
+                    c
+                } else {
+                    '_'
+                }
+            } else if c.is_whitespace() || c.is_control() {
                 '_'
+            } else {
+                // Non-ASCII letters and combining marks (Thai, CJK, …) are
+                // valid in UTF-8 filenames — keep them so non-Latin names
+                // survive instead of sanitising to empty.
+                c
             }
         })
         .collect();
@@ -4169,6 +4183,32 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_alias_keeps_thai_and_other_unicode() {
+        // The reported bug: an all-Thai name used to fold to empty.
+        let thai = "ข้อบังคับเกี่ยวกับการทำงาน";
+        assert_eq!(sanitize_alias(thai), thai);
+        // Combining tone marks/vowels are preserved, not stripped.
+        assert_eq!(sanitize_alias("ภาษาไทย"), "ภาษาไทย");
+        assert_eq!(sanitize_alias("日本語"), "日本語");
+    }
+
+    #[test]
+    fn sanitize_alias_folds_unsafe_ascii_and_whitespace() {
+        assert_eq!(sanitize_alias("hello world"), "hello_world");
+        assert_eq!(sanitize_alias("a/b\\c:d"), "a_b_c_d");
+        assert_eq!(sanitize_alias("notes.md"), "notes_md");
+        assert_eq!(sanitize_alias("__trim__"), "trim");
+        // Thai with trailing spaces still trims and survives.
+        assert_eq!(sanitize_alias("  รายงาน  "), "รายงาน");
+    }
+
+    #[test]
+    fn sanitize_alias_empty_only_for_no_word_chars() {
+        assert_eq!(sanitize_alias("   "), "");
+        assert_eq!(sanitize_alias("///"), "");
+    }
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,

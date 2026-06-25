@@ -1,8 +1,7 @@
-use super::{req_str, Tool};
+use super::{read_walker, req_str, targets_hidden_path, Tool};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use globset::Glob;
-use ignore::WalkBuilder;
 use serde_json::{json, Value};
 
 pub struct GrepTool;
@@ -40,6 +39,10 @@ impl Tool for GrepTool {
         let base = crate::sandbox::Sandbox::check(raw_base)?;
         let glob_filter = input.get("glob").and_then(Value::as_str);
 
+        // Explicit dot-path target (e.g. grep inside `.thclaws/sessions/`)
+        // → descend past the default hidden/gitignore filters.
+        let include_hidden = targets_hidden_path([raw_base, glob_filter.unwrap_or("")]);
+
         let re = regex::Regex::new(pattern).map_err(|e| Error::Tool(format!("regex: {e}")))?;
 
         let glob_matcher = glob_filter
@@ -48,7 +51,7 @@ impl Tool for GrepTool {
             .map_err(|e| Error::Tool(format!("glob filter: {e}")))?;
 
         let mut results: Vec<String> = Vec::new();
-        let walker = WalkBuilder::new(&base).build();
+        let walker = read_walker(&base, include_hidden).build();
 
         for entry in walker.flatten() {
             let path = entry.path();

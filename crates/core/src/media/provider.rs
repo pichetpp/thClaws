@@ -200,7 +200,7 @@ pub fn resolve_endpoint(
         })
         .ok_or_else(|| {
             Error::Tool(format!(
-                "no API key for image generation — set one of {native_key_vars:?} or the thClaws Gateway key (THCLAWS_GATEWAY_API_KEY)"
+                "no API key for image generation — set one of {native_key_vars:?}, or enable the thClaws Gateway (sign in to thClaws.cloud, add a `gateway` key, or set THCLAWS_GATEWAY_API_KEY)"
             ))
         })
 }
@@ -228,17 +228,15 @@ fn resolve_native_key(vars: &[&str]) -> Option<String> {
     None
 }
 
+/// Gateway access key, resolved from the SAME three sources the LLM
+/// gateway uses (`THCLAWS_GATEWAY_API_KEY` env → `gateway` keychain
+/// bundle → thClaws.cloud CLI token). Previously this read only the env
+/// var, so cloud-login / keychain gateway users — whose chat works fine —
+/// hit "no API key" on TextToImage even though they had gateway access.
 fn gateway_key() -> Option<String> {
-    std::env::var("THCLAWS_GATEWAY_API_KEY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    crate::providers::thclaws_gateway::resolve_access_key()
 }
 
 fn gateway_base() -> String {
-    std::env::var("THCLAWS_GATEWAY_BASE_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| crate::providers::thclaws_gateway::GATEWAY_BASE_URL.to_string())
+    crate::providers::thclaws_gateway::resolve_base_url()
 }

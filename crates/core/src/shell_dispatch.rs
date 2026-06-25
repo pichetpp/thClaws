@@ -3174,9 +3174,10 @@ pub async fn dispatch(
                     emit(
                         events_tx,
                         format!(
-                            "/schedule run '{id_for_msg}': exit={exit} duration={}.{:03}s log={}",
+                            "/schedule run '{id_for_msg}': exit={exit} duration={}.{:03}s → result={} (log={})",
                             outcome.duration.as_secs(),
                             outcome.duration.subsec_millis(),
+                            outcome.result_path.display(),
                             outcome.log_path.display(),
                         ),
                     );
@@ -4682,21 +4683,11 @@ pub(crate) fn compose_kms_reconcile_prompt(name: &str, focus: Option<&str>, appl
 // their data-owning modules (schedule_presets / kms) in M6.38.3. See
 // the comment above `format_lint_report`'s removal for rationale.
 
-/// M6.25 BUG #4: alias-sanitizer used by /kms file-answer. Same rules
-/// as `kms::sanitize_alias` (which is private to that module).
+/// M6.25 BUG #4: alias-sanitizer used by /kms file-answer. Delegates to
+/// the canonical `kms::sanitize_alias` so Thai/non-Latin titles survive
+/// here too (they used to fold to empty).
 fn sanitize_alias_for_dispatch(raw: &str) -> String {
-    let cleaned: String = raw
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    cleaned.trim_matches('_').to_string()
+    crate::kms::sanitize_alias(raw)
 }
 
 /// Same shape as [`broadcast_kms_update`], for the MCP-server list. Read

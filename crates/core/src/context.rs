@@ -95,6 +95,20 @@ impl ProjectContext {
             parts.push(base.trim().to_string());
         }
 
+        // Anchor the model in real time. Without a current-date signal the
+        // model treats its training cutoff as "now" and answers
+        // "latest"/"recent"/news queries from stale memory (the scheduled
+        // "latest AI news → year-old results" bug). State the date AND
+        // tell it to search for anything time-sensitive.
+        parts.push(format!(
+            "# Environment\nToday's date: {} (UTC).\nYour training data has a cutoff, so it is \
+             stale for anything time-sensitive — \"latest\", \"recent\", \"current\", news, \
+             prices, releases, versions, who-holds-an-office. For those, use WebSearch / \
+             WebFetch (or the browser tools) to get up-to-date information; do NOT answer from \
+             memory.",
+            crate::usage::today_str()
+        ));
+
         parts.push(format!("# Working directory\n{}", self.cwd.display()));
 
         if let Some(git) = &self.git {
@@ -747,6 +761,10 @@ mod tests {
             project_instructions: None,
         };
         let p = ctx.build_system_prompt("");
-        assert!(p.starts_with("# Working directory"));
+        // Empty base leaves no leading blank — the prompt starts cleanly
+        // with the first real section (the date-anchored environment).
+        assert!(p.starts_with("# Environment"));
+        assert!(p.contains("Today's date:"));
+        assert!(p.contains("# Working directory"));
     }
 }

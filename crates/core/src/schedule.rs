@@ -4,11 +4,13 @@
 //! recurring jobs. Each job carries its own working directory, prompt,
 //! optional model/iteration overrides, and a standard 5-field cron
 //! expression. `run_once` fires a single job synchronously by spawning
-//! `thclaws --print "<prompt>"` with `current_dir(<cwd>)`, capturing
-//! stdout+stderr to a per-run log file under
-//! `~/.local/share/thclaws/logs/<id>/<ts>.log`, and recording the exit
-//! code + duration back into the schedule entry's `last_run` /
-//! `last_exit` fields.
+//! `thclaws --print "<prompt>"` with `current_dir(<cwd>)`. The job's
+//! clean output (stdout — the agent's final answer) is auto-saved into
+//! the WORKSPACE at `<cwd>/.thclaws/schedule/<id>/<ts>.md` so the user
+//! can open the result in the Files tab; stderr (the MCP banner,
+//! warnings, errors) goes to a separate diagnostic log under
+//! `~/.local/share/thclaws/logs/<id>/<ts>.log`. The exit code + duration
+//! are recorded back into the schedule entry's `last_run` / `last_exit`.
 //!
 //! Step 1 is intentionally **without an in-process scheduler** — the
 //! `run` subcommand fires a single job by id, so users can wire it
@@ -332,6 +334,13 @@ fn normalize_cron(expr: &str) -> String {
 /// killed by the timeout enforcer or never produced a status.
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
+    /// The run's clean output (the agent's final answer) — captured
+    /// stdout, written into the workspace at
+    /// `<cwd>/.thclaws/schedule/<id>/<ts>.md` so the user can open it in
+    /// the Files tab without digging into `~/.local/share`.
+    pub result_path: PathBuf,
+    /// Diagnostics for this run (captured stderr: MCP banner, warnings,
+    /// errors) under `~/.local/share/thclaws/logs/<id>/<ts>.log`.
     pub log_path: PathBuf,
     pub exit_code: Option<i32>,
     pub duration: Duration,
@@ -413,18 +422,29 @@ fn spawn_job(schedule: &Schedule, binary_path: &Path) -> Result<RunOutcome> {
     let ts = Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string();
     let log_path = log_dir.join(format!("{ts}.log"));
     let log_file = std::fs::File::create(&log_path)?;
-    // stderr piped into the same file as stdout so the run log is
-    // a single linear trace; matches what a user would see in the
-    // terminal.
-    let log_file_for_err = log_file.try_clone()?;
+
+    // The RESULT (stdout = the agent's final answer; print mode already
+    // suppresses ANSI/thinking when not a TTY) is auto-saved into the
+    // WORKSPACE so the user can view it in the Files tab regardless of
+    // what the prompt was — no need to ask the agent to "save to a file".
+    // Diagnostics (stderr: the MCP banner, warnings, errors) go to the
+    // separate log under ~/.local/share so the result file stays clean.
+    let result_dir = schedule
+        .cwd
+        .join(".thclaws")
+        .join("schedule")
+        .join(&schedule.id);
+    std::fs::create_dir_all(&result_dir)?;
+    let result_path = result_dir.join(format!("{ts}.md"));
+    let result_file = std::fs::File::create(&result_path)?;
 
     let mut cmd = Command::new(binary_path);
     cmd.arg("--print")
         .arg(&schedule.prompt)
         .current_dir(&schedule.cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_for_err));
+        .stdout(Stdio::from(result_file))
+        .stderr(Stdio::from(log_file));
     if let Some(ref m) = schedule.model {
         cmd.arg("--model").arg(m);
     }
@@ -463,6 +483,7 @@ fn spawn_job(schedule: &Schedule, binary_path: &Path) -> Result<RunOutcome> {
     };
 
     Ok(RunOutcome {
+        result_path,
         log_path,
         exit_code,
         duration: started.elapsed(),
@@ -697,9 +718,10 @@ impl InProcessScheduler {
                             .unwrap_or_else(|| "(timeout)".to_string());
                         eprintln!(
                             "\x1b[36m[schedule] '{id_for_task}' fired \
-                             — exit={exit} duration={}.{:03}s log={}\x1b[0m",
+                             — exit={exit} duration={}.{:03}s → result={} (log={})\x1b[0m",
                             outcome.duration.as_secs(),
                             outcome.duration.subsec_millis(),
+                            outcome.result_path.display(),
                             outcome.log_path.display(),
                         );
                     }
@@ -1452,9 +1474,10 @@ impl WatchManager {
                                     .map(|c| c.to_string())
                                     .unwrap_or_else(|| "(timeout)".into());
                                 eprintln!(
-                                    "\x1b[36m[watch] '{id_for_blocking}' done — exit={exit} duration={}.{:03}s log={}\x1b[0m",
+                                    "\x1b[36m[watch] '{id_for_blocking}' done — exit={exit} duration={}.{:03}s → result={} (log={})\x1b[0m",
                                     o.duration.as_secs(),
                                     o.duration.subsec_millis(),
+                                    o.result_path.display(),
                                     o.log_path.display(),
                                 );
                             }
@@ -1787,16 +1810,25 @@ mod tests {
         let outcome = spawn_job(&schedule, &fake).unwrap();
         assert_eq!(outcome.exit_code, Some(7));
         assert!(!outcome.timed_out);
-        let log = std::fs::read_to_string(&outcome.log_path).unwrap();
+        // The fake echoes pwd + the prompt to STDOUT, which is now the
+        // auto-saved RESULT file in the workspace (.thclaws/schedule/...).
+        let result = std::fs::read_to_string(&outcome.result_path).unwrap();
+        assert!(
+            outcome
+                .result_path
+                .starts_with(work.path().join(".thclaws").join("schedule")),
+            "result must be saved in the workspace; got: {}",
+            outcome.result_path.display()
+        );
         // pwd in the spawned shell should match `work.path()` after
         // canonicalization (macOS adds `/private` to `/var/folders/...`).
         let canonical = work.path().canonicalize().unwrap();
         assert!(
-            log.contains(canonical.to_string_lossy().trim_end_matches('/'))
-                || log.contains(work.path().to_string_lossy().trim_end_matches('/')),
-            "log should contain cwd; got: {log}"
+            result.contains(canonical.to_string_lossy().trim_end_matches('/'))
+                || result.contains(work.path().to_string_lossy().trim_end_matches('/')),
+            "result should contain cwd; got: {result}"
         );
-        assert!(log.contains("prompt-was: hello there"));
+        assert!(result.contains("prompt-was: hello there"));
 
         // Cleanup the schedule's log directory we just created under
         // the real ~/.local/share/thclaws/logs/<id>/.

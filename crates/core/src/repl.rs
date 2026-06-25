@@ -4500,15 +4500,24 @@ async fn load_mcp_servers(
     let mut clients: Vec<Arc<McpClient>> = Vec::new();
     let mut summary: Vec<(String, Vec<String>)> = Vec::new();
 
+    // MCP load progress is diagnostics, not result — emit on STDERR so a
+    // piped or scheduler-captured STDOUT stays clean (just the agent's
+    // answer → the workspace result file). ANSI only when stderr is a TTY.
+    let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr())
+        && std::env::var_os("NO_COLOR").is_none();
+    let dim = if use_color { COLOR_DIM } else { "" };
+    let warn = if use_color { COLOR_YELLOW } else { "" };
+    let reset = if use_color { COLOR_RESET } else { "" };
+
     for cfg in servers {
-        print!("{COLOR_DIM}[mcp] {} … {COLOR_RESET}", cfg.name);
-        let _ = std::io::stdout().flush();
+        eprint!("{dim}[mcp] {} … {reset}", cfg.name);
+        let _ = std::io::stderr().flush();
 
         match McpClient::spawn(cfg.clone()).await {
             Ok(client) => match client.list_tools().await {
                 Ok(tools) => {
                     let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-                    println!("{COLOR_DIM}{} tool(s){COLOR_RESET}", tools.len());
+                    eprintln!("{dim}{} tool(s){reset}", tools.len());
                     for info in tools {
                         let tool = McpTool::new(client.clone(), info);
                         registry.register(Arc::new(tool));
@@ -4517,11 +4526,11 @@ async fn load_mcp_servers(
                     clients.push(client);
                 }
                 Err(e) => {
-                    println!("{COLOR_YELLOW}list_tools failed: {e}{COLOR_RESET}");
+                    eprintln!("{warn}list_tools failed: {e}{reset}");
                 }
             },
             Err(e) => {
-                println!("{COLOR_YELLOW}spawn failed: {e}{COLOR_RESET}");
+                eprintln!("{warn}spawn failed: {e}{reset}");
             }
         }
     }
@@ -4698,12 +4707,34 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
         None,
     )));
 
+    // Diagnostic run header → STDERR (the scheduler captures stderr into
+    // the run log; interactive `-p` shows it in the terminal). Records the
+    // model + the tools the model can actually see this run — so a
+    // scheduled log answers "which model? was WebSearch even available?"
+    // at a glance. stdout / the result file stays the clean answer.
+    {
+        let mut tool_names = tool_registry.names();
+        tool_names.sort_unstable();
+        eprintln!(
+            "[run] model={} · permissions={} · {} tools: {}",
+            config.model,
+            config.permissions,
+            tool_names.len(),
+            tool_names.join(", "),
+        );
+    }
+
     let agent = Agent::new(provider, tool_registry, config.model.clone(), system)
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
         .with_permission_mode(perm_mode);
 
     let turn_start = std::time::Instant::now();
+    // Live reasoning is shown only on a TTY. When piped (`-p | jq`) or
+    // captured by the scheduler into a run log, streaming the model's
+    // thinking onto stdout buries the actual answer and corrupts
+    // downstream parsers — so the captured output is just the final text.
+    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let mut stream = Box::pin(agent.run_turn(prompt.to_string()));
     let mut last_was_thinking = false;
     while let Some(ev) = stream.next().await {
@@ -4719,20 +4750,37 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
             Ok(AgentEvent::Thinking(s)) => {
                 // Reasoning models (DeepSeek v4/r1, OpenAI o-series, NVIDIA NIM
                 // glm4.7, …) emit reasoning_content before the final answer.
-                // Print dim-italic so it's distinguishable from the answer in
-                // -p / scripted output, but still visible (otherwise the user
-                // sees nothing for many seconds while the model thinks).
-                print!("\x1b[2;3m{s}\x1b[0m");
-                last_was_thinking = true;
-                let _ = std::io::stdout().flush();
+                // On a TTY, print dim-italic so the user sees progress while
+                // the model thinks. When piped / captured (scheduler log),
+                // skip it — the consumer wants the answer, not the reasoning.
+                if stdout_is_tty {
+                    print!("\x1b[2;3m{s}\x1b[0m");
+                    last_was_thinking = true;
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
+                // Trace tool calls to STDERR so the scheduler's run log
+                // shows what the agent actually did (e.g. did it call
+                // WebSearch?) without polluting the result on stdout. A
+                // short, char-safe input preview tags each call.
+                if last_was_thinking {
+                    println!();
+                    last_was_thinking = false;
+                }
+                let raw = input.to_string();
+                let preview: String = raw.chars().take(140).collect();
+                let ellipsis = if raw.chars().count() > 140 { "…" } else { "" };
+                eprintln!("[tool] {name} {preview}{ellipsis}");
             }
             Ok(AgentEvent::Done { usage, .. }) => {
                 println!();
-                // Issue #69: --verbose surfaces the same per-turn token
-                // line the REPL prints, but to stderr so piped consumers
-                // (`thclaws -p ... | jq`) get clean stdout. Default off
-                // — print mode stays scriptable as before.
-                if verbose {
+                // Issue #69: the per-turn token line goes to stderr so
+                // piped consumers (`thclaws -p ... | jq`) get clean stdout.
+                // Emitted on --verbose OR whenever stdout isn't a TTY
+                // (piped / scheduler-captured), so a scheduled run log
+                // always ends with a token + duration footer.
+                if verbose || !stdout_is_tty {
                     let cache_info = match (
                         usage.cache_creation_input_tokens,
                         usage.cache_read_input_tokens,
@@ -9530,19 +9578,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         );
                         continue;
                     };
-                    let stem: String = title
-                        .trim()
-                        .chars()
-                        .map(|c| {
-                            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                                c
-                            } else {
-                                '_'
-                            }
-                        })
-                        .collect::<String>()
-                        .trim_matches('_')
-                        .to_string();
+                    let stem = crate::kms::sanitize_alias(&title);
                     if stem.is_empty() {
                         println!(
                             "{COLOR_YELLOW}title sanitises to empty — pick another{COLOR_RESET}"
@@ -9952,9 +9988,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 .unwrap_or_else(|| "(timeout)".into());
                             println!(
                                 "{COLOR_DIM}/schedule run '{id_for_print}': exit={exit} \
-                                 duration={}.{:03}s log={}{COLOR_RESET}",
+                                 duration={}.{:03}s → result={} (log={}){COLOR_RESET}",
                                 outcome.duration.as_secs(),
                                 outcome.duration.subsec_millis(),
+                                outcome.result_path.display(),
                                 outcome.log_path.display(),
                             );
                         }

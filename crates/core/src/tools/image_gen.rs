@@ -12,18 +12,18 @@
 //! from OpenAI-only / gateway users) — each provider validates its own
 //! credentials at call time and returns a clear error.
 //!
-//! Output: bytes are written to `output/img-<ts>-<sha8>.<ext>` and
-//! returned as a multimodal `ToolResultContent::Blocks` (text summary +
-//! inline image), so both vision and non-vision models can use the
-//! result.
+//! Output: bytes are written to `output/img-<ts>-<sha8>.<ext>` and the
+//! tool returns a **text-only** result (the path + a checksum). A
+//! generated image is an artifact for the user, not input the model
+//! reasons over, so the pixels are never shipped back to the LLM — see
+//! [`build_image_result`] for why (token cost + the text-only-model 400).
 
 use crate::error::{Error, Result};
 use crate::media::provider::{ImageRequest, InputImage};
 use crate::media::{registry, save_image, sniff_ext};
 use crate::tools::{req_str, Tool};
-use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
+use crate::types::ToolResultContent;
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -35,12 +35,24 @@ fn opt(input: &Value, key: &str) -> String {
         .to_string()
 }
 
-/// Build the multimodal result: a text summary line (what compaction +
-/// non-vision models see) plus the inline image (pixels for vision
-/// models).
-fn build_image_result(bytes: Vec<u8>, path: &std::path::Path) -> ToolResultContent {
-    let d = Sha256::digest(&bytes);
-    let summary = format!(
+/// Build the tool result for a generated image. **Text-only by design.**
+///
+/// A generated image is an output artifact *for the user* — it's written
+/// to disk and the GUI shows it from that path. The model does not need
+/// the pixels back to do its job (it just reports "created your image at
+/// <path>"), so we never ship the base64 blob into history — not even for
+/// vision models. That:
+///   - saves the multi-MB token cost of round-tripping the image, and
+///   - avoids the hard 400 ("unknown variant `image_url`") that a
+///     generated image stuck in history raises on EVERY later turn once
+///     the active chat model is text-only (e.g. deepseek via the
+///     gateway) — which otherwise dead-ends the whole session.
+///
+/// A workflow that genuinely needs the model to inspect the result can
+/// `Read` the returned path with a vision-capable model.
+fn build_image_result(bytes: &[u8], path: &std::path::Path) -> ToolResultContent {
+    let d = Sha256::digest(bytes);
+    ToolResultContent::Text(format!(
         "Wrote {} ({} bytes, sha256-4={:02x}{:02x}{:02x}{:02x})",
         path.display(),
         bytes.len(),
@@ -48,27 +60,7 @@ fn build_image_result(bytes: Vec<u8>, path: &std::path::Path) -> ToolResultConte
         d[1],
         d[2],
         d[3],
-    );
-    let media_type = match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        _ => "image/png",
-    };
-    ToolResultContent::Blocks(vec![
-        ToolResultBlock::Text { text: summary },
-        ToolResultBlock::Image {
-            source: ImageSource::Base64 {
-                media_type: media_type.into(),
-                data: B64.encode(&bytes),
-            },
-        },
-    ])
+    ))
 }
 
 const MODEL_DESC: &str = "Which image model. Provider is inferred from the model. \
@@ -148,7 +140,7 @@ impl Tool for TextToImageTool {
         };
         let out = provider.generate(&req).await?;
         let path = save_image(&out.bytes, sniff_ext(&out.bytes))?;
-        Ok(build_image_result(out.bytes, &path))
+        Ok(build_image_result(&out.bytes, &path))
     }
 }
 
@@ -242,7 +234,7 @@ impl Tool for ImageToImageTool {
         };
         let out = provider.generate(&req).await?;
         let out_path = save_image(&out.bytes, sniff_ext(&out.bytes))?;
-        Ok(build_image_result(out.bytes, &out_path))
+        Ok(build_image_result(&out.bytes, &out_path))
     }
 }
 

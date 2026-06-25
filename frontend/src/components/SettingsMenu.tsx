@@ -14,6 +14,9 @@ import {
   MessagesSquare,
   ChevronRight,
   FileText,
+  Image as ImageIcon,
+  SquareTerminal,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useTheme, type ThemeMode } from "../hooks/useTheme";
 import { send, subscribe } from "../hooks/useIPC";
@@ -25,6 +28,76 @@ type Choice =
   | "line-connect"
   | "telegram-connect"
   | "messenger-connect";
+
+/// One opt-in feature-flag row (Agent Teams / Media tools / Shell tab).
+/// Writes the flag to `.thclaws/settings.json` via its IPC set message.
+/// `enabled === null` while the value is still loading (button disabled).
+function FeatureFlagRow({
+  icon,
+  label,
+  desc,
+  enabled,
+  dirty,
+  onToggle,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  desc: string;
+  enabled: boolean | null;
+  dirty: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      className="sm-row w-full text-left px-3 py-1.5 flex items-start gap-2"
+      style={{ color: "var(--text-primary)", fontSize: "12px" }}
+      disabled={enabled === null}
+    >
+      <span
+        className="sm-subtle"
+        style={{ color: "var(--text-secondary)", paddingTop: "1px" }}
+      >
+        {icon}
+      </span>
+      <div className="flex-1">
+        <div className="flex items-center gap-2">
+          <span>{label}</span>
+          <span
+            style={{
+              fontSize: "10px",
+              padding: "1px 6px",
+              borderRadius: "10px",
+              background:
+                enabled === true ? "var(--accent-dim)" : "var(--bg-tertiary)",
+              color: enabled === true ? "#fff" : "var(--text-secondary)",
+              border: enabled === true ? "none" : "1px solid var(--border)",
+            }}
+          >
+            {enabled === null ? "…" : enabled ? "on" : "off"}
+          </span>
+        </div>
+        <div
+          className="sm-subtle"
+          style={{ color: "var(--text-secondary)", fontSize: "10px" }}
+        >
+          {desc}
+        </div>
+        {dirty && (
+          <div
+            style={{
+              color: "var(--warning)",
+              fontSize: "10px",
+              marginTop: "2px",
+            }}
+          >
+            Restart the app for this to take effect.
+          </div>
+        )}
+      </div>
+    </button>
+  );
+}
 
 export function SettingsMenu({
   anchorRef,
@@ -39,6 +112,19 @@ export function SettingsMenu({
   const { mode, setMode } = useTheme();
   const [teamEnabled, setTeamEnabled] = useState<boolean | null>(null);
   const [teamDirty, setTeamDirty] = useState(false);
+  // Opt-in media-generation tools (`imageToolsEnabled`). Tools register
+  // at agent build, so flipping needs a restart/reload to take effect.
+  const [mediaToolsEnabled, setMediaToolsEnabled] = useState<boolean | null>(
+    null,
+  );
+  const [mediaDirty, setMediaDirty] = useState(false);
+  // Opt-in Shell tab (`shellTabEnabled`). App.tsx swaps the tab live off
+  // the same broadcast, so no restart note is needed here.
+  const [shellTabEnabled, setShellTabEnabled] = useState<boolean | null>(null);
+  // Browser tools (`browserEnabled`) — opt-OUT (default ON). The Playwright
+  // MCP is injected at startup, so toggling needs a restart to take effect.
+  const [browserEnabled, setBrowserEnabled] = useState<boolean | null>(null);
+  const [browserDirty, setBrowserDirty] = useState(false);
   // Persisted GUI zoom factor (multiplier, 1.0 = native). Loaded
   // once when the menu opens; updated optimistically on selection
   // so the dropdown reflects the click without a round-trip. #47.
@@ -47,6 +133,7 @@ export function SettingsMenu({
   const [channelsOpen, setChannelsOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [instructionsOpen, setInstructionsOpen] = useState(false);
+  const [featuresOpen, setFeaturesOpen] = useState(false);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -58,11 +145,42 @@ export function SettingsMenu({
       ) {
         setTeamEnabled(msg.enabled as boolean);
         setTeamDirty(true);
+      } else if (
+        msg.type === "media_tools_enabled" &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setMediaToolsEnabled(msg.enabled as boolean);
+      } else if (
+        msg.type === "media_tools_enabled_result" &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setMediaToolsEnabled(msg.enabled as boolean);
+        setMediaDirty(true);
+      } else if (
+        (msg.type === "shell_tab_enabled" ||
+          msg.type === "shell_tab_enabled_result") &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setShellTabEnabled(msg.enabled as boolean);
+      } else if (
+        msg.type === "browser_enabled" &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setBrowserEnabled(msg.enabled as boolean);
+      } else if (
+        msg.type === "browser_enabled_result" &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setBrowserEnabled(msg.enabled as boolean);
+        setBrowserDirty(true);
       } else if (msg.type === "gui_scale_value" && typeof msg.scale === "number") {
         setGuiScale(msg.scale as number);
       }
     });
     send({ type: "team_enabled_get" });
+    send({ type: "media_tools_enabled_get" });
+    send({ type: "shell_tab_enabled_get" });
+    send({ type: "browser_enabled_get" });
     send({ type: "gui_scale_get" });
     return unsub;
   }, []);
@@ -75,6 +193,22 @@ export function SettingsMenu({
   const toggleTeam = () => {
     const next = !(teamEnabled ?? false);
     send({ type: "team_enabled_set", enabled: next });
+  };
+
+  const toggleMedia = () => {
+    const next = !(mediaToolsEnabled ?? false);
+    send({ type: "media_tools_enabled_set", enabled: next });
+  };
+
+  const toggleShell = () => {
+    const next = !(shellTabEnabled ?? false);
+    send({ type: "shell_tab_enabled_set", enabled: next });
+  };
+
+  const toggleBrowser = () => {
+    // Default ON, so an unknown (null) state toggles to off.
+    const next = !(browserEnabled ?? true);
+    send({ type: "browser_enabled_set", enabled: next });
   };
 
   // Close on click-outside (excluding the anchor so a second click on
@@ -490,62 +624,90 @@ export function SettingsMenu({
           </div>
         </div>
       </button>
-      <button
-        onClick={toggleTeam}
-        className="sm-row w-full text-left px-3 py-1.5 flex items-start gap-2"
-        style={{ color: "var(--text-primary)", fontSize: "12px" }}
-        disabled={teamEnabled === null}
+      {/* Opt-in feature flags — grouped into one "Optional features"
+          SIDE FLYOUT (same pattern as Instructions / Connect-a-channel)
+          so the main menu stays compact. Toggling a row writes
+          .thclaws/settings.json and keeps the flyout open (the rows are
+          descendants, so a toggle doesn't trigger mouseleave or close). */}
+      <div
+        className="relative"
+        onMouseEnter={() => setFeaturesOpen(true)}
+        onMouseLeave={() => setFeaturesOpen(false)}
       >
-        <span
-          className="sm-subtle"
-          style={{ color: "var(--text-secondary)", paddingTop: "1px" }}
+        <button
+          className="sm-row w-full text-left px-3 py-2.5 sm:py-1.5 flex items-center gap-2"
+          style={{ color: "var(--text-primary)", fontSize: "12px" }}
+          aria-haspopup="menu"
+          aria-expanded={featuresOpen}
+          onClick={() => setFeaturesOpen((v) => !v)}
         >
-          <Users size={12} />
-        </span>
-        <div className="flex-1">
-          <div className="flex items-center gap-2">
-            <span>Agent Teams</span>
-            <span
-              style={{
-                fontSize: "10px",
-                padding: "1px 6px",
-                borderRadius: "10px",
-                background:
-                  teamEnabled === true
-                    ? "var(--accent-dim)"
-                    : "var(--bg-tertiary)",
-                color:
-                  teamEnabled === true
-                    ? "#fff"
-                    : "var(--text-secondary)",
-                border:
-                  teamEnabled === true
-                    ? "none"
-                    : "1px solid var(--border)",
-              }}
-            >
-              {teamEnabled === null ? "…" : teamEnabled ? "on" : "off"}
-            </span>
-          </div>
-          <div
-            className="sm-subtle"
-            style={{ color: "var(--text-secondary)", fontSize: "10px" }}
-          >
-            TeamCreate, SpawnTeammate, … (writes `.thclaws/settings.json`)
-          </div>
-          {teamDirty && (
+          <span className="sm-subtle" style={{ color: "var(--text-secondary)" }}>
+            <SlidersHorizontal size={12} />
+          </span>
+          <div className="flex-1">
+            <div>Optional features</div>
             <div
-              style={{
-                color: "var(--warning)",
-                fontSize: "10px",
-                marginTop: "2px",
-              }}
+              className="sm-subtle"
+              style={{ color: "var(--text-secondary)", fontSize: "10px" }}
             >
-              Restart the app for this to take effect.
+              Agent Teams · Media tools · Shell tab · Browser
             </div>
-          )}
-        </div>
-      </button>
+          </div>
+          <span className="sm-subtle" style={{ color: "var(--text-secondary)" }}>
+            <ChevronRight size={12} />
+          </span>
+        </button>
+        {featuresOpen && (
+          <div
+            role="menu"
+            className="absolute rounded-md shadow-2xl py-1 z-50"
+            style={{
+              right: "100%",
+              // Bottom-aligned (not top): the gear menu launches from the
+              // bottom edge of the screen and this is its last row, so a
+              // top-anchored flyout would grow downward off-screen. Anchor
+              // the flyout's bottom to the row's bottom → it grows upward.
+              bottom: "-1px",
+              background: "var(--bg-secondary)",
+              border: "1px solid var(--border)",
+              minWidth: "250px",
+            }}
+          >
+            <FeatureFlagRow
+              icon={<Users size={12} />}
+              label="Agent Teams"
+              desc="TeamCreate, SpawnTeammate, … (writes `.thclaws/settings.json`)"
+              enabled={teamEnabled}
+              dirty={teamDirty}
+              onToggle={toggleTeam}
+            />
+            <FeatureFlagRow
+              icon={<ImageIcon size={12} />}
+              label="Media tools"
+              desc="TextToImage, TextToVideo, … — needs a GEMINI/GOOGLE key (writes `.thclaws/settings.json`)"
+              enabled={mediaToolsEnabled}
+              dirty={mediaDirty}
+              onToggle={toggleMedia}
+            />
+            <FeatureFlagRow
+              icon={<SquareTerminal size={12} />}
+              label="Shell tab"
+              desc="PTY-backed terminal tab (writes `.thclaws/settings.json`)"
+              enabled={shellTabEnabled}
+              dirty={false}
+              onToggle={toggleShell}
+            />
+            <FeatureFlagRow
+              icon={<Globe size={12} />}
+              label="Browser tools"
+              desc="Playwright browser__* tools — ON by default; needs node/npx (writes `.thclaws/settings.json`)"
+              enabled={browserEnabled}
+              dirty={browserDirty}
+              onToggle={toggleBrowser}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -195,8 +195,9 @@ pub fn model_is_gateway_servable(model: &str) -> bool {
 
 /// Resolve the gateway base URL. Honors `THCLAWS_GATEWAY_BASE_URL`
 /// for dev/staging overrides; otherwise returns the canonical
-/// [`GATEWAY_BASE_URL`].
-fn resolve_base_url() -> String {
+/// [`GATEWAY_BASE_URL`]. `pub(crate)` so the media-generation tools
+/// route through the exact same base as the LLM path.
+pub(crate) fn resolve_base_url() -> String {
     std::env::var("THCLAWS_GATEWAY_BASE_URL")
         .ok()
         .map(|s| s.trim().to_string())
@@ -205,8 +206,11 @@ fn resolve_base_url() -> String {
 }
 
 /// Look up the gateway access key. Env var wins (handy for CI /
-/// scripted runs); otherwise keychain bundle.
-fn resolve_access_key() -> Option<String> {
+/// scripted runs); otherwise keychain bundle; otherwise the cloud CLI
+/// token. `pub(crate)` so media-generation tools detect gateway access
+/// from the SAME three sources as the LLM path (an env-only check made
+/// `TextToImage` blind to cloud-login / keychain gateway users).
+pub(crate) fn resolve_access_key() -> Option<String> {
     if let Ok(v) = std::env::var("THCLAWS_GATEWAY_API_KEY") {
         let trimmed = v.trim().to_string();
         if !trimmed.is_empty() {

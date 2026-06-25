@@ -2542,6 +2542,74 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        // Mirror of team_enabled_get/set for the opt-in media-generation
+        // tools (`imageToolsEnabled` / `mediaToolsEnabled`). Off by
+        // default; the tools also self-hide without a GEMINI/GOOGLE key.
+        "media_tools_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.image_tools_enabled)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "media_tools_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "media_tools_enabled_set" => {
+            let enabled = msg
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.image_tools_enabled = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "media_tools_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        // Browser tools (`browserEnabled`) — the INVERSE of the
+        // media/team toggles: opt-OUT, default ON. Same get/set shape so
+        // the Settings menu can flip it; the Playwright MCP is injected at
+        // startup, so a change needs a restart to add/remove its tools.
+        "browser_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.browser_enabled)
+                .unwrap_or(true);
+            let payload = serde_json::json!({
+                "type": "browser_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "browser_enabled_set" => {
+            // Default to ON (true) on a malformed payload — matches the
+            // opt-out default so a bad message can't silently disable it.
+            let enabled = msg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.browser_enabled = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "browser_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         "openrouter_free_only_get" => {
             let enabled = crate::config::AppConfig::load()
                 .map(|c| c.openrouter_free_only)

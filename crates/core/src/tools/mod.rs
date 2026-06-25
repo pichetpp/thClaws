@@ -231,14 +231,25 @@ pub(crate) struct GatewayRoute {
 }
 
 pub(crate) fn gateway_route() -> Option<GatewayRoute> {
-    if !gateway_mode() {
+    // The gateway is active on a cloud pod (env / multiuser) OR when the
+    // desktop "gateway proxy" toggle is on — the SAME signal that routes
+    // LLM traffic (config.rs derives `gateway_use_for` from exactly this).
+    // Resolve the base + key via the canonical resolver (env → `gateway`
+    // keychain bundle → thClaws.cloud login token) so keyed services (web
+    // search, HAL) reach the gateway on DESKTOP too — not only on cloud
+    // pods that export THCLAWS_USES_GATEWAY. Previously this was env-only,
+    // so a desktop gateway user's WebSearch silently fell back to
+    // DuckDuckGo (and a scheduled run produced stale, un-searched results).
+    let pod = std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+        || crate::workdir::is_multiuser();
+    let proxy = crate::config::AppConfig::load()
+        .map(|c| c.gateway_proxy)
+        .unwrap_or(false);
+    if !(pod || proxy) {
         return None;
     }
-    let base = std::env::var("THCLAWS_GATEWAY_BASE_URL")
-        .ok()?
-        .trim_end_matches('/')
-        .to_string();
-    let token = std::env::var("THCLAWS_GATEWAY_API_KEY").ok()?;
+    let token = crate::providers::thclaws_gateway::resolve_access_key()?;
+    let base = crate::providers::thclaws_gateway::resolve_base_url();
     if base.is_empty() || token.is_empty() {
         return None;
     }
@@ -415,6 +426,45 @@ pub fn req_str<'a>(input: &'a Value, field: &str) -> Result<&'a str> {
         .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Tool(format!("missing or non-string field: {field}")))
+}
+
+/// True when any of `parts` names a hidden/dot path component (e.g.
+/// `.thclaws/sessions/*.jsonl`, `.github`). The Glob/Grep read walkers
+/// skip hidden + gitignored entries by default — good for clean output
+/// on a plain `**/*.rs`, but it makes legitimate dot-dirs (`.thclaws/`,
+/// `.github/`, `.config/`) invisible. When the caller *explicitly* asks
+/// for a dot-path we must descend into it; this detects that intent.
+/// `.` and `..` don't count — they're traversal, not hidden names.
+pub(crate) fn targets_hidden_path<'a>(parts: impl IntoIterator<Item = &'a str>) -> bool {
+    parts.into_iter().any(|s| {
+        // Absolute paths point at/above the walk root; their dot-segments
+        // are ancestors the walker never filters (e.g. a project under
+        // `~/.config/...`), so they don't signal intent to descend into a
+        // hidden child. Only relative dot-paths and glob patterns do.
+        if s.starts_with('/') || s.starts_with('\\') {
+            return false;
+        }
+        s.split(['/', '\\'])
+            .any(|seg| seg.len() > 1 && seg.starts_with('.') && seg != "..")
+    })
+}
+
+/// Build a `WalkBuilder` for the read tools (Glob/Grep). Defaults skip
+/// hidden + ignored entries. When `include_hidden` is set (the request
+/// explicitly targeted a dot-path — see [`targets_hidden_path`]) all of
+/// the hidden/ignore filters are disabled so the requested tree —
+/// including gitignored dot-dirs like `.thclaws/` — is fully visible.
+pub(crate) fn read_walker(base: &std::path::Path, include_hidden: bool) -> ignore::WalkBuilder {
+    let mut b = ignore::WalkBuilder::new(base);
+    if include_hidden {
+        b.hidden(false)
+            .ignore(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .parents(false);
+    }
+    b
 }
 
 /// M6.38.9: parse a tool result body for a leading `Source: <engine>`

@@ -1,8 +1,7 @@
-use super::{req_str, Tool};
+use super::{read_walker, req_str, targets_hidden_path, Tool};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use globset::Glob;
-use ignore::WalkBuilder;
 use serde_json::{json, Value};
 
 pub struct GlobTool;
@@ -40,11 +39,17 @@ impl Tool for GlobTool {
         let raw_base = input.get("path").and_then(Value::as_str).unwrap_or(".");
         let base_path = crate::sandbox::Sandbox::check(raw_base)?;
 
+        // When the request explicitly targets a dot-path (e.g.
+        // `.thclaws/sessions/*.jsonl`), descend into it — otherwise the
+        // default hidden/gitignore filters prune `.thclaws/` and the glob
+        // silently returns nothing (the /dream "no sessions" bug).
+        let include_hidden = targets_hidden_path([raw_base, pattern]);
+
         let matcher = Glob::new(pattern)
             .map_err(|e| Error::Tool(format!("glob syntax: {e}")))?
             .compile_matcher();
         let mut paths: Vec<String> = Vec::new();
-        for entry in WalkBuilder::new(&base_path).build().flatten() {
+        for entry in read_walker(&base_path, include_hidden).build().flatten() {
             if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                 continue;
             }
@@ -75,6 +80,50 @@ mod tests {
         std::fs::write(dir.path().join("tests/integration.rs"), "").unwrap();
         std::fs::write(dir.path().join("README.md"), "").unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn finds_files_inside_hidden_dot_dir() {
+        // The /dream bug: globbing `.thclaws/sessions/*.jsonl` from the
+        // project root returned nothing because the default walker skips
+        // hidden dot-dirs. An explicit dot-path target must descend.
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".thclaws/sessions")).unwrap();
+        std::fs::write(dir.path().join(".thclaws/sessions/sess-1.jsonl"), "").unwrap();
+        std::fs::write(dir.path().join(".thclaws/sessions/sess-2.jsonl"), "").unwrap();
+        let out = GlobTool
+            .call(json!({
+                "pattern": ".thclaws/sessions/*.jsonl",
+                "path": dir.path().to_string_lossy(),
+            }))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "expected 2 session files, got: {out}");
+        assert!(out.contains("sess-1.jsonl"));
+        assert!(out.contains("sess-2.jsonl"));
+    }
+
+    #[tokio::test]
+    async fn plain_glob_still_skips_hidden_dirs() {
+        // Regression guard: a non-dot pattern must NOT descend into hidden
+        // dirs (keeps output clean — .git, etc.).
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".secret")).unwrap();
+        std::fs::write(dir.path().join(".secret/leak.txt"), "").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "").unwrap();
+        let out = GlobTool
+            .call(json!({
+                "pattern": "**/*.txt",
+                "path": dir.path().to_string_lossy(),
+            }))
+            .await
+            .unwrap();
+        assert!(out.contains("visible.txt"), "expected visible.txt: {out}");
+        assert!(
+            !out.contains("leak.txt"),
+            "hidden dir must stay skipped for a plain glob: {out}"
+        );
     }
 
     #[tokio::test]

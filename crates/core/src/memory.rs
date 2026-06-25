@@ -771,14 +771,72 @@ pub fn parse_frontmatter(s: &str) -> (HashMap<String, String>, String) {
         return (map, s.to_string());
     }
 
-    for line in fm_lines {
-        if let Some((k, v)) = line.split_once(':') {
-            // M6.26: strip surrounding quotes so values written by
-            // `write_frontmatter_map` round-trip correctly. Matches
-            // kms::parse_frontmatter behavior.
-            let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
-            map.insert(k.trim().to_string(), val);
+    let mut i = 0;
+    while i < fm_lines.len() {
+        let line = fm_lines[i];
+        let Some((k, v)) = line.split_once(':') else {
+            i += 1;
+            continue;
+        };
+        let key = k.trim().to_string();
+        let vtrim = v.trim();
+
+        // YAML block scalar — `key: >` (folded) or `key: |` (literal),
+        // with optional chomping/indent indicators (`>-`, `|+`, `>2`).
+        // The value is the indented lines that follow. The old
+        // line-based parser dropped them, so a `description: >` block
+        // surfaced as literally ">" (and hid the skill on /skills).
+        let is_block = {
+            let mut c = vtrim.chars();
+            matches!(c.next(), Some('>') | Some('|'))
+                && c.all(|ch| ch == '-' || ch == '+' || ch.is_ascii_digit())
+        };
+        if is_block {
+            let folded = vtrim.starts_with('>');
+            // Frontmatter keys sit at column 0, so any blank or
+            // leading-whitespace line belongs to the block; the first
+            // column-0 line ends it.
+            let mut parts: Vec<String> = Vec::new();
+            let mut j = i + 1;
+            while j < fm_lines.len() {
+                let cont = fm_lines[j];
+                if cont.trim().is_empty() {
+                    parts.push(String::new());
+                } else if cont.starts_with([' ', '\t']) {
+                    parts.push(cont.trim().to_string());
+                } else {
+                    break;
+                }
+                j += 1;
+            }
+            let value = if folded {
+                // Fold: blank line → newline, adjacent lines → one space.
+                let mut out = String::new();
+                for p in &parts {
+                    if p.is_empty() {
+                        out.push('\n');
+                    } else {
+                        if !out.is_empty() && !out.ends_with('\n') {
+                            out.push(' ');
+                        }
+                        out.push_str(p);
+                    }
+                }
+                out.trim().to_string()
+            } else {
+                parts.join("\n").trim().to_string()
+            };
+            map.insert(key, value);
+            i = j;
+            continue;
         }
+
+        // M6.26: strip surrounding quotes so values written by
+        // `write_frontmatter_map` round-trip correctly. Matches
+        // kms::parse_frontmatter behavior.
+        let val = vtrim.trim_matches('"').trim_matches('\'').to_string();
+        map.insert(key, val);
+        i += 1;
     }
 
     // Remaining iterator is the body.
@@ -813,6 +871,36 @@ mod tests {
         );
         assert_eq!(front.get("type").map(String::as_str), Some("user"));
         assert_eq!(body, "body text\nmore body");
+    }
+
+    #[test]
+    fn parse_frontmatter_folds_block_scalar_description() {
+        // Regression: a `description: >` folded block used to parse as
+        // literally ">", hiding the skill on /skills. It must fold into
+        // one space-joined string, and a later key must still parse.
+        let s = "---\nname: social-featured-image\ndescription: >\n  Generate a social\n  featured image from a prompt.\nmodel: gemini\n---\nbody";
+        let (front, body) = parse_frontmatter(s);
+        assert_eq!(
+            front.get("description").map(String::as_str),
+            Some("Generate a social featured image from a prompt."),
+        );
+        assert_eq!(
+            front.get("name").map(String::as_str),
+            Some("social-featured-image")
+        );
+        assert_eq!(front.get("model").map(String::as_str), Some("gemini"));
+        assert_eq!(body, "body");
+    }
+
+    #[test]
+    fn parse_frontmatter_literal_block_scalar_keeps_newlines() {
+        let s = "---\ndescription: |\n  line one\n  line two\nname: x\n---\nbody";
+        let (front, _body) = parse_frontmatter(s);
+        assert_eq!(
+            front.get("description").map(String::as_str),
+            Some("line one\nline two"),
+        );
+        assert_eq!(front.get("name").map(String::as_str), Some("x"));
     }
 
     #[test]

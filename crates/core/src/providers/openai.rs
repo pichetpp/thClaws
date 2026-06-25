@@ -354,6 +354,20 @@ impl OpenAIProvider {
         }
         body
     }
+
+    /// POST a prepared body to the chat/completions endpoint. Factored
+    /// out so `stream` can issue a second attempt (image-stripped retry)
+    /// without duplicating the header/auth wiring.
+    async fn send_body(&self, body: &Value) -> Result<reqwest::Response> {
+        self.client
+            .post(&self.base_url)
+            .header(self.auth_header_name(), self.auth_header_value())
+            .header("content-type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("http: {e}")))
+    }
 }
 
 /// Strip the routing prefix from a stored model id before sending it
@@ -415,6 +429,42 @@ fn request_carries_image(req: &StreamRequest) -> bool {
             _ => false,
         })
     })
+}
+
+/// A copy of `req` with every image pixel replaced by a short text note.
+/// Used to retry once after a text-only model rejects `image_url` with a
+/// 4xx (issue #164 follow-up): the turn then completes with the model
+/// merely *told* an image existed, instead of dead-ending. The real
+/// session history keeps the image — only this one wire request drops the
+/// bytes — so a later switch to a vision model still sees it.
+fn strip_request_images(req: &StreamRequest) -> StreamRequest {
+    const NOTE: &str =
+        "[image omitted — the current model is not vision-capable; the image file was still written to disk]";
+    let mut out = req.clone();
+    for m in &mut out.messages {
+        for block in &mut m.content {
+            match block {
+                ContentBlock::Image { .. } => {
+                    *block = ContentBlock::Text {
+                        text: NOTE.to_string(),
+                    };
+                }
+                ContentBlock::ToolResult { content, .. } => {
+                    if let ToolResultContent::Blocks(blocks) = content {
+                        for tb in blocks.iter_mut() {
+                            if matches!(tb, ToolResultBlock::Image { .. }) {
+                                *tb = ToolResultBlock::Text {
+                                    text: NOTE.to_string(),
+                                };
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -482,33 +532,40 @@ impl Provider for OpenAIProvider {
         }
         req.model = strip_wire_prefix(&req.model, self.strip_model_prefix.as_deref());
         let body = self.build_body(&req);
-        let resp = self
-            .client
-            .post(&self.base_url)
-            .header(self.auth_header_name(), self.auth_header_value())
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| Error::Provider(format!("http: {e}")))?;
+        let mut resp = self.send_body(&body).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            let mut msg = format!("http {status}: {}", super::redact_key(&text, &self.api_key));
-            // Issue #164: a 4xx on a request that shipped image pixels is
-            // almost always "this model can't see images" (text-only
-            // model + a Read on an image / a scanned-image PDF). The raw
-            // upstream 400 body is unhelpful, so append a concrete fix.
+            // Issue #164 follow-up: a 4xx on a request shipping image
+            // pixels is almost always a text-only model rejecting
+            // `image_url` (Read on an image, a scanned PDF, or — the case
+            // that dead-ends a session — a TextToImage result sitting in
+            // history in front of a non-vision chat model, where EVERY
+            // later turn would 400 too). Retry ONCE with the pixels
+            // swapped for a short text note so the turn completes; only
+            // surface the hard error (with a hint) if that also fails.
             if status.is_client_error() && request_carries_image(&req) {
-                msg.push_str(&format!(
-                    "\n\n⚠️ This request included an image, but model `{}` may not support image input. \
-                     Switch to a vision-capable model (e.g. dashscope/qwen3-vl-plus, gpt-4o, gemini-2.x, a Claude model), \
-                     or extract the PDF/image to text first (e.g. read it once with a vision model and save to KMS, then query the text).",
-                    req.model
-                ));
+                let retry_body = self.build_body(&strip_request_images(&req));
+                match self.send_body(&retry_body).await {
+                    Ok(r) if r.status().is_success() => resp = r,
+                    _ => {
+                        let text = resp.text().await.unwrap_or_default();
+                        return Err(Error::Provider(format!(
+                            "http {status}: {}\n\n⚠️ This request included an image, but model `{}` may not support image input. \
+                             Switch to a vision-capable model (e.g. dashscope/qwen3-vl-plus, gpt-4o, gemini-2.x, a Claude model), \
+                             or extract the PDF/image to text first (e.g. read it once with a vision model and save to KMS, then query the text).",
+                            super::redact_key(&text, &self.api_key),
+                            req.model
+                        )));
+                    }
+                }
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(Error::Provider(format!(
+                    "http {status}: {}",
+                    super::redact_key(&text, &self.api_key)
+                )));
             }
-            return Err(Error::Provider(msg));
         }
 
         let byte_stream = resp.bytes_stream();
@@ -1292,6 +1349,60 @@ mod tests {
                 is_error: false,
             }
         ])));
+    }
+
+    #[test]
+    fn strip_request_images_drops_pixels_keeps_text() {
+        // Issue #164 follow-up: the retry path must leave NO image pixels
+        // (so a text-only model stops 400'ing on image_url) while keeping
+        // the tool result's text summary so the model still knows an image
+        // was produced.
+        use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
+        let img = ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        let req = StreamRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Image {
+                        source: img.clone(),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "c1".into(),
+                        content: ToolResultContent::Blocks(vec![
+                            ToolResultBlock::Text {
+                                text: "Wrote output/img.png".into(),
+                            },
+                            ToolResultBlock::Image { source: img },
+                        ]),
+                        is_error: false,
+                    },
+                ],
+            }],
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+        assert!(request_carries_image(&req));
+
+        let stripped = strip_request_images(&req);
+        assert!(
+            !request_carries_image(&stripped),
+            "no image pixels should remain after stripping"
+        );
+        // The OpenAI wire form must carry no image_url, but keep the summary.
+        let wire = OpenAIProvider::messages_to_openai(&stripped);
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(
+            !json.contains("image_url"),
+            "stripped request must not emit image_url: {json}"
+        );
+        assert!(json.contains("Wrote output/img.png"));
     }
 
     #[test]

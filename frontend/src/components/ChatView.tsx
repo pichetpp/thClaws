@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import { resolveAssetSrc } from "../lib/fileAsset";
 import { Check, Copy, Paperclip } from "lucide-react";
 import { basePath, send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
@@ -1300,14 +1301,20 @@ export function ChatView({ active, modalOpen }: Props) {
                           </a>
                         ),
                         // Markdown `![alt](url)` images render inline.
-                        // Click-to-zoom isn't needed: MCP-Apps tools
-                        // produce their own iframe widgets, and any
-                        // other inline image (e.g. attached by the
-                        // user) is already shown at full bubble width.
+                        // A workspace-relative src (e.g. `output/img-….jpg`
+                        // written by TextToImage) is routed through
+                        // /file-asset via resolveAssetSrc — otherwise the
+                        // browser resolves it against the page origin and
+                        // 404s. Click-to-zoom isn't needed: MCP-Apps tools
+                        // produce their own iframe widgets, and any other
+                        // inline image (e.g. attached by the user) is
+                        // already shown at full bubble width.
                         img: ({ src, alt, ...rest }) => (
                           <img
                             {...rest}
-                            src={src}
+                            src={resolveAssetSrc(
+                              typeof src === "string" ? src : undefined,
+                            )}
                             alt={alt}
                             style={{
                               maxWidth: "100%",
