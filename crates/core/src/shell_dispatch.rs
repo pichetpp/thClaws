@@ -3095,7 +3095,14 @@ pub async fn dispatch(
                     let mut out = String::from("Team:\n");
                     for a in &agents {
                         let task = a.current_task.as_deref().unwrap_or("-");
-                        out.push_str(&format!("  {} — {} (task: {})\n", a.agent, a.status, task));
+                        // A stale heartbeat means the teammate crashed / never
+                        // booted — show that instead of a frozen "idle".
+                        let shown = if a.status != "stopped" && a.is_stale() {
+                            "unresponsive".to_string()
+                        } else {
+                            a.status.clone()
+                        };
+                        out.push_str(&format!("  {} — {} (task: {})\n", a.agent, shown, task));
                     }
                     emit(events_tx, out);
                 }

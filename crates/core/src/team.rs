@@ -23,6 +23,13 @@ use std::sync::Arc;
 
 pub const POLL_INTERVAL_MS: u64 = 1000;
 
+/// A teammate rewrites its status (heartbeat) every poll (~1s) even when
+/// idle, so a status whose `last_heartbeat` is older than this is a
+/// crashed / never-booted teammate, not a healthy idle one. Kept
+/// comfortably above the poll cadence to avoid racing a momentarily-busy
+/// teammate.
+pub const STALE_SECS: u64 = 10;
+
 /// M6.34 TEAM1: validate agent / member names before they're used to build
 /// filesystem paths (`.thclaws/team/inboxes/<name>.json`,
 /// `.thclaws/team/agents/<name>/...`, `.worktrees/<name>`) or git refs
@@ -91,14 +98,41 @@ fn lead_team_dir_slot() -> &'static std::sync::Mutex<Option<String>> {
 /// Idempotent — calling multiple times overwrites (lead may swap
 /// projects mid-session via ChangeCwd).
 pub fn set_lead_team_dir(team_dir: &Path) {
+    // On the first team session the dir often doesn't exist yet, so
+    // canonicalize() fails and would store the RAW relative `.thclaws/team`.
+    // SpawnTeammate later bakes an ABSOLUTE `--team-dir` into the child
+    // argv, so a relative matcher value would never match → kill_my_teammates
+    // orphans every teammate. Absolutize via current_dir() join when
+    // canonicalize fails, mirroring the spawn path (team.rs ~1386).
     let abs = team_dir
         .canonicalize()
-        .unwrap_or_else(|_| team_dir.to_path_buf())
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .map(|c| c.join(team_dir))
+                .unwrap_or_else(|_| team_dir.to_path_buf())
+        })
         .to_string_lossy()
         .into_owned();
     if let Ok(mut g) = lead_team_dir_slot().lock() {
         *g = Some(abs);
     }
+}
+
+/// The ABSOLUTE team dir for this session: the value pinned by
+/// [`set_lead_team_dir`] (lead startup), else `THCLAWS_TEAM_DIR`, else an
+/// absolutized `.thclaws/team`. Long-lived inbox pollers must use this
+/// instead of the relative `Mailbox::default_dir()` so a mid-session cwd
+/// change (ChangeCwd) doesn't make the lead read a different project's
+/// inbox while teammates keep writing to the original absolute dir.
+pub fn resolved_team_dir() -> PathBuf {
+    if let Some(d) = lead_team_dir_slot().lock().ok().and_then(|g| g.clone()) {
+        return PathBuf::from(d);
+    }
+    if let Ok(d) = std::env::var("THCLAWS_TEAM_DIR") {
+        return PathBuf::from(d);
+    }
+    let rel = Mailbox::default_dir();
+    std::env::current_dir().map(|c| c.join(&rel)).unwrap_or(rel)
 }
 
 /// Kill every teammate process spawned by THIS lead session. Matches
@@ -113,16 +147,41 @@ pub fn kill_my_teammates() {
         Some(d) => d,
         None => return,
     };
-    // Match `--team-dir <abs path>` in cmdline. Most processes never
-    // carry that flag pair so the match is highly specific. The `--`
-    // end-of-options marker is REQUIRED: the pattern starts with `--`,
-    // which pkill's getopt otherwise parses as an unknown long option
-    // ("unrecognized option '--team-dir …'" on Linux procps-ng; "illegal
-    // option" on macOS) — no teammates get killed (issue #163 Bug 2).
+    let team_dir = std::path::PathBuf::from(&dir);
+    let mb = Mailbox::new(team_dir.clone());
+    let config = TeamConfig::load(&team_dir.join("config.json")).ok();
+
+    // Graceful first: broadcast a ShutdownRequest so an idle teammate can
+    // flush state and self-exit via its poll loop, then give a short grace
+    // before the hard pkill fallback. (Previously the handshake was dead
+    // code — nothing ever SENT a ShutdownRequest.)
+    if let Some(ref config) = config {
+        for member in &config.members {
+            let msg = TeamMessage::new("lead", &make_shutdown_request("lead"));
+            let _ = mb.write_to_mailbox(&member.name, msg);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+    }
+
+    // Hard fallback: kill any teammate still running. Match `--team-dir
+    // <abs path>` in cmdline. Most processes never carry that flag pair so
+    // the match is highly specific. The `--` end-of-options marker is
+    // REQUIRED: the pattern starts with `--`, which pkill's getopt otherwise
+    // parses as an unknown long option (no teammates get killed, issue #163
+    // Bug 2).
     let pattern = format!("--team-dir {}", dir);
     let _ = std::process::Command::new("pkill")
         .args(["-f", "--", &pattern])
         .status();
+
+    // Mark killed teammates stopped and reclaim any tasks they still owned,
+    // so a later respawn / resume doesn't see tasks stranded InProgress.
+    if let Some(ref config) = config {
+        for member in &config.members {
+            let _ = mb.write_status(&member.name, "stopped", None);
+        }
+    }
+    let _ = mb.reap_stale_tasks();
 }
 
 /// True when (a) a git merge is currently in progress in the repo that
@@ -353,6 +412,11 @@ pub enum ProtocolMessage {
     ShutdownApproved { from: String },
     #[serde(rename = "shutdown_rejected")]
     ShutdownRejected { from: String, reason: String },
+    /// Lead → teammate: cancel the current turn cooperatively (the only way
+    /// to interrupt a headless/background teammate, which never receives
+    /// SIGINT).
+    #[serde(rename = "abort_turn")]
+    AbortTurn { from: String },
 }
 
 pub fn parse_protocol_message(text: &str) -> Option<ProtocolMessage> {
@@ -365,14 +429,46 @@ pub fn make_idle_notification(
     status: Option<&str>,
     summary: Option<&str>,
 ) -> String {
+    make_status_notification(from, "available", task_id, status, summary)
+}
+
+/// Like [`make_idle_notification`] but lets the caller set `idle_reason`.
+/// The idle helper hardcodes "available", which hides give-up/failure
+/// states from the lead's coordination logic, so failure/blocked paths use
+/// this directly.
+pub fn make_status_notification(
+    from: &str,
+    idle_reason: &str,
+    task_id: Option<&str>,
+    status: Option<&str>,
+    summary: Option<&str>,
+) -> String {
     serde_json::to_string(&ProtocolMessage::IdleNotification {
         from: from.into(),
-        idle_reason: Some("available".into()),
+        idle_reason: Some(idle_reason.into()),
         completed_task_id: task_id.map(String::from),
         completed_status: status.map(String::from),
         summary: summary.map(String::from),
     })
     .unwrap_or_default()
+}
+
+/// Teammate → lead: this turn failed (provider/config error). idle_reason
+/// and completed_status both say "failed" so the lead doesn't treat it as a
+/// clean finish.
+pub fn make_failure_notification(from: &str, summary: &str) -> String {
+    make_status_notification(from, "failed", None, Some("failed"), Some(summary))
+}
+
+/// Teammate → lead: gave up mid-task (e.g. hit max_iterations / time budget).
+/// The task is left for the lead to re-drive.
+pub fn make_blocked_notification(from: &str, task_id: Option<&str>, summary: &str) -> String {
+    make_status_notification(from, "blocked", task_id, Some("blocked"), Some(summary))
+}
+
+pub fn make_shutdown_request(from: &str) -> String {
+    serde_json::to_string(&ProtocolMessage::ShutdownRequest { from: from.into() })
+        .unwrap_or_default()
 }
 
 // ── Task queue ──────────────────────────────────────────────────────
@@ -456,7 +552,14 @@ impl TaskQueue {
         };
         let path = self.task_path(&id);
         let contents = serde_json::to_string_pretty(&task)?;
-        std::fs::write(&path, contents)?;
+        // Take the exclusive lock readers acquire (shared) so a concurrent
+        // get()/list() sees either no file or a fully-written one, never a
+        // partial. ids are unique via the _hwm lock, so this only guards
+        // against partial-read, not collisions.
+        with_file_lock(&path, || {
+            atomic_write(&path, &contents)?;
+            Ok(())
+        })?;
         Ok(task)
     }
 
@@ -489,6 +592,26 @@ impl TaskQueue {
             )));
         }
 
+        // Resolve blocked_by deps BEFORE taking this task's exclusive lock.
+        // get() acquires a SHARED lock on the dep's `.lock`; doing that
+        // inside the exclusive lock below would deadlock the thread against
+        // its own lock if a dep resolves to the same lock file (a
+        // self-referential or cyclic blocked_by). flock is per-fd, so a
+        // second acquire from the same process still blocks.
+        let prelim = self
+            .get(task_id)?
+            .ok_or_else(|| Error::Tool(format!("task {task_id} not found")))?;
+        for dep_id in &prelim.blocked_by {
+            if let Some(dep) = self.get(dep_id)? {
+                if dep.status != TaskStatus::Completed {
+                    return Err(Error::Tool(format!(
+                        "task {} blocked by task {} (status: {:?})",
+                        task_id, dep_id, dep.status
+                    )));
+                }
+            }
+        }
+
         let path = self.task_path(task_id);
         with_file_lock(&path, || {
             let contents = std::fs::read_to_string(&path)
@@ -511,22 +634,13 @@ impl TaskQueue {
                     )));
                 }
             }
-            // Check blocked_by dependencies.
-            for dep_id in &task.blocked_by {
-                if let Some(dep) = self.get(dep_id)? {
-                    if dep.status != TaskStatus::Completed {
-                        return Err(Error::Tool(format!(
-                            "task {} blocked by task {} (status: {:?})",
-                            task_id, dep_id, dep.status
-                        )));
-                    }
-                }
-            }
+            // blocked_by deps were validated above the lock (they only
+            // progress toward Completed, so no re-check is needed here).
 
             task.owner = Some(agent_id.into());
             task.status = TaskStatus::InProgress;
             task.updated_at = now_secs();
-            std::fs::write(&path, serde_json::to_string_pretty(&task)?)?;
+            atomic_write(&path, &serde_json::to_string_pretty(&task)?)?;
             Ok(task)
         })
     }
@@ -546,7 +660,7 @@ impl TaskQueue {
             }
             task.status = TaskStatus::Completed;
             task.updated_at = now_secs();
-            std::fs::write(&path, serde_json::to_string_pretty(&task)?)?;
+            atomic_write(&path, &serde_json::to_string_pretty(&task)?)?;
             Ok(task)
         })
     }
@@ -561,7 +675,7 @@ impl TaskQueue {
             task.owner = None;
             task.status = TaskStatus::Pending;
             task.updated_at = now_secs();
-            std::fs::write(&path, serde_json::to_string_pretty(&task)?)?;
+            atomic_write(&path, &serde_json::to_string_pretty(&task)?)?;
             Ok(())
         })
     }
@@ -609,7 +723,17 @@ impl TaskQueue {
             }
             match self.claim(&task.id, agent_id) {
                 Ok(claimed) => return Ok(Some(claimed)),
-                Err(_) => continue, // race: someone else claimed it
+                // Not always a race: the agent may be busy with its own
+                // InProgress task, the task may be reserved, or blocked by an
+                // incomplete dep. Log the reason so a stuck team is debuggable
+                // instead of silently looking idle.
+                Err(e) => {
+                    eprintln!(
+                        "[team] claim_next skip task {} for {agent_id}: {e}",
+                        task.id
+                    );
+                    continue;
+                }
             }
         }
         Ok(None)
@@ -617,6 +741,43 @@ impl TaskQueue {
 }
 
 // ── Mailbox ─────────────────────────────────────────────────────────
+
+/// Atomically write `data` to `path` via a temp file + rename in the same
+/// directory, so a process killed mid-write can never leave a truncated
+/// file (the previous direct `std::fs::write` could). Callers hold the
+/// file lock, so the temp name doesn't collide.
+fn atomic_write(path: &Path, data: &str) -> Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Parse an inbox JSON WITHOUT ever clobbering it: empty/whitespace → empty
+/// vec; an unparseable non-empty file is moved aside to `.corrupt` and an
+/// error is returned, so a caller about to rewrite the inbox aborts BEFORE
+/// the overwrite — preserving the (recoverable) messages instead of the old
+/// `unwrap_or_default()` which silently wiped every unread message.
+fn parse_inbox(contents: &str, path: &Path) -> Result<Vec<TeamMessage>> {
+    if contents.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    match serde_json::from_str(contents) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let _ = std::fs::rename(path, path.with_extension("corrupt"));
+            Err(Error::Tool(format!(
+                "inbox {} unparseable ({e}) — moved aside to .corrupt for recovery",
+                path.display()
+            )))
+        }
+    }
+}
 
 pub struct Mailbox {
     pub team_dir: PathBuf,
@@ -673,7 +834,10 @@ impl Mailbox {
         if !inbox.exists() {
             std::fs::write(&inbox, "[]")?;
         }
-        self.write_status(agent, "alive", None)?;
+        // "spawning" (not "alive") so a teammate that launches but never
+        // reaches its poll loop is distinguishable from a booted-and-idle
+        // one — the loop's first status write is "idle" (repl.rs).
+        self.write_status(agent, "spawning", None)?;
         Ok(())
     }
 
@@ -685,8 +849,7 @@ impl Mailbox {
         }
         with_file_lock_shared(&path, || {
             let contents = std::fs::read_to_string(&path)?;
-            let msgs: Vec<TeamMessage> = serde_json::from_str(&contents).unwrap_or_default();
-            Ok(msgs)
+            parse_inbox(&contents, &path)
         })
     }
 
@@ -711,12 +874,14 @@ impl Mailbox {
         with_file_lock(&path, || {
             let mut msgs: Vec<TeamMessage> = if path.exists() {
                 let contents = std::fs::read_to_string(&path)?;
-                serde_json::from_str(&contents).unwrap_or_default()
+                // parse_inbox returns Err (aborting before the overwrite) on
+                // corruption, so existing messages are never wiped.
+                parse_inbox(&contents, &path)?
             } else {
                 Vec::new()
             };
             msgs.push(msg);
-            std::fs::write(&path, serde_json::to_string_pretty(&msgs)?)?;
+            atomic_write(&path, &serde_json::to_string_pretty(&msgs)?)?;
             Ok(())
         })
     }
@@ -726,13 +891,13 @@ impl Mailbox {
         let path = self.inbox_path(agent);
         with_file_lock(&path, || {
             let contents = std::fs::read_to_string(&path)?;
-            let mut msgs: Vec<TeamMessage> = serde_json::from_str(&contents).unwrap_or_default();
+            let mut msgs: Vec<TeamMessage> = parse_inbox(&contents, &path)?;
             for msg in &mut msgs {
                 if ids.contains(&msg.id) {
                     msg.read = true;
                 }
             }
-            std::fs::write(&path, serde_json::to_string_pretty(&msgs)?)?;
+            atomic_write(&path, &serde_json::to_string_pretty(&msgs)?)?;
             Ok(())
         })
     }
@@ -758,7 +923,7 @@ impl Mailbox {
         // partial JSON, `serde_json::from_str.ok()` returned None,
         // status appeared as "agent missing" intermittently.
         with_file_lock(&path, || {
-            std::fs::write(&path, serde_json::to_string_pretty(&s)?)?;
+            atomic_write(&path, &serde_json::to_string_pretty(&s)?)?;
             Ok(())
         })
     }
@@ -798,6 +963,34 @@ impl Mailbox {
     pub fn task_queue(&self) -> TaskQueue {
         TaskQueue::new(self.tasks_dir())
     }
+
+    /// Release any InProgress task whose owner is dead — stopped, crashed
+    /// (stale heartbeat), or gone (no status file). Without this a teammate
+    /// that claimed a task and then died/erred strands the task InProgress
+    /// forever: no other teammate can claim it (claim's busy-check), and the
+    /// work is invisible. Returns how many were reclaimed.
+    pub fn reap_stale_tasks(&self) -> Result<usize> {
+        let tq = self.task_queue();
+        let in_progress = tq.list(Some(TaskStatus::InProgress))?;
+        let mut released = 0;
+        for task in in_progress {
+            let Some(owner) = task.owner.as_deref() else {
+                continue;
+            };
+            let dead = match self.read_status(owner) {
+                Some(s) => s.status == "stopped" || s.is_stale(),
+                None => true, // no status file → owner never existed / gone
+            };
+            if dead && tq.release(&task.id).is_ok() {
+                eprintln!(
+                    "[team] reaped stale task {} (owner '{owner}' is dead) → back to Pending",
+                    task.id
+                );
+                released += 1;
+            }
+        }
+        Ok(released)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -806,6 +999,21 @@ pub struct AgentStatus {
     pub status: String,
     pub current_task: Option<String>,
     pub last_heartbeat: u64,
+}
+
+impl AgentStatus {
+    /// True when this teammate hasn't heartbeat within [`STALE_SECS`] — i.e.
+    /// it crashed, was killed, or never entered its poll loop. A live idle
+    /// teammate rewrites its heartbeat every poll, so it never goes stale.
+    pub fn is_stale(&self) -> bool {
+        now_secs().saturating_sub(self.last_heartbeat) > STALE_SECS
+    }
+
+    /// True when the process launched but never reached its poll loop
+    /// (`init_agent` stamps "spawning"; the loop's first write is "idle").
+    pub fn never_booted(&self) -> bool {
+        self.status == "spawning"
+    }
 }
 
 // ── File locking ────────────────────────────────────────────────────
@@ -928,14 +1136,31 @@ impl Tool for SendMessageTool {
             )));
         }
 
-        // Reject sending to stopped agents.
+        // Reject sending to agents that can't receive: stopped, never
+        // booted ("spawning" with no heartbeat yet), or crashed (stale
+        // heartbeat). Without this a message to a dead teammate "succeeds"
+        // (the file write works) and is never read — the lead waits forever.
         if to != "*" && to != "lead" {
             if let Some(status) = self.mailbox.read_status(to) {
                 if status.status == "stopped" {
                     return Err(Error::Tool(format!(
-                        "teammate '{}' is {} — cannot receive messages. \
-                         Use SpawnTeammate to respawn it first.",
-                        to, status.status
+                        "teammate '{to}' is stopped — cannot receive messages. \
+                         Use SpawnTeammate to respawn it first."
+                    )));
+                }
+                if status.never_booted() {
+                    return Err(Error::Tool(format!(
+                        "teammate '{to}' launched but never entered its loop \
+                         (status=spawning) — it likely failed to start. \
+                         Respawn it with SpawnTeammate."
+                    )));
+                }
+                if status.is_stale() {
+                    return Err(Error::Tool(format!(
+                        "teammate '{to}' is unresponsive — last heartbeat {}s ago \
+                         (status={}); it likely crashed. Respawn it with SpawnTeammate.",
+                        now_secs().saturating_sub(status.last_heartbeat),
+                        status.status
                     )));
                 }
             }
@@ -1252,6 +1477,17 @@ pub struct SpawnTeammateTool {
     my_name: String,
 }
 
+impl SpawnTeammateTool {
+    /// Last ~15 lines of a teammate's output.log, for surfacing a startup
+    /// failure (bad cwd, 401, binary abort) back to the lead.
+    fn output_tail(&self, name: &str) -> String {
+        let log = std::fs::read_to_string(self.mailbox.output_log_path(name)).unwrap_or_default();
+        let lines: Vec<&str> = log.lines().collect();
+        let start = lines.len().saturating_sub(15);
+        lines[start..].join("\n")
+    }
+}
+
 #[async_trait]
 impl Tool for SpawnTeammateTool {
     fn name(&self) -> &'static str {
@@ -1518,42 +1754,49 @@ impl Tool for SpawnTeammateTool {
                     .output();
             }
 
-            if !wt_dir.exists() {
-                // Create branch from current HEAD if it doesn't exist.
-                let _ = std::process::Command::new("git")
-                    .args(["branch", &branch])
-                    .current_dir(&project_root)
-                    .output();
-                // Create worktree.
-                let result = std::process::Command::new("git")
-                    .args(["worktree", "add", &wt_dir.to_string_lossy(), &branch])
-                    .current_dir(&project_root)
-                    .output();
-                match result {
-                    Ok(out) if out.status.success() => {
-                        eprintln!(
-                            "\x1b[33m[team] created worktree for '{}' at {} (branch: {})\x1b[0m",
-                            name,
-                            wt_dir.display(),
-                            branch
-                        );
-                    }
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        eprintln!(
-                            "\x1b[31m[team] worktree FAILED for '{}': {} — teammate will run in lead's cwd instead\x1b[0m",
-                            name, stderr.trim()
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("\x1b[31m[team] git worktree failed: {e}\x1b[0m");
-                    }
+            // Clear any stale `.git/worktrees/<name>` registration left by a
+            // crash / manual `rm -rf .worktrees/<name>` / prior run, else
+            // `git worktree add` dies with "missing but already registered".
+            let _ = std::process::Command::new("git")
+                .args(["worktree", "prune"])
+                .current_dir(&project_root)
+                .output();
+            // Create branch from current HEAD if it doesn't exist (no-op if it does).
+            let _ = std::process::Command::new("git")
+                .args(["branch", &branch])
+                .current_dir(&project_root)
+                .output();
+            // Force-add so a leftover-but-stale dir doesn't block creation.
+            let result = std::process::Command::new("git")
+                .args(["worktree", "add", "-f", &wt_dir.to_string_lossy(), &branch])
+                .current_dir(&project_root)
+                .output();
+            match result {
+                Ok(out) if out.status.success() => {
+                    eprintln!(
+                        "\x1b[33m[team] created worktree for '{}' at {} (branch: {})\x1b[0m",
+                        name,
+                        wt_dir.display(),
+                        branch
+                    );
+                    Some(wt_dir.to_string_lossy().to_string())
                 }
-            }
-            if wt_dir.exists() {
-                Some(wt_dir.to_string_lossy().to_string())
-            } else {
-                None
+                // Isolation was explicitly requested: do NOT silently fall back
+                // to the lead's cwd — a teammate writing to the lead's tree on
+                // the wrong branch is silent data corruption, and the lead's
+                // later TeamMerge would find 0 commits ahead. Fail loudly.
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    return Err(Error::Tool(format!(
+                        "worktree creation failed for '{name}': {} — refusing to spawn (would write to the lead's tree). Resolve the repo state and respawn.",
+                        stderr.trim()
+                    )));
+                }
+                Err(e) => {
+                    return Err(Error::Tool(format!(
+                        "git worktree add failed for '{name}': {e}"
+                    )));
+                }
             }
         } else {
             None
@@ -1613,21 +1856,33 @@ impl Tool for SpawnTeammateTool {
             let _ = cfg.save(&config_path);
         }
 
+        // Snapshot before spawning: init_agent stamped status "spawning" (as
+        // the lead). The teammate's own poll loop rewrites status to "idle"
+        // the instant it boots, so a status still reading "spawning" after a
+        // grace period means the process launched but never entered its loop
+        // — the classic silent-teammate failure. We verify a real boot below
+        // instead of reporting success on launcher exit alone.
+        let spawn_t = now_secs();
+
         // Spawn via tmux or background.
         eprintln!("\x1b[33m[team] spawn cmd: {}\x1b[0m", agent_cmd);
-        if has_tmux() {
+        let mut bg_child: Option<std::process::Child> = None;
+        let spawn_desc = if has_tmux() {
             if is_inside_tmux() {
-                std::process::Command::new("tmux")
+                let st = std::process::Command::new("tmux")
                     .args(["split-window", "-h", "-d"])
                     .arg(&agent_cmd)
                     .status()
                     .map_err(|e| Error::Tool(format!("tmux split: {e}")))?;
+                if !st.success() {
+                    return Err(Error::Tool(format!(
+                        "tmux split-window failed ({st}) — could not spawn '{name}'"
+                    )));
+                }
                 let _ = std::process::Command::new("tmux")
                     .args(["select-layout", "tiled"])
                     .status();
-                Ok(format!(
-                    "Teammate '{name}' spawned in tmux pane (current session)."
-                ))
+                "in tmux pane (current session)".to_string()
             } else {
                 let session = "thclaws-team";
                 let exists = std::process::Command::new("tmux")
@@ -1635,8 +1890,8 @@ impl Tool for SpawnTeammateTool {
                     .output()
                     .map(|o| o.status.success())
                     .unwrap_or(false);
-                if exists {
-                    std::process::Command::new("tmux")
+                let st = if exists {
+                    let s = std::process::Command::new("tmux")
                         .args(["split-window", "-h", "-t", session, "-d"])
                         .arg(&agent_cmd)
                         .status()
@@ -1644,16 +1899,20 @@ impl Tool for SpawnTeammateTool {
                     let _ = std::process::Command::new("tmux")
                         .args(["select-layout", "-t", session, "tiled"])
                         .status();
+                    s
                 } else {
                     std::process::Command::new("tmux")
                         .args(["new-session", "-d", "-s", session, "-n", "team"])
                         .arg(&agent_cmd)
                         .status()
-                        .map_err(|e| Error::Tool(format!("tmux new: {e}")))?;
+                        .map_err(|e| Error::Tool(format!("tmux new: {e}")))?
+                };
+                if !st.success() {
+                    return Err(Error::Tool(format!(
+                        "tmux failed ({st}) — could not spawn '{name}'"
+                    )));
                 }
-                Ok(format!(
-                    "Teammate '{name}' spawned in tmux session '{session}'."
-                ))
+                format!("in tmux session '{session}'")
             }
         } else {
             // No tmux — redirect stdout/stderr to the output log so the GUI
@@ -1667,13 +1926,47 @@ impl Tool for SpawnTeammateTool {
             let log_err = log_file
                 .try_clone()
                 .map_err(|e| Error::Tool(format!("clone log: {e}")))?;
-            crate::util::shell_command_sync(&agent_cmd)
+            let child = crate::util::shell_command_sync(&agent_cmd)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::from(log_file))
                 .stderr(std::process::Stdio::from(log_err))
                 .spawn()
                 .map_err(|e| Error::Tool(format!("spawn: {e}")))?;
-            Ok(format!("Teammate '{name}' spawned as background process."))
+            bg_child = Some(child);
+            "as background process".to_string()
+        };
+
+        // Liveness probe: wait up to BOOT_TIMEOUT for the teammate to write
+        // its OWN status (leaving "spawning"). Returns as soon as it boots
+        // (usually <1s — the loop writes "idle" before its first turn, so
+        // model latency doesn't matter). On a background process that exits
+        // immediately, surface the failure with the output.log tail.
+        const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+        let deadline = std::time::Instant::now() + BOOT_TIMEOUT;
+        loop {
+            if let Some(st) = self.mailbox.read_status(name) {
+                if st.status != "spawning" && st.last_heartbeat >= spawn_t {
+                    return Ok(format!(
+                        "Teammate '{name}' spawned {spawn_desc} and is live."
+                    ));
+                }
+            }
+            if let Some(child) = bg_child.as_mut() {
+                if let Ok(Some(exit)) = child.try_wait() {
+                    return Err(Error::Tool(format!(
+                        "teammate '{name}' exited immediately ({exit}) — never booted.\noutput.log tail:\n{}",
+                        self.output_tail(name)
+                    )));
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Tool(format!(
+                    "teammate '{name}' launched but never entered its poll loop within {}s (status still 'spawning') — likely failed to start.\noutput.log tail:\n{}",
+                    BOOT_TIMEOUT.as_secs(),
+                    self.output_tail(name)
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }
 }
@@ -1891,7 +2184,6 @@ impl Tool for TeamTaskCompleteTool {
 // ── TeamMerge (lead-only) ───────────────────────────────────────────
 
 pub struct TeamMergeTool {
-    #[allow(dead_code)]
     mailbox: Arc<Mailbox>,
 }
 
@@ -1993,6 +2285,25 @@ impl Tool for TeamMergeTool {
             return Ok(format!("No team/* branches found to merge into '{into}'."));
         }
 
+        // A dirty lead working tree (or untracked-file collisions) makes
+        // `git merge` fail with ZERO conflicted files — which the failure
+        // path below would otherwise misreport as a teammate conflict and
+        // bounce to a teammate who has nothing to fix. Refuse up front.
+        if !dry_run {
+            let status_out = std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&project_root)
+                .output()
+                .map_err(|e| Error::Tool(format!("git status: {e}")))?;
+            if !status_out.stdout.is_empty() {
+                return Err(Error::Tool(format!(
+                    "lead working tree is dirty or has untracked collisions — \
+                     commit or stash before TeamMerge:\n{}",
+                    String::from_utf8_lossy(&status_out.stdout).trim()
+                )));
+            }
+        }
+
         // For each candidate: count commits ahead, status, optionally merge.
         let mut report = Vec::new();
         report.push(format!("Merge target: {into}"));
@@ -2015,20 +2326,31 @@ impl Tool for TeamMergeTool {
             if ahead == 0 {
                 report.push(format!("  {name} ({branch}): 0 commits ahead — skipped"));
                 if cleanup && !dry_run {
-                    let _ = std::process::Command::new("git")
-                        .args([
-                            "worktree",
-                            "remove",
-                            "--force",
-                            &format!(".worktrees/{name}"),
-                        ])
-                        .current_dir(&project_root)
-                        .output();
-                    let _ = std::process::Command::new("git")
-                        .args(["branch", "-D", branch])
-                        .current_dir(&project_root)
-                        .output();
-                    report.push(format!("    cleaned up worktree + branch"));
+                    // 0-ahead usually means the teammate is STILL WORKING and
+                    // hasn't committed yet — removing its worktree would yank
+                    // the cwd out from under a live process and lose
+                    // uncommitted work. Only clean up a stopped teammate, and
+                    // never --force (preserve a dirty worktree).
+                    let stopped = self
+                        .mailbox
+                        .read_status(name)
+                        .map(|s| s.status == "stopped")
+                        .unwrap_or(false);
+                    if stopped {
+                        let _ = std::process::Command::new("git")
+                            .args(["worktree", "remove", &format!(".worktrees/{name}")])
+                            .current_dir(&project_root)
+                            .output();
+                        let _ = std::process::Command::new("git")
+                            .args(["branch", "-D", branch])
+                            .current_dir(&project_root)
+                            .output();
+                        report.push("    cleaned up worktree + branch".to_string());
+                    } else {
+                        report.push(format!(
+                            "    {name}: teammate still active — not cleaning up worktree"
+                        ));
+                    }
                 }
                 continue;
             }
@@ -2090,21 +2412,35 @@ impl Tool for TeamMergeTool {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let _ = std::process::Command::new("git")
-                    .args(["merge", "--abort"])
-                    .current_dir(&project_root)
-                    .output();
+                // Only abort if a merge actually started, else `git merge
+                // --abort` errors spuriously and masks the real cause.
+                if project_root.join(".git/MERGE_HEAD").exists() {
+                    let _ = std::process::Command::new("git")
+                        .args(["merge", "--abort"])
+                        .current_dir(&project_root)
+                        .output();
+                }
                 report.push(format!(
                     "  {name} ({branch}): merge FAILED, aborted. stderr: {}",
                     stderr.trim()
                 ));
-                if !conflicts.is_empty() {
+                if conflicts.is_empty() {
+                    // No conflicted files → NOT a teammate-fixable content
+                    // conflict (dirty tree, untracked-overwrite, --no-ff
+                    // refusal). Surface as a lead-side error; do NOT bounce it
+                    // to a teammate who has nothing to fix.
+                    report.push(format!(
+                        "    merge could not start — lead-side git error, not a teammate \
+                         conflict: {}",
+                        stderr.trim()
+                    ));
+                } else {
                     report.push(format!("    conflicts in: {}", conflicts.join(", ")));
+                    report.push(format!(
+                        "    delegate a fix to '{name}' (their worktree still has the changes), \
+                         then re-run TeamMerge."
+                    ));
                 }
-                report.push(format!(
-                    "    delegate a fix to '{name}' (their worktree still has the changes), \
-                     then re-run TeamMerge."
-                ));
                 // Stop on first failure so the lead deals with it before continuing.
                 break;
             }
@@ -2511,5 +2847,76 @@ mod tests {
         assert_eq!(config.members.len(), 1);
         assert_eq!(config.members[0].name, "alice");
         assert_eq!(config.members[0].prompt, "code stuff");
+    }
+
+    // F2: a corrupt inbox must NOT be silently wiped on the next write —
+    // it errors and is moved aside to .corrupt so the messages survive.
+    #[test]
+    fn corrupt_inbox_is_preserved_not_clobbered() {
+        let dir = tempdir().unwrap();
+        let mb = Mailbox::new(dir.path().to_path_buf());
+        mb.init_agent("alice").unwrap();
+        mb.write_to_mailbox("alice", TeamMessage::new("bob", "keep me"))
+            .unwrap();
+        let inbox = dir.path().join("inboxes").join("alice.json");
+        std::fs::write(&inbox, "{ not valid json").unwrap();
+        // The overwrite aborts (Err) instead of wiping.
+        assert!(mb
+            .write_to_mailbox("alice", TeamMessage::new("bob", "new"))
+            .is_err());
+        // Corrupt content is moved aside for recovery.
+        assert!(dir.path().join("inboxes").join("alice.corrupt").exists());
+    }
+
+    // F12: a task owned by a dead (stopped/stale) teammate is reclaimed.
+    #[test]
+    fn reap_releases_dead_owner_task() {
+        let dir = tempdir().unwrap();
+        let mb = Mailbox::new(dir.path().to_path_buf());
+        mb.init_agent("worker").unwrap();
+        let tq = mb.task_queue();
+        let t = tq.create("do x", "details", &[], None).unwrap();
+        tq.claim(&t.id, "worker").unwrap();
+        mb.write_status("worker", "stopped", None).unwrap();
+        assert_eq!(mb.reap_stale_tasks().unwrap(), 1);
+        let after = tq.get(&t.id).unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::Pending);
+        assert!(after.owner.is_none());
+    }
+
+    // F6/F17: heartbeat staleness + never-booted detection.
+    #[test]
+    fn status_staleness_detection() {
+        let mk = |status: &str, hb: u64| AgentStatus {
+            agent: "a".into(),
+            status: status.into(),
+            current_task: None,
+            last_heartbeat: hb,
+        };
+        assert!(!mk("idle", now_secs()).is_stale());
+        assert!(mk("idle", now_secs().saturating_sub(STALE_SECS + 5)).is_stale());
+        assert!(mk("spawning", now_secs()).never_booted());
+        assert!(!mk("idle", now_secs()).never_booted());
+    }
+
+    // F10: a self-referential blocked_by must not deadlock claim() (it
+    // resolves deps before taking the task's own lock). Bounded by the
+    // test harness — a hang would time the test out.
+    #[test]
+    fn claim_with_self_blocked_by_does_not_deadlock() {
+        let dir = tempdir().unwrap();
+        let mb = Mailbox::new(dir.path().to_path_buf());
+        let tq = mb.task_queue();
+        let t = tq.create("x", "y", &[], None).unwrap();
+        // Hand-write a self-referential blocked_by.
+        let mut task = tq.get(&t.id).unwrap().unwrap();
+        task.blocked_by = vec![t.id.clone()];
+        std::fs::write(
+            dir.path().join("tasks").join(format!("{}.json", t.id)),
+            serde_json::to_string_pretty(&task).unwrap(),
+        )
+        .unwrap();
+        // Returns (blocked, since the self-dep isn't Completed) — must not hang.
+        let _ = tq.claim(&t.id, "worker");
     }
 }

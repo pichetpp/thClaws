@@ -558,10 +558,12 @@ fn request_gui_shutdown(
         }
     }
     let _ = shared.input_tx.send(ShellInput::SaveAndQuit);
-    // Kill any spawned teammate processes.
-    let _ = std::process::Command::new("pkill")
-        .args(["-f", "team-agent"])
-        .status();
+    // Kill ONLY this session's teammate processes (scoped by absolute
+    // --team-dir). The old broad `pkill -f team-agent` killed teammates of
+    // other thClaws sessions/projects. Teammates run in tmux-server-owned
+    // panes, so they are NOT reclaimed when the GUI process exits — the
+    // explicit scoped kill is required.
+    crate::team::kill_my_teammates();
     // Snapshot browser cookies and kill the engine-managed Chromium so
     // it doesn't orphan — a surviving orphan breaks the next launch's
     // playwright-mcp CDP attach ("Browser context management is not

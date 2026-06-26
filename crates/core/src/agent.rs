@@ -1094,6 +1094,15 @@ impl Agent {
                     // have response messages"). Strip just before
                     // the request leaves the engine.
                     crate::compaction::sanitize_tool_pairs(&mut compacted);
+                    // Bound the base64 image payload to the gateway body cap.
+                    // compact() trims by *tokens*, which doesn't track base64
+                    // byte size — N freshly-read images (e.g. "read all 7
+                    // namecards") can sit within the token budget yet blow the
+                    // 5 MB body cap on the one request that must carry them.
+                    // Shrinks images (then evicts oldest as a last resort) on
+                    // this outgoing copy only; stored history is untouched and
+                    // gets redacted post-send.
+                    fit_outgoing_image_payload(&mut compacted);
                     compacted
                 };
                 let tool_defs = tools.tool_defs();
@@ -1862,6 +1871,172 @@ impl Agent {
 /// is the dominant cause of premature compaction when an agent reads
 /// even one large screenshot. Idempotent — already-redacted entries
 /// are no-ops.
+/// Gateway/body cap is 5 MB. Keep the base64 image payload of an outgoing
+/// request under this so the full assembled body (system prompt + tool defs +
+/// text + JSON framing + images) stays within the cap. Conservative — leaves
+/// headroom for the non-image parts (a large CLAUDE.md/skills/memory cascade
+/// can be hundreds of KB).
+const OUTGOING_IMAGE_BUDGET_BYTES: usize = 3_500_000;
+
+/// Long edge to shrink images toward when the payload is over budget. Tighter
+/// than the per-read 1568 target because one turn can carry many images that
+/// share the budget (e.g. "read all 7 namecards" → 7 image blocks in one
+/// request). 1280px keeps small text legible for OCR while fitting several
+/// images comfortably.
+const FIT_LONG_EDGE: u32 = 1280;
+
+/// Sum of base64 image bytes across all messages — tool-result images (Read)
+/// plus pasted-attachment image blocks.
+fn outgoing_image_b64_bytes(messages: &[Message]) -> usize {
+    use crate::types::{ContentBlock, ImageSource, ToolResultBlock, ToolResultContent};
+    let mut n = 0usize;
+    for m in messages {
+        for b in &m.content {
+            match b {
+                ContentBlock::Image {
+                    source: ImageSource::Base64 { data, .. },
+                } => n += data.len(),
+                ContentBlock::ToolResult {
+                    content: ToolResultContent::Blocks(bs),
+                    ..
+                } => {
+                    for tb in bs {
+                        if let ToolResultBlock::Image {
+                            source: ImageSource::Base64 { data, .. },
+                        } = tb
+                        {
+                            n += data.len();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    n
+}
+
+/// Re-encode a base64 image smaller: resize to ≤ `FIT_LONG_EDGE` long edge and
+/// JPEG-compress (q80). Returns `None` on decode/encode failure so the caller
+/// keeps the original. JPEG drops alpha — irrelevant for vision.
+fn shrink_b64_image(data: &str) -> Option<String> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    let img = image::load_from_memory(&raw).ok()?;
+    let img = if img.width().max(img.height()) > FIT_LONG_EDGE {
+        img.resize(
+            FIT_LONG_EDGE,
+            FIT_LONG_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        img
+    };
+    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+    let mut out = Vec::new();
+    rgb.write_to(
+        &mut std::io::Cursor::new(&mut out),
+        image::ImageOutputFormat::Jpeg(80),
+    )
+    .ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(&out))
+}
+
+/// Replace every base64 image in one message with a text placeholder.
+fn drop_images_in_message(msg: &mut Message) {
+    use crate::types::{ContentBlock, ImageSource, ToolResultBlock, ToolResultContent};
+    for b in msg.content.iter_mut() {
+        match b {
+            ContentBlock::Image {
+                source: ImageSource::Base64 { media_type, .. },
+            } => {
+                let mt = media_type.clone();
+                *b = ContentBlock::Text {
+                    text: format!("[{mt} dropped to fit the request size cap]"),
+                };
+            }
+            ContentBlock::ToolResult {
+                content: ToolResultContent::Blocks(bs),
+                ..
+            } => {
+                let new: Vec<ToolResultBlock> = bs
+                    .drain(..)
+                    .map(|tb| match tb {
+                        ToolResultBlock::Image {
+                            source: ImageSource::Base64 { media_type, .. },
+                        } => ToolResultBlock::Text {
+                            text: format!("[{media_type} dropped to fit the request size cap]"),
+                        },
+                        other => other,
+                    })
+                    .collect();
+                *bs = new;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Bound the base64 image payload of an outgoing request. Two passes: (1)
+/// shrink every image toward `FIT_LONG_EDGE` / JPEG; (2) if still over budget
+/// (pathologically many images), evict the oldest image blocks — keeping the
+/// most recent ones the model is actively working with.
+fn fit_image_payload_to(messages: &mut Vec<Message>, budget: usize) {
+    use crate::types::{ContentBlock, ImageSource, ToolResultBlock, ToolResultContent};
+    if outgoing_image_b64_bytes(messages) <= budget {
+        return;
+    }
+
+    // Pass 1: shrink every image in place.
+    for m in messages.iter_mut() {
+        for b in m.content.iter_mut() {
+            match b {
+                ContentBlock::Image {
+                    source: ImageSource::Base64 { media_type, data },
+                } => {
+                    if let Some(small) = shrink_b64_image(data) {
+                        *data = small;
+                        *media_type = "image/jpeg".to_string();
+                    }
+                }
+                ContentBlock::ToolResult {
+                    content: ToolResultContent::Blocks(bs),
+                    ..
+                } => {
+                    for tb in bs.iter_mut() {
+                        if let ToolResultBlock::Image {
+                            source: ImageSource::Base64 { media_type, data },
+                        } = tb
+                        {
+                            if let Some(small) = shrink_b64_image(data) {
+                                *data = small;
+                                *media_type = "image/jpeg".to_string();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Pass 2: still over budget — evict oldest images until it fits.
+    for i in 0..messages.len() {
+        if outgoing_image_b64_bytes(messages) <= budget {
+            break;
+        }
+        drop_images_in_message(&mut messages[i]);
+    }
+}
+
+/// Bound the outgoing image payload to the gateway body cap. See
+/// [`fit_image_payload_to`].
+fn fit_outgoing_image_payload(messages: &mut Vec<Message>) {
+    fit_image_payload_to(messages, OUTGOING_IMAGE_BUDGET_BYTES);
+}
+
 fn redact_consumed_images_from_history(history: &mut Vec<Message>) {
     use crate::types::{ContentBlock, ImageSource, Role, ToolResultBlock, ToolResultContent};
     for msg in history.iter_mut() {
@@ -2120,6 +2295,127 @@ mod tests {
         let mut history = original.clone();
         redact_consumed_images_from_history(&mut history);
         assert_eq!(history, original);
+    }
+
+    // ── Outgoing image payload budget ──────────────────────────────────
+
+    fn b64_png(w: u32, h: u32) -> String {
+        use base64::Engine;
+        let buf = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([
+                (x ^ y) as u8,
+                x.wrapping_mul(7) as u8,
+                y.wrapping_mul(13) as u8,
+            ])
+        });
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(buf)
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageOutputFormat::Png,
+            )
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(&out)
+    }
+
+    fn img_msg(data: String) -> Message {
+        use crate::types::{ContentBlock, ImageSource, Role, ToolResultBlock, ToolResultContent};
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "id".into(),
+                content: ToolResultContent::Blocks(vec![ToolResultBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data,
+                    },
+                }]),
+                is_error: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn shrink_b64_image_resizes_and_shrinks() {
+        use base64::Engine;
+        let big = b64_png(2000, 1000);
+        let small = shrink_b64_image(&big).expect("shrink ok");
+        assert!(small.len() < big.len(), "expected a smaller payload");
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&small)
+            .unwrap();
+        let (w, h) = image::io::Reader::new(std::io::Cursor::new(&raw))
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert_eq!(
+            (w, h),
+            (1280, 640),
+            "fit to FIT_LONG_EDGE, aspect preserved"
+        );
+    }
+
+    #[test]
+    fn fit_payload_noop_when_under_budget() {
+        let original = vec![img_msg(b64_png(64, 64))];
+        let mut msgs = original.clone();
+        fit_image_payload_to(&mut msgs, OUTGOING_IMAGE_BUDGET_BYTES);
+        assert_eq!(msgs, original, "under budget → untouched");
+    }
+
+    #[test]
+    fn fit_payload_shrinks_to_fit_keeping_image() {
+        use crate::types::{ContentBlock, ToolResultBlock, ToolResultContent};
+        let big = b64_png(2000, 1000);
+        let small = shrink_b64_image(&big).unwrap();
+        assert!(small.len() < big.len());
+        // Budget strictly between the shrunk and original size: pass 1 (shrink)
+        // must run and succeed; pass 2 (evict) must NOT fire.
+        let budget = small.len() + (big.len() - small.len()) / 2;
+        let mut msgs = vec![img_msg(big)];
+        fit_image_payload_to(&mut msgs, budget);
+        assert!(
+            outgoing_image_b64_bytes(&msgs) <= budget,
+            "should fit budget"
+        );
+        let ContentBlock::ToolResult {
+            content: ToolResultContent::Blocks(bs),
+            ..
+        } = &msgs[0].content[0]
+        else {
+            panic!("expected tool-result blocks");
+        };
+        assert!(
+            matches!(bs[0], ToolResultBlock::Image { .. }),
+            "image kept (not evicted)"
+        );
+    }
+
+    #[test]
+    fn fit_payload_evicts_when_shrink_insufficient() {
+        use crate::types::{ContentBlock, ToolResultBlock, ToolResultContent};
+        // Budget 0 → even after shrinking nothing fits → all images evicted.
+        let mut msgs = vec![
+            img_msg(b64_png(800, 600)),
+            img_msg(b64_png(800, 600)),
+            img_msg(b64_png(800, 600)),
+        ];
+        fit_image_payload_to(&mut msgs, 0);
+        assert_eq!(outgoing_image_b64_bytes(&msgs), 0, "no image bytes remain");
+        for m in &msgs {
+            let ContentBlock::ToolResult {
+                content: ToolResultContent::Blocks(bs),
+                ..
+            } = &m.content[0]
+            else {
+                panic!("expected tool-result blocks");
+            };
+            assert!(
+                matches!(bs[0], ToolResultBlock::Text { .. }),
+                "evicted to a text placeholder"
+            );
+        }
     }
 
     // ── Builder semantics ──────────────────────────────────────────────

@@ -6,10 +6,19 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 /// Hard cap on raw image bytes the Read tool will base64-encode and ship
-/// to the provider. Anthropic's documented per-image limit is 5 MB, and
-/// going above that wastes tokens and risks 413 from the gateway.
-/// Users with larger images need to downscale before reading.
+/// to the provider. Anthropic's documented per-image limit is 5 MB on the
+/// gateway/Bedrock/Vertex path; going above that wastes tokens and risks a
+/// 413. Oversized images are auto-downscaled (see `downscale_for_vision`)
+/// rather than rejected; this cap is the final ceiling after that pass.
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Long-edge target for auto-downscaling. 1568px is the standard-tier vision
+/// limit — Anthropic (and OpenAI/Gemini) downscale anything larger server-side
+/// anyway, so resizing to this here costs no fidelity the model would have
+/// seen, caps the per-image visual-token cost (~1568 tokens), and reliably
+/// fits the byte cap. High-res tiers (Opus 4.7/4.8) accept up to 2576px, but
+/// that's ~3x the tokens for detail most reads don't need.
+const TARGET_LONG_EDGE: u32 = 1568;
 
 /// M6.23 BUG RT1: hard cap on text-file size for the read-whole-file
 /// path. Pre-fix `std::fs::read_to_string` had no cap, so reading a
@@ -64,6 +73,70 @@ fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
         return Some("image/webp");
     }
     None
+}
+
+fn encode_image(img: &image::DynamicImage, fmt: image::ImageOutputFormat) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), fmt)
+        .map_err(|e| Error::Tool(format!("encode image: {e}")))?;
+    Ok(out)
+}
+
+/// Downscale an oversized image so it fits the byte cap and the standard
+/// vision long-edge limit. Returns `Ok(None)` when the image is already small
+/// enough to ship untouched (the common case — no decode, no quality loss).
+/// Otherwise decodes, resizes to `TARGET_LONG_EDGE` (preserving aspect), and
+/// re-encodes: PNG for lossless sources (screenshots/diagrams stay crisp),
+/// falling back to progressively-lower-quality JPEG if PNG can't get under
+/// the cap. `mime` is the sniffed input type; the returned mime reflects the
+/// re-encoded format (WebP/GIF can't be re-encoded in-place, so they become
+/// PNG or JPEG — the caller re-reports the mime, so this stays consistent).
+fn downscale_for_vision(bytes: &[u8], mime: &str) -> Result<Option<(Vec<u8>, &'static str)>> {
+    // Header-only dimension probe — avoids a full decode when we don't need one.
+    let dims = image::io::Reader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok());
+    let oversized_dims = dims
+        .map(|(w, h)| w.max(h) > TARGET_LONG_EDGE)
+        .unwrap_or(false);
+    if bytes.len() <= MAX_IMAGE_BYTES && !oversized_dims {
+        return Ok(None);
+    }
+
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| Error::Tool(format!("decode image for downscale: {e}")))?;
+    let img = if img.width().max(img.height()) > TARGET_LONG_EDGE {
+        // `resize` fits within the box while preserving aspect ratio.
+        img.resize(
+            TARGET_LONG_EDGE,
+            TARGET_LONG_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        img
+    };
+
+    // Lossless sources: try PNG first; keep it if it's under the cap.
+    if mime != "image/jpeg" {
+        let png = encode_image(&img, image::ImageOutputFormat::Png)?;
+        if png.len() <= MAX_IMAGE_BYTES {
+            return Ok(Some((png, "image/png")));
+        }
+    }
+    // JPEG (primary for photos, fallback for big PNGs). JPEG has no alpha.
+    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+    for q in [85u8, 70, 55] {
+        let jpg = encode_image(&rgb, image::ImageOutputFormat::Jpeg(q))?;
+        if jpg.len() <= MAX_IMAGE_BYTES {
+            return Ok(Some((jpg, "image/jpeg")));
+        }
+    }
+    Err(Error::Tool(format!(
+        "image is still over the {}-byte cap after downscaling to {}px @ JPEG q55 — \
+         the source is unusually dense; crop or pre-resize it",
+        MAX_IMAGE_BYTES, TARGET_LONG_EDGE
+    )))
 }
 
 #[async_trait]
@@ -171,14 +244,6 @@ impl Tool for ReadTool {
 
         let bytes = std::fs::read(&path)
             .map_err(|e| Error::Tool(format!("read image {}: {e}", path.display())))?;
-        if bytes.len() > MAX_IMAGE_BYTES {
-            return Err(Error::Tool(format!(
-                "image {} is {} bytes — over the {}-byte cap. Resize before reading.",
-                path.display(),
-                bytes.len(),
-                MAX_IMAGE_BYTES
-            )));
-        }
 
         // Trust magic bytes over the file extension. Real-world cards/
         // screenshots get saved with the wrong extension all the time
@@ -205,20 +270,37 @@ impl Tool for ReadTool {
             ))
         })?;
 
-        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        // Auto-downscale anything over the byte cap or the vision long-edge
+        // limit; small images pass through untouched (no decode/re-encode).
+        let down = downscale_for_vision(&bytes, mime)?;
+        let (out_bytes, out_mime): (&[u8], &str) = match &down {
+            Some((b, m)) => (b.as_slice(), m),
+            None => (bytes.as_slice(), mime),
+        };
+        let note = match &down {
+            Some(_) => format!(
+                " · downscaled from {} KB {}",
+                (bytes.len() + 512) / 1024,
+                mime
+            ),
+            None => String::new(),
+        };
+
+        let data = base64::engine::general_purpose::STANDARD.encode(out_bytes);
         let summary = format!(
-            "image: {} · {} KB · {}",
+            "image: {} · {} KB · {}{}",
             path.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("(unnamed)"),
-            (bytes.len() + 512) / 1024,
-            mime
+            (out_bytes.len() + 512) / 1024,
+            out_mime,
+            note
         );
 
         Ok(ToolResultContent::Blocks(vec![
             ToolResultBlock::Image {
                 source: ImageSource::Base64 {
-                    media_type: mime.to_string(),
+                    media_type: out_mime.to_string(),
                     data,
                 },
             },
@@ -479,5 +561,77 @@ mod tests {
             .unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("image"), "got: {s}");
+    }
+
+    #[tokio::test]
+    async fn call_multimodal_downscales_oversized_png() {
+        use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.png");
+        // 2000x1000 — long edge exceeds the 1568px target, so it must be
+        // resized even though the byte size may be under the cap.
+        let buf = image::RgbImage::from_fn(2000, 1000, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        image::DynamicImage::ImageRgb8(buf).save(&path).unwrap();
+
+        let out = ReadTool
+            .call_multimodal(json!({"path": path.to_string_lossy()}))
+            .await
+            .unwrap();
+        let ToolResultContent::Blocks(blocks) = out else {
+            panic!("expected Blocks");
+        };
+        let ToolResultBlock::Image {
+            source: ImageSource::Base64 { data, .. },
+        } = &blocks[0]
+        else {
+            panic!("expected image block first");
+        };
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap();
+        assert!(raw.len() <= MAX_IMAGE_BYTES, "still over byte cap");
+        let (w, h) = image::io::Reader::new(std::io::Cursor::new(&raw))
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        // Aspect preserved, long edge clamped to the target.
+        assert_eq!((w, h), (1568, 784), "expected 2:1 fit to 1568px");
+
+        // Summary block notes the downscale.
+        let ToolResultBlock::Text { text } = &blocks[1] else {
+            panic!("expected summary text");
+        };
+        assert!(text.contains("downscaled"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn call_multimodal_passes_small_image_through_unchanged() {
+        use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tiny.png");
+        std::fs::write(&path, ONE_PIXEL_PNG).unwrap();
+
+        let out = ReadTool
+            .call_multimodal(json!({"path": path.to_string_lossy()}))
+            .await
+            .unwrap();
+        let ToolResultContent::Blocks(blocks) = out else {
+            panic!("expected Blocks");
+        };
+        let ToolResultBlock::Image {
+            source: ImageSource::Base64 { data, media_type },
+        } = &blocks[0]
+        else {
+            panic!("expected image block first");
+        };
+        assert_eq!(media_type, "image/png");
+        // Untouched: base64 equals the original bytes (no decode/re-encode).
+        let expected = base64::engine::general_purpose::STANDARD.encode(ONE_PIXEL_PNG);
+        assert_eq!(data, &expected);
     }
 }

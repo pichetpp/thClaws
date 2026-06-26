@@ -5446,6 +5446,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 );
             }
         }
+    } else if let Some(ref store) = session_store {
+        // No explicit --resume. Reuse the most-recent session if it's
+        // still empty rather than leaving yet another empty file behind
+        // each launch (a non-empty latest is left alone, so we still land
+        // on a clean session). The reused one takes the current model.
+        if let Ok(Some(mut empty)) = store.reuse_empty_latest() {
+            empty.model = config.model.clone();
+            session = empty;
+        }
     }
 
     let perm_label = if config.permissions == "auto" {
@@ -5607,74 +5616,123 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         team_println!("[{agent_name}] waiting for messages...");
 
         let poll_ms = crate::team::POLL_INTERVAL_MS;
+        // Wall-clock cap on a single teammate turn. A teammate runs headless
+        // (never receives SIGINT), so without this a chain of slow tools can
+        // occupy one "turn" for many minutes and look hung. Generous, bounded.
+        const TEAMMATE_TURN_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
         let mut pending_queue: std::collections::VecDeque<crate::team::TeamMessage> =
             std::collections::VecDeque::new();
+        // ids read into pending_queue but not yet marked read on disk, so the
+        // next poll's read_unread doesn't re-push them. mark-as-read is
+        // deferred until a message's turn finishes (at-least-once delivery: a
+        // crash mid-turn re-delivers rather than silently dropping the work).
+        let mut in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Soft retry counter for tasks left un-completed.
+        let mut task_retries: std::collections::HashMap<String, u8> =
+            std::collections::HashMap::new();
+
+        // Drain any AbortTurn protocol message (marks it read); true if found.
+        // The only way to interrupt a headless teammate mid-turn.
+        fn poll_abort_request(mailbox: &crate::team::Mailbox, agent: &str) -> bool {
+            let unread = mailbox.read_unread(agent).unwrap_or_default();
+            let abort_ids: Vec<String> = unread
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        crate::team::parse_protocol_message(m.content()),
+                        Some(crate::team::ProtocolMessage::AbortTurn { .. })
+                    )
+                })
+                .map(|m| m.id.clone())
+                .collect();
+            if abort_ids.is_empty() {
+                false
+            } else {
+                let _ = mailbox.mark_as_read(agent, &abort_ids);
+                true
+            }
+        }
 
         loop {
-            // 1. Read unread messages from inbox.
+            // Reclaim tasks stranded InProgress by a crashed/stopped peer.
+            let _ = mailbox.reap_stale_tasks();
+
+            // 1. Read unread; DEFER mark-as-read until each msg is handled.
             let unread = mailbox.read_unread(agent_name).unwrap_or_default();
-            if !unread.is_empty() {
-                let ids: Vec<String> = unread.iter().map(|m| m.id.clone()).collect();
-                let _ = mailbox.mark_as_read(agent_name, &ids);
-
-                for msg in unread {
-                    // Check for protocol messages (shutdown, etc.).
-                    if let Some(proto) = crate::team::parse_protocol_message(msg.content()) {
-                        match proto {
-                            crate::team::ProtocolMessage::ShutdownRequest { from } => {
-                                // Check if we have unfinished work.
-                                let has_work = !pending_queue.is_empty();
-                                let has_active_task = mailbox
-                                    .task_queue()
-                                    .list(Some(crate::team::TaskStatus::InProgress))
-                                    .unwrap_or_default()
-                                    .iter()
-                                    .any(|t| t.owner.as_deref() == Some(agent_name));
-
-                                if has_work || has_active_task {
-                                    // Reject shutdown — still working.
-                                    team_println!(
-                                        "[{agent_name}] shutdown rejected — still have unfinished work"
-                                    );
-                                    let reject = serde_json::to_string(
-                                        &crate::team::ProtocolMessage::ShutdownRejected {
-                                            from: agent_name.to_string(),
-                                            reason: "still have unfinished tasks".into(),
-                                        },
-                                    )
-                                    .unwrap_or_default();
-                                    let reject_msg =
-                                        crate::team::TeamMessage::new(agent_name, &reject);
-                                    let _ = mailbox.write_to_mailbox(&from, reject_msg);
-                                } else {
-                                    // Approve shutdown — idle, no tasks.
-                                    team_println!("[{agent_name}] shutdown approved — exiting");
-                                    let approve = serde_json::to_string(
-                                        &crate::team::ProtocolMessage::ShutdownApproved {
-                                            from: agent_name.to_string(),
-                                        },
-                                    )
-                                    .unwrap_or_default();
-                                    let approve_msg =
-                                        crate::team::TeamMessage::new(agent_name, &approve);
-                                    let _ = mailbox.write_to_mailbox(&from, approve_msg);
-                                    let _ = mailbox.write_status(agent_name, "stopped", None);
-                                    return Ok(());
-                                }
+            for msg in unread {
+                if in_flight.contains(&msg.id) {
+                    continue; // already queued, awaiting its turn
+                }
+                if let Some(proto) = crate::team::parse_protocol_message(msg.content()) {
+                    match proto {
+                        crate::team::ProtocolMessage::ShutdownRequest { from } => {
+                            let _ = mailbox.mark_as_read(agent_name, &[msg.id.clone()]);
+                            let has_active_task = mailbox
+                                .task_queue()
+                                .list(Some(crate::team::TaskStatus::InProgress))
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|t| t.owner.as_deref() == Some(agent_name));
+                            if !pending_queue.is_empty() || has_active_task {
+                                team_println!(
+                                    "[{agent_name}] shutdown rejected — still have unfinished work"
+                                );
+                                let reject = serde_json::to_string(
+                                    &crate::team::ProtocolMessage::ShutdownRejected {
+                                        from: agent_name.to_string(),
+                                        reason: "still have unfinished tasks".into(),
+                                    },
+                                )
+                                .unwrap_or_default();
+                                let _ = mailbox.write_to_mailbox(
+                                    &from,
+                                    crate::team::TeamMessage::new(agent_name, &reject),
+                                );
+                            } else {
+                                team_println!("[{agent_name}] shutdown approved — exiting");
+                                let approve = serde_json::to_string(
+                                    &crate::team::ProtocolMessage::ShutdownApproved {
+                                        from: agent_name.to_string(),
+                                    },
+                                )
+                                .unwrap_or_default();
+                                let _ = mailbox.write_to_mailbox(
+                                    &from,
+                                    crate::team::TeamMessage::new(agent_name, &approve),
+                                );
+                                let _ = mailbox.write_status(agent_name, "stopped", None);
+                                return Ok(());
                             }
-                            _ => {}
                         }
-                    } else {
-                        pending_queue.push_back(msg);
+                        // AbortTurn while idle = nothing to abort; just ack.
+                        crate::team::ProtocolMessage::AbortTurn { .. } => {
+                            let _ = mailbox.mark_as_read(agent_name, &[msg.id.clone()]);
+                        }
+                        // Other protocol messages (idle/shutdown replies) must
+                        // NOT be silently dropped — surface them to the model.
+                        _ => {
+                            team_println!(
+                                "[{agent_name}] note from '{}': {}",
+                                msg.from,
+                                msg.content()
+                            );
+                            in_flight.insert(msg.id.clone());
+                            pending_queue.push_back(msg);
+                        }
                     }
+                } else {
+                    in_flight.insert(msg.id.clone());
+                    pending_queue.push_back(msg);
                 }
             }
 
             // 2. If no messages, try claiming a task from the queue.
+            let mut claimed_task_id: Option<String> = None;
             if pending_queue.is_empty() {
                 let tq = mailbox.task_queue();
                 if let Ok(Some(task)) = tq.claim_next(agent_name) {
                     team_println!("[{agent_name}] claimed task #{}: {}", task.id, task.subject);
+                    claimed_task_id = Some(task.id.clone());
                     let synthetic = crate::team::TeamMessage::new(
                         "task-queue",
                         &format!(
@@ -5700,10 +5758,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let _ = mailbox.write_status(agent_name, "working", Some(&msg.id));
                 let mut last_heartbeat = std::time::Instant::now();
                 let turn_start = std::time::Instant::now();
+                let turn_deadline = tokio::time::Instant::now() + TEAMMATE_TURN_BUDGET;
                 let mut team_active_tools: std::collections::HashMap<
                     String,
                     crate::tool_display::ActiveToolDisplay,
                 > = std::collections::HashMap::new();
+                let mut turn_errored: Option<String> = None;
+                let mut capped = false;
+                let mut aborted = false;
 
                 // Run the agent turn.
                 repl_cancel.reset();
@@ -5717,6 +5779,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             team_println!("\n[cancelled]");
                             repl_cancel.cancel();
                             drop(stream);
+                            aborted = true;
+                            break;
+                        }
+                        _ = tokio::time::sleep_until(turn_deadline) => {
+                            team_println!(
+                                "\n[{agent_name}] turn exceeded {}s budget — aborting",
+                                TEAMMATE_TURN_BUDGET.as_secs()
+                            );
+                            repl_cancel.cancel();
+                            drop(stream);
+                            aborted = true;
                             break;
                         }
                         _ = tokio::time::sleep(heartbeat_delay) => {
@@ -5725,6 +5798,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                     team_println!("\n{}", crate::tool_display::format_tool_heartbeat(&td.label, td.elapsed()));
                                     td.last_heartbeat_at = std::time::Instant::now();
                                 }
+                            }
+                            // Keep the lead's liveness view fresh while busy.
+                            if last_heartbeat.elapsed().as_secs() >= 5 {
+                                let _ = mailbox.write_status(agent_name, "working", None);
+                                last_heartbeat = std::time::Instant::now();
+                            }
+                            // Cooperative cancel (headless teammate gets no SIGINT).
+                            if poll_abort_request(&mailbox, agent_name) {
+                                team_println!("\n[{agent_name}] abort requested — cancelling turn");
+                                repl_cancel.cancel();
+                                drop(stream);
+                                aborted = true;
+                                break;
                             }
                             continue;
                         }
@@ -5764,7 +5850,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             let _ = mailbox.write_status(agent_name, "working", None);
                             last_heartbeat = std::time::Instant::now();
                         }
-                        Ok(AgentEvent::Done { usage, .. }) => {
+                        Ok(AgentEvent::Done { usage, stop_reason }) => {
+                            capped = stop_reason.as_deref() == Some("max_iterations");
                             // Record teammate usage to project's .thclaws/usage/.
                             // Use team_dir parent to find project root (team_dir is absolute).
                             let project_root = team_dir.parent().unwrap_or(&team_dir);
@@ -5786,23 +5873,101 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 format_duration(turn_start.elapsed())
                             );
                         }
+                        Err(e) => {
+                            // F5: do NOT swallow provider/config errors — they
+                            // would otherwise be reported to the lead as a
+                            // clean "finished", and the work silently lost.
+                            team_println!("\n[{agent_name}] turn error: {e}");
+                            turn_errored = Some(e.to_string());
+                        }
                         _ => {}
                     }
                 }
                 team_println!("");
 
-                // Turn completed (Stop hook equivalent) — always send idle notification.
-                // This tells the lead we finished the current work, even if more is queued.
-                // The teammate will pick up queued work on the next loop iteration.
-                let _ = mailbox.write_status(agent_name, "idle", None);
-                let idle = crate::team::make_idle_notification(
-                    agent_name,
-                    None,
-                    None,
-                    Some("finished current turn"),
-                );
-                let idle_msg = crate::team::TeamMessage::new(agent_name, &idle);
-                let _ = mailbox.write_to_mailbox("lead", idle_msg);
+                // This message's turn ran — mark it read (consume it) and drop
+                // it from in_flight so it isn't re-pushed next poll.
+                let _ = mailbox.mark_as_read(agent_name, &[msg.id.clone()]);
+                in_flight.remove(&msg.id);
+
+                let tq = mailbox.task_queue();
+                if let Some(err) = turn_errored {
+                    // Failure: tell the lead and release any claimed task so it
+                    // isn't stranded under an erroring teammate.
+                    let _ = mailbox.write_status(agent_name, "error", None);
+                    if let Some(tid) = &claimed_task_id {
+                        let _ = tq.release(tid);
+                    }
+                    let note = crate::team::make_failure_notification(
+                        agent_name,
+                        &format!("turn failed: {err}"),
+                    );
+                    let _ = mailbox
+                        .write_to_mailbox("lead", crate::team::TeamMessage::new(agent_name, &note));
+                } else if aborted || capped {
+                    // Gave up mid-task: release it and tell the lead it's
+                    // incomplete (so it re-drives rather than assuming success).
+                    let _ = mailbox.write_status(agent_name, "idle", None);
+                    if let Some(tid) = &claimed_task_id {
+                        let _ = tq.release(tid);
+                    }
+                    let reason = if capped {
+                        "hit max_iterations — incomplete"
+                    } else {
+                        "turn aborted (time/abort budget) — incomplete"
+                    };
+                    let note = crate::team::make_blocked_notification(
+                        agent_name,
+                        claimed_task_id.as_deref(),
+                        reason,
+                    );
+                    let _ = mailbox
+                        .write_to_mailbox("lead", crate::team::TeamMessage::new(agent_name, &note));
+                } else {
+                    // Clean finish.
+                    let _ = mailbox.write_status(agent_name, "idle", None);
+                    if let Some(tid) = &claimed_task_id {
+                        let still_owns = tq
+                            .get(tid)
+                            .ok()
+                            .flatten()
+                            .map(|t| {
+                                t.status == crate::team::TaskStatus::InProgress
+                                    && t.owner.as_deref() == Some(agent_name)
+                            })
+                            .unwrap_or(false);
+                        if still_owns {
+                            // Turn ended without TeamTaskComplete — release so
+                            // it can be retried/reassigned (else the busy-check
+                            // wedges this teammate forever).
+                            let n = task_retries.entry(tid.clone()).or_insert(0);
+                            *n += 1;
+                            let summary = if *n >= 3 {
+                                "did not complete after retries — released for reassignment"
+                            } else {
+                                "turn ended without TeamTaskComplete — released to retry"
+                            };
+                            let _ = tq.release(tid);
+                            let note = crate::team::make_blocked_notification(
+                                agent_name,
+                                Some(tid),
+                                summary,
+                            );
+                            let _ = mailbox.write_to_mailbox(
+                                "lead",
+                                crate::team::TeamMessage::new(agent_name, &note),
+                            );
+                        } else {
+                            // Completed — TeamTaskComplete already notified the lead.
+                            task_retries.remove(tid);
+                        }
+                    }
+                    // F26: a plain reply turn (no claimed task) sends NO
+                    // content-free idle notification — that was the lead<->
+                    // teammate ping-pong source. The teammate replies via
+                    // SendMessage if it has something to say; otherwise it
+                    // settles to quiet.
+                }
             } else {
                 // Nothing to do — update heartbeat and poll.
                 let _ = mailbox.write_status(agent_name, "idle", None);
@@ -5854,9 +6019,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     let mut active_loop_handle: Option<tokio::task::AbortHandle> = None;
     let mut active_loop_body: Option<String> = None;
     if team_enabled {
-        let mailbox = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+        // Absolute team dir (not the relative default) so a mid-session
+        // ChangeCwd doesn't make this long-lived poller read a different
+        // project's inbox than the one teammates write to.
+        let mailbox = crate::team::Mailbox::new(crate::team::resolved_team_dir());
         tokio::spawn(async move {
             loop {
+                // Lead heartbeat so teammates / staleness checks can tell a
+                // live lead from a crashed one.
+                let _ = mailbox.write_status("lead", "active", None);
                 let unread = mailbox.read_unread("lead").unwrap_or_default();
                 if !unread.is_empty() {
                     let ids: Vec<String> = unread.iter().map(|m| m.id.clone()).collect();
@@ -5922,7 +6093,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 if let Some(proto) = crate::team::parse_protocol_message(msg.content()) {
                     match proto {
                         crate::team::ProtocolMessage::IdleNotification {
-                            ref from, ref completed_task_id, ref summary, ..
+                            ref from, ref completed_task_id, ref completed_status, ref summary, ..
                         } => {
                             let task_info = completed_task_id.as_ref()
                                 .map(|id| format!(" (task #{id})"))
@@ -5932,8 +6103,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 "\n{COLOR_CYAN}[{from} is idle{task_info}]{COLOR_RESET} {COLOR_DIM}{sum}{COLOR_RESET}"
                             );
                             lead_log!("\n{COLOR_CYAN}[{from} is idle{task_info}]{COLOR_RESET} {COLOR_DIM}{sum}{COLOR_RESET}\n");
-                            // Feed to agent so it can coordinate next steps.
-                            regular.push(msg);
+                            // F26: only run a lead turn for ACTIONABLE idles (a
+                            // completed task, or a blocked/failed status). A
+                            // content-free "available" idle just prints —
+                            // feeding it as a turn caused an unbounded
+                            // lead<->teammate ping-pong with no convergence.
+                            if completed_task_id.is_some() || completed_status.is_some() {
+                                regular.push(msg);
+                            }
                         }
                         crate::team::ProtocolMessage::ShutdownApproved { ref from } => {
                             println!(
@@ -6088,10 +6265,38 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         &config.model,
     );
 
+    // F31: lead-side watchdog. The lead is otherwise purely event-driven on
+    // its inbox, so a teammate that died silently (and whose SendMessage the
+    // lead already issued) would hang coordination forever. This ticks every
+    // 10s and surfaces any teammate whose heartbeat went stale, feeding the
+    // lead a synthetic notice so it can respawn/reassign. Each unresponsive
+    // episode is surfaced once (cleared when the teammate recovers).
+    let watchdog_mb = crate::team::Mailbox::new(crate::team::resolved_team_dir());
+    let mut team_watchdog = tokio::time::interval(tokio::time::Duration::from_secs(10));
+    team_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut warned_unresponsive: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    // F29: teammate messages that arrived DURING a lead turn (the turn's
+    // stream borrows `agent`, so we can't run a follow-up turn inline). They
+    // were already consumed from the channel + printed for visibility; we
+    // process them at the top of the next loop iteration where `agent` is
+    // free — so the lead reacts right after its turn instead of waiting for
+    // the user to press Enter.
+    let mut deferred_team: Vec<crate::team::TeamMessage> = Vec::new();
+
     // ── Normal interactive REPL ──────────────────────────────────────
     // Uses select! to race user input against team inbox messages so the
     // lead can respond to teammates without the user needing to press Enter.
     loop {
+        // F29: process teammate messages buffered during the previous turn.
+        // `agent` is free here (last turn's stream was dropped at the end of
+        // the prior iteration), so a follow-up lead turn is safe.
+        if !deferred_team.is_empty() {
+            let deferred = std::mem::take(&mut deferred_team);
+            process_team_messages!(deferred);
+        }
+
         // Drain Cardputer reset notifications quietly — when the user
         // hits Backspace on the device we zero the session counter so
         // both displays stay in sync. Silent on purpose; the device
@@ -6190,6 +6395,39 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     );
                     line = loop_line;
                     break;
+                }
+                _ = team_watchdog.tick(), if team_enabled => {
+                    // F31: surface newly-unresponsive teammates so the lead
+                    // can react instead of waiting on a dead inbox.
+                    let mut newly: Vec<crate::team::TeamMessage> = Vec::new();
+                    for s in watchdog_mb.all_status().unwrap_or_default() {
+                        if s.agent == "lead" || s.status == "stopped" {
+                            continue;
+                        }
+                        if s.is_stale() {
+                            if warned_unresponsive.insert(s.agent.clone()) {
+                                println!(
+                                    "\n{COLOR_YELLOW}[watchdog: teammate '{}' is unresponsive — no heartbeat for >10s (status={})]{COLOR_RESET}",
+                                    s.agent, s.status
+                                );
+                                newly.push(crate::team::TeamMessage::new(
+                                    "watchdog",
+                                    &format!(
+                                        "Teammate '{}' is unresponsive (no heartbeat for over 10s, last status={}). It likely crashed or stalled — respawn it with SpawnTeammate or reassign its work.",
+                                        s.agent, s.status
+                                    ),
+                                ));
+                            }
+                        } else {
+                            // Recovered → allow a future episode to re-warn.
+                            warned_unresponsive.remove(&s.agent);
+                        }
+                    }
+                    if !newly.is_empty() {
+                        process_team_messages!(newly);
+                        print!("{COLOR_CYAN}{REPL_PROMPT}{COLOR_RESET}");
+                        let _ = std::io::stdout().flush();
+                    }
                 }
             }
         }
@@ -11016,6 +11254,22 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     repl_cancel.cancel();
                     drop(stream);
                     break;
+                }
+                Some(msgs) = inbox_rx.recv(), if team_enabled => {
+                    // F29: a teammate reported mid-turn. Show it now for
+                    // visibility and buffer it; we handle it after this turn
+                    // (can't run a nested turn while `stream` borrows `agent`).
+                    print!("{}", crate::tool_display::clear_thinking_line());
+                    for m in &msgs {
+                        println!(
+                            "{COLOR_RESET}\n{COLOR_CYAN}[{} reported — handling after this turn]{COLOR_RESET}",
+                            m.from
+                        );
+                    }
+                    print!("{COLOR_GREEN}");
+                    let _ = std::io::stdout().flush();
+                    deferred_team.extend(msgs);
+                    continue;
                 }
                 _ = tokio::time::sleep(anim_delay) => {
                     spinner_tick += 1;

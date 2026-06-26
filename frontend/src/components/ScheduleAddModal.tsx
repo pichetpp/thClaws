@@ -229,6 +229,13 @@ export function ScheduleAddModal() {
               required
               pattern="[A-Za-z0-9_\-]+"
               placeholder="morning-brief"
+              // It's a slug, not prose — kill the WebKit text assists so
+              // they don't capitalize, autocorrect, or suggest saved
+              // values into the id (e.g. "morning-brief" → "Morning Brief").
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               className="w-full px-2 py-1.5 rounded border font-mono text-xs"
               style={inputStyle}
             />

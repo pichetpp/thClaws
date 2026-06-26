@@ -1349,6 +1349,19 @@ impl SessionStore {
         }
     }
 
+    /// Startup helper: the most-recent session **iff it carries no
+    /// messages**. App launch reuses this (instead of minting — and
+    /// persisting — yet another empty session every time) so empty
+    /// session files don't pile up. Returns `None` when there are no
+    /// sessions or the latest one already has chat history (so launch
+    /// still lands on a clean session rather than resuming a real chat).
+    pub fn reuse_empty_latest(&self) -> Result<Option<Session>> {
+        match self.latest()? {
+            Some(s) if s.messages.is_empty() => Ok(Some(s)),
+            _ => Ok(None),
+        }
+    }
+
     /// Rename a stored session by appending a rename event to its JSONL
     /// file. Pass an empty string to clear the title. Returns the updated
     /// [`Session`].
@@ -1887,6 +1900,42 @@ mod tests {
         let latest = store.latest().unwrap().unwrap();
         assert_eq!(latest.id, "sess-b");
         assert_eq!(latest.model, "m2");
+    }
+
+    #[test]
+    fn reuse_empty_latest_only_when_latest_is_empty() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path()).unwrap();
+
+        // No sessions yet → nothing to reuse.
+        assert!(store.reuse_empty_latest().unwrap().is_none());
+
+        // Latest is header-only (empty) → reuse it instead of minting.
+        std::fs::write(
+            store.path_for("sess-empty"),
+            r#"{"type":"header","id":"sess-empty","model":"m","cwd":"/tmp","created_at":100}"#
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+        assert_eq!(
+            store.reuse_empty_latest().unwrap().map(|s| s.id),
+            Some("sess-empty".to_string()),
+        );
+
+        // A newer session WITH a message becomes latest → don't reuse
+        // (launch lands on a fresh session, not this real chat).
+        std::fs::write(
+            store.path_for("sess-used"),
+            format!(
+                "{}\n{}\n",
+                r#"{"type":"header","id":"sess-used","model":"m","cwd":"/tmp","created_at":200}"#,
+                r#"{"type":"user","content":[{"type":"text","text":"hi"}],"timestamp":200}"#,
+            ),
+        )
+        .unwrap();
+        assert!(store.reuse_empty_latest().unwrap().is_none());
     }
 
     #[test]

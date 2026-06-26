@@ -14,7 +14,10 @@ thclaws.subagent({
   prompt: string,           // required — what the worker should do
   budget?: {                // Stages G + I: both enforced
     time?: number | string, //   number = seconds; "60s" / "2m" / "1m30s" / "500ms"
-    tokens?: number,        //   input + output cap per worker call
+    tokens?: number,        //   OUTPUT-token runaway cap per worker (input is
+                            //   NEVER counted). A generation guard, not a cost
+                            //   cap — omit unless bounding a worker that might
+                            //   generate without end. See Cost awareness.
   },
   schema?: object,          // Stage H: JSON Schema; on success the call returns
                             //   the parsed value (not text). Worker prompt gets
@@ -144,12 +147,28 @@ out.map(p => `Page ${p.n}:\n${p.th}`).join("\n\n---\n\n");
 
 # Cost awareness
 
-Each `thclaws.subagent` call is a separate LLM turn — typically a few
-seconds and a few hundred to a few thousand tokens. Workflows with 200+
-parallel subagents add up quickly. If the user's goal naturally limits
-fan-out (e.g. "for each of the 8 services") use that directly; if it's
-unbounded (e.g. "for every file") have a discovery subagent return the
-list first so the fan-out cardinality is visible before launch.
+Each `thclaws.subagent` call is a separate LLM turn. Its token use is
+dominated by **input context** — the system prompt, the worker's prompt,
+and anything it reads (files, tool results) — not just its output. On a
+large-context model (e.g. 1M) a single normal turn is easily **tens of
+thousands of tokens**, and a worker that reads a file or does a few tool
+calls can use 50k+.
+
+**Default: do NOT set `budget.tokens`.** Leave it off unless you're
+specifically guarding a worker that could *generate* without end (no
+natural stopping point). It caps a worker's **output** tokens only — its
+input (the prompt + anything it reads) never counts — so it protects
+against runaway generation, nothing else; the worker count is already
+bounded by your script's control flow. When you do bound a worker, prefer
+`budget.time` for wall-clock and `retry` for flakiness. If you ever set
+`budget.tokens` anyway, size it to the largest sane output (a long report
+is still well under ~50k output tokens), never a tight cap.
+
+Workflows with 200+ parallel subagents add up quickly. If the user's goal
+naturally limits fan-out (e.g. "for each of the 8 services") use that
+directly; if it's unbounded (e.g. "for every file") have a discovery
+subagent return the list first so the fan-out cardinality is visible
+before launch.
 
 # Now: write the script
 

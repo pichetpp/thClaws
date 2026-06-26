@@ -967,12 +967,20 @@ fn subagent(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
                 // last entry. Post-hoc enforcement only — we can't
                 // abort mid-stream — so this acts as a soft cap that
                 // triggers retry on the next iteration.
+                //
+                // Count OUTPUT tokens only — this is a runaway-GENERATION
+                // guard, not a total-cost cap. The worker's input is fixed
+                // by the task (its prompt + whatever it reads), and on a
+                // large-context model that input alone is tens of thousands
+                // of tokens, so counting it would falsely kill normal
+                // workers (a worker that just reads a file would "exceed"
+                // any modest cap before producing anything).
                 if let Some(token_cap) = budget.tokens {
                     if let Some(u) = last_worker_usage() {
-                        let used = (u.input_tokens + u.output_tokens) as u64;
+                        let used = u.output_tokens as u64;
                         if used > token_cap {
                             last_failure = Some(format!(
-                                "worker exceeded token budget of {token_cap} (used {used})"
+                                "worker exceeded output-token budget of {token_cap} (generated {used})"
                             ));
                             // Budget overrun is deterministic — honor the
                             // script's `retry.max`, don't spend the
@@ -2386,8 +2394,10 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
                 // (real Tool wires this through SubAgentTool::call;
                 // this mock does it directly so the test stays local).
                 crate::workflow::push_worker_usage(crate::providers::Usage {
-                    input_tokens: 800,
-                    output_tokens: 400,
+                    // Huge input (like a 1M-context worker that read a big
+                    // file) but it's IGNORED — only output is capped.
+                    input_tokens: 50_000,
+                    output_tokens: 600,
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                     reasoning_output_tokens: None,
@@ -2434,6 +2444,73 @@ paths.map((p, i) => `${p} — ${summaries[i]}`).join("\n");"#;
             "expected token-budget error: {msg}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tokens_budget_ignores_large_input_context() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // Regression for the reported /workflow failure: a worker on a
+        // large-context model that READ a lot (huge input) but generated
+        // little must NOT be killed by a modest token budget — the cap is
+        // output-only, so its input never counts against it.
+        struct ReadHeavyTask {
+            calls: Arc<AtomicU32>,
+        }
+        #[async_trait]
+        impl Tool for ReadHeavyTask {
+            fn name(&self) -> &'static str {
+                "Task"
+            }
+            fn description(&self) -> &'static str {
+                "read-heavy mock"
+            }
+            fn input_schema(&self) -> Value {
+                json!({})
+            }
+            async fn call(&self, _input: Value) -> crate::Result<String> {
+                crate::workflow::push_worker_usage(crate::providers::Usage {
+                    input_tokens: 57_529, // mostly input, like the reported run
+                    output_tokens: 1_200,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                    reasoning_output_tokens: None,
+                });
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok("done".into())
+            }
+        }
+        let calls = Arc::new(AtomicU32::new(0));
+        let mock: Arc<dyn Tool> = Arc::new(ReadHeavyTask {
+            calls: calls.clone(),
+        });
+        let script = r#"
+            try {
+              thclaws.subagent({ prompt: "summarize", budget: {tokens: 8000} });
+              "ok";
+            } catch (e) { "ERR:" + e.message; }
+        "#
+        .to_string();
+
+        let result: std::result::Result<String, String> = tokio::task::spawn_blocking(move || {
+            set_task_tool(Some(mock));
+            set_usage_sink(true);
+            let res = (|| -> std::result::Result<String, String> {
+                let mut sb = WorkflowSandbox::new().map_err(|e| e.to_string())?;
+                sb.run(&script).map_err(|e| e.to_string())
+            })();
+            set_task_tool(None);
+            set_usage_sink(false);
+            res
+        })
+        .await
+        .unwrap();
+
+        let out = result.unwrap();
+        assert_eq!(
+            out, "ok",
+            "input-heavy worker must not exceed an output-token budget: {out}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

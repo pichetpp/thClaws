@@ -3319,6 +3319,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     serde_json::json!({
                         "name": a.agent,
                         "status": a.status,
+                        // `alive=false` when the heartbeat is stale (crashed /
+                        // never booted) so the Team tab can flag it; the raw
+                        // status word alone freezes on its last value.
+                        "alive": a.agent == "lead" || a.status == "stopped" || !a.is_stale(),
+                        "last_heartbeat": a.last_heartbeat,
                         "task": a.current_task,
                         "output": output,
                     })

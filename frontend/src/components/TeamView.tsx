@@ -123,6 +123,7 @@ interface AgentInfo {
   status: string;
   task: string | null;
   output: string[];
+  alive: boolean;
 }
 
 export function TeamView() {
@@ -137,6 +138,7 @@ export function TeamView() {
             status: String(a.status || "unknown"),
             task: a.task ? String(a.task) : a.current_task ? String(a.current_task) : null,
             output: Array.isArray(a.output) ? a.output as string[] : [],
+            alive: a.alive !== false,
           }))
         );
       } else if (
@@ -215,12 +217,16 @@ function AgentPane({ agent }: { agent: AgentInfo }) {
     setInput("");
   }
 
-  const statusColor =
-    agent.status === "working"
-      ? "var(--warning)"
-      : agent.status === "idle"
-      ? "var(--text-secondary)"
-      : "var(--accent)";
+  // A stale heartbeat (crashed / never-booted teammate) overrides the raw
+  // status word, which would otherwise freeze on its last value.
+  const statusLabel = agent.alive ? agent.status : "unresponsive";
+  const statusColor = !agent.alive
+    ? "var(--danger)"
+    : agent.status === "working"
+    ? "var(--warning)"
+    : agent.status === "idle"
+    ? "var(--text-secondary)"
+    : "var(--accent)";
 
   return (
     <div
@@ -237,7 +243,7 @@ function AgentPane({ agent }: { agent: AgentInfo }) {
       >
         <span style={{ color: "var(--accent)" }}>{agent.name}</span>
         <span style={{ color: statusColor }}>
-          {agent.status}
+          {statusLabel}
           {agent.task ? ` · ${agent.task}` : ""}
         </span>
       </div>

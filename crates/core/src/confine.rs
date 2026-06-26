@@ -277,6 +277,41 @@ pub fn maybe_handle_confine_subcommand() {
     linux::maybe_handle_subcommand();
 }
 
+/// Emitted to stderr by the `__confine` helper when it CANNOT install OS
+/// confinement and bails *before* running the command (it exits with
+/// `EXIT_NO_ENFORCE`). The Bash chokepoint detects this and re-runs the
+/// command unconfined — the workspace/container is still the boundary in
+/// environments where the kernel confiner is unavailable, e.g. some
+/// container kernels where the Landlock syscalls return `EINVAL`. Control
+/// chars make a collision with real command output effectively impossible.
+pub const NO_ENFORCE_SENTINEL: &str = "\u{1}thclaws-confine-unenforced\u{1}";
+
+/// True when `out` carries the no-enforce sentinel (the confiner bailed
+/// without running the command, so the caller should re-run unconfined).
+pub fn output_shows_no_enforce(out: &str) -> bool {
+    out.contains(NO_ENFORCE_SENTINEL)
+}
+
+/// Set once the confiner has bailed at runtime (no-enforce sentinel seen).
+/// Future commands then skip the doomed confined attempt rather than paying
+/// an extra process spawn per command.
+static CONFINE_RUNTIME_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Called by the Bash chokepoint when it observes the no-enforce sentinel,
+/// so subsequent `shell_command_async` calls skip the failing confiner.
+pub fn mark_no_enforce() {
+    CONFINE_RUNTIME_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+// Only the Linux Landlock path consults this (macOS uses build-time
+// sandbox-exec detection, not a runtime sentinel), so it's dead code
+// elsewhere.
+#[cfg(target_os = "linux")]
+fn confine_runtime_failed() -> bool {
+    CONFINE_RUNTIME_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The chokepoint `bash.rs` calls instead of `util::shell_command_async`:
 /// returns a confined `sh -c <command>` when a policy is active and a confiner
 /// is available on this OS, else a plain `sh -c <command>` (unchanged).
@@ -468,6 +503,11 @@ mod linux {
     /// Probe once that Landlock actually confines on this kernel by running our
     /// own `__confine --selftest`.
     fn landlock_enforces() -> bool {
+        // A prior command already proved Landlock can't enforce here (e.g.
+        // EINVAL on this container kernel) — skip it from now on.
+        if super::confine_runtime_failed() {
+            return false;
+        }
         static OK: OnceLock<bool> = OnceLock::new();
         *OK.get_or_init(|| {
             let Ok(exe) = std::env::current_exe() else {
@@ -517,9 +557,17 @@ mod linux {
         }
         match apply_landlock(&write_roots) {
             Ok(true) => {}
-            Ok(false) => std::process::exit(EXIT_NO_ENFORCE),
+            // Confiner can't enforce (Landlock absent, or EINVAL on some
+            // container kernels). Emit the sentinel so the Bash chokepoint
+            // re-runs the command unconfined instead of surfacing exit 78 +
+            // a scary "landlock setup failed" with no output.
+            Ok(false) => {
+                eprintln!("{}", super::NO_ENFORCE_SENTINEL);
+                std::process::exit(EXIT_NO_ENFORCE);
+            }
             Err(e) => {
-                eprintln!("thclaws __confine: landlock setup failed: {e}");
+                eprintln!("thclaws __confine: landlock unavailable ({e}) — running unconfined");
+                eprintln!("{}", super::NO_ENFORCE_SENTINEL);
                 std::process::exit(EXIT_NO_ENFORCE);
             }
         }
@@ -678,6 +726,19 @@ mod tests {
         assert_eq!(ConfineMode::parse("STRICT"), ConfineMode::Strict);
         assert_eq!(ConfineMode::parse(""), ConfineMode::Off);
         assert_eq!(ConfineMode::parse("nonsense"), ConfineMode::Off);
+    }
+
+    #[test]
+    fn no_enforce_sentinel_detection() {
+        // Real command output never trips it.
+        assert!(!output_shows_no_enforce("total 0\nfoo.txt\n"));
+        assert!(!output_shows_no_enforce("[exit code 78]"));
+        // The exact sentinel the __confine helper emits does.
+        assert!(output_shows_no_enforce(&format!(
+            "[stderr]\n{NO_ENFORCE_SENTINEL}\n[exit code 78]"
+        )));
+        // Sentinel uses control chars, so it can't collide with normal text.
+        assert!(NO_ENFORCE_SENTINEL.contains('\u{1}'));
     }
 
     #[test]

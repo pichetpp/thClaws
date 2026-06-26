@@ -187,8 +187,28 @@ impl Tool for BashTool {
         }
 
         let effective_timeout = if is_server { 5000 } else { timeout_ms };
-        let server_output =
+        let mut server_output =
             run_shell_command(&command, &resolved_cwd, effective_timeout, is_server).await?;
+
+        // F30: concurrent team members sharing one git index collide on
+        // `.git/index.lock` ("fatal: Unable to create '.../.git/index.lock':
+        // File exists"). That's a transient race, not a real failure — retry
+        // a few times with a short backoff before surfacing it. Gated on the
+        // specific error signature so ordinary output isn't re-run, and
+        // skipped for server commands (which are expected to keep running).
+        if !is_server {
+            let mut tries: u32 = 0;
+            while tries < 3
+                && server_output.contains("index.lock")
+                && server_output.contains("File exists")
+            {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(250 * tries as u64)).await;
+                server_output =
+                    run_shell_command(&command, &resolved_cwd, effective_timeout, is_server)
+                        .await?;
+            }
+        }
 
         // Combine setup output with server output.
         if setup_output.is_empty() {
@@ -208,11 +228,40 @@ async fn run_shell_command(
     timeout_ms: u64,
     is_server: bool,
 ) -> Result<String> {
+    let out = run_shell_command_inner(command, cwd, timeout_ms, is_server, true).await?;
+    // If the OS confiner couldn't enforce, it bailed BEFORE running the
+    // command (exiting with a no-enforce sentinel, NOT the command's output).
+    // Re-run unconfined so the command actually executes — the workspace /
+    // container remains the security boundary in environments where the
+    // kernel confiner is unavailable (e.g. a hosted runner whose container
+    // kernel returns EINVAL from the Landlock syscalls). Without this, every
+    // Bash call (and `!` shell escape) fails with "landlock setup failed,
+    // exit 78" and no output.
+    if crate::confine::output_shows_no_enforce(&out) {
+        // Remember so later commands skip the doomed confined attempt.
+        crate::confine::mark_no_enforce();
+        return run_shell_command_inner(command, cwd, timeout_ms, is_server, false).await;
+    }
+    Ok(out)
+}
+
+async fn run_shell_command_inner(
+    command: &str,
+    cwd: &std::path::Path,
+    timeout_ms: u64,
+    is_server: bool,
+    confined: bool,
+) -> Result<String> {
     // dev-plan/49: route through the OS confiner — returns a sandbox-exec /
     // bwrap-wrapped `sh -c` when bash.sandbox is on and a confiner is
     // available, else a plain `sh -c` (unchanged). One chokepoint, so
-    // subagent/workflow Bash is confined identically.
-    let mut cmd = crate::confine::shell_command_async(command);
+    // subagent/workflow Bash is confined identically. `confined=false` is the
+    // unconfined re-run path when the confiner couldn't enforce.
+    let mut cmd = if confined {
+        crate::confine::shell_command_async(command)
+    } else {
+        crate::util::shell_command_async(command)
+    };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1019,10 +1068,12 @@ fn classify_leaf_as_server(leaf: &str, sub: &str, third: &str) -> bool {
         // Python web frameworks
         "flask" => sub == "run",
         "django-admin" => sub == "runserver",
-        "python" | "python3" => matches!(
-            sub,
-            "app.py" | "main.py" | "server.py" | "run.py" | "wsgi.py" | "asgi.py"
-        ),
+        "python" | "python3" => {
+            matches!(
+                sub,
+                "app.py" | "main.py" | "server.py" | "run.py" | "wsgi.py" | "asgi.py"
+            ) || (sub == "manage.py" && third == "runserver") // Django dev server
+        }
         // After `python -m`, the leaf becomes the module name.
         "http.server" => true,
 
@@ -1037,12 +1088,25 @@ fn classify_leaf_as_server(leaf: &str, sub: &str, third: &str) -> bool {
         "go" => sub == "run",
 
         // Docker
-        "docker" => sub == "compose" && third == "up",
-        "docker-compose" => sub == "up",
+        "docker" => {
+            (sub == "compose" && third == "up")
+                || (sub == "logs" && matches!(third, "-f" | "--follow"))
+        }
+        "docker-compose" => sub == "up" || (sub == "logs" && matches!(third, "-f" | "--follow")),
 
         // Kubernetes
-        "kubectl" => sub == "port-forward",
+        "kubectl" => sub == "port-forward" || (sub == "logs" && matches!(third, "-f" | "--follow")),
         "cloudflared" => sub == "tunnel",
+
+        // Long-blocking utilities that never return on their own — these
+        // would otherwise foreground-hang for the full Bash timeout.
+        "tail" => matches!(sub, "-f" | "-F" | "--follow"),
+        "watch" => true,
+        "nc" | "ncat" | "netcat" => sub == "-l" || sub.starts_with("-l"),
+        "ssh" => {
+            matches!(sub, "-N" | "-L" | "-R" | "-D" | "-W")
+                || matches!(third, "-N" | "-L" | "-R" | "-D" | "-W")
+        }
 
         // `serve <dir>` — the `serve` npm package serves static files.
         // Only treat as server when there's a path argument.

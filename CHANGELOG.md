@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.77.0] - 2026-06-26
+
+Adds auto-image resize for vision, gateway-side payload bounding, monorepo orientation docs, and stability+behavior fixes across agent, team, and serve-server. Several agent tutorial chapters expanded.
+
+### Added
+- **Auto-image downscaling for vision use.** Oversized images passed to vision models are now automatically downscaled to fit under the 5MB payload limit instead of erroring.
+- **Gateway image payload bounding.** Outgoing image payloads are now capped at the gateway 5MB body constraint, enforcing the limit before upload.
+- **Root CLAUDE.md with monorepo orientation and deploy flow.** Adds a centralized guide for contributors and internal releases.
+- **Toggle-finder-hidden utility.** Exposes a quick util to toggle visibility of hidden files in Finder.
+- **User tutorial expansion.** New/expanded agent team/collaboration chapters (ch04b/c/d, ch16), updated screenshots in ch13/14/15, and a markdown-to-PPTX generator.
+
+### Changed
+- **PdfRead vision fallback for Thai text.** Garbled Thai text from PDFs now routes to the vision-OCR fallback before extracting content, further increasing extraction fidelity.
+
+### Fixed
+- **OpenAI error labeling.** Prevents mislabeling a size-capped 4xx error as "model not vision-capable" when the issue is actually request size.
+- **Silence confine dead-code warning on non-Linux.** Suppresses noisy compiler warnings regarding unused code in confine_runtime_failed.
+- **Confine fallback logic.** Falls back to unconfined mode cleanly if the OS confiner can't enforce sandbox boundaries.
+- **Serve tool-approval prompt delivery.** Tool approval prompts now deliver correctly over WebSockets, unblocking the turn for multiuser or hosted net.
+- **Serve multiuser safety net + override.** Ensures auto-approval always applies in hosted/multiuser workspaces and issues an explicit notice when locally overridden.
+- **Agent Teams audit fixes.** Stability audit resolves 32 items and closes the 3 deferred audit findings (F29/F30/F31), significantly improving Teams reliability.
+- **Media-job log compaction.** Appends and compacts media-jobs.jsonl content to one entry per terminal job state via atomic tmp-rename, preventing log bloat.
+
 ## [0.75.0] - 2026-06-25
 
 ### Added

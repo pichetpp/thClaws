@@ -467,6 +467,28 @@ fn strip_request_images(req: &StreamRequest) -> StreamRequest {
     out
 }
 
+/// True when a 4xx response is a request-size / body-cap rejection rather than
+/// a modality (image) rejection. The image-strip retry below must NOT fire on
+/// these: stripping the images would wrongly stamp a vision-capable model
+/// (e.g. gpt-4.1-nano) as "not vision-capable" and hide the real cause (too
+/// many / too-large images in one request — the gateway's 5 MB body cap).
+fn is_request_too_large(status: reqwest::StatusCode, body: &str) -> bool {
+    if status.as_u16() == 413 {
+        return true;
+    }
+    let t = body.to_ascii_lowercase();
+    [
+        "byte cap",
+        "request body",
+        "too large",
+        "payload too large",
+        "request_too_large",
+        "entity too large",
+    ]
+    .iter()
+    .any(|needle| t.contains(needle))
+}
+
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -536,20 +558,25 @@ impl Provider for OpenAIProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            // Issue #164 follow-up: a 4xx on a request shipping image
-            // pixels is almost always a text-only model rejecting
-            // `image_url` (Read on an image, a scanned PDF, or — the case
-            // that dead-ends a session — a TextToImage result sitting in
-            // history in front of a non-vision chat model, where EVERY
-            // later turn would 400 too). Retry ONCE with the pixels
-            // swapped for a short text note so the turn completes; only
-            // surface the hard error (with a hint) if that also fails.
-            if status.is_client_error() && request_carries_image(&req) {
+            // Read the error body once, up front: we both classify it and
+            // surface it. (Consumes `resp`; the success/strip-retry paths
+            // below reassign it.)
+            let text = resp.text().await.unwrap_or_default();
+            let carries_image = request_carries_image(&req);
+            let too_large = is_request_too_large(status, &text);
+
+            // Issue #164 follow-up: a 4xx on a request shipping image pixels
+            // is *usually* a text-only model rejecting `image_url`. Retry ONCE
+            // with the pixels swapped for a short text note so the turn
+            // completes. BUT a size/body-cap 4xx (the gateway's 5 MB cap, or a
+            // 413) is NOT a vision problem — stripping there would mislabel a
+            // vision-capable model as "not vision-capable" and mask the real
+            // cause, so we surface a clear size error instead.
+            if status.is_client_error() && carries_image && !too_large {
                 let retry_body = self.build_body(&strip_request_images(&req));
                 match self.send_body(&retry_body).await {
                     Ok(r) if r.status().is_success() => resp = r,
                     _ => {
-                        let text = resp.text().await.unwrap_or_default();
                         return Err(Error::Provider(format!(
                             "http {status}: {}\n\n⚠️ This request included an image, but model `{}` may not support image input. \
                              Switch to a vision-capable model (e.g. dashscope/qwen3-vl-plus, gpt-4o, gemini-2.x, a Claude model), \
@@ -559,8 +586,13 @@ impl Provider for OpenAIProvider {
                         )));
                     }
                 }
+            } else if too_large && carries_image {
+                return Err(Error::Provider(format!(
+                    "http {status}: {}\n\n⚠️ The request body is too large because of image data — not a vision-capability problem. \
+                     Read fewer images per turn (the engine also auto-downscales images to fit the body cap).",
+                    super::redact_key(&text, &self.api_key)
+                )));
             } else {
-                let text = resp.text().await.unwrap_or_default();
                 return Err(Error::Provider(format!(
                     "http {status}: {}",
                     super::redact_key(&text, &self.api_key)
@@ -904,6 +936,23 @@ mod tests {
     use super::*;
     use crate::providers::{assemble, collect_turn};
     use crate::types::Message;
+
+    #[test]
+    fn size_cap_4xx_not_classified_as_vision_error() {
+        use reqwest::StatusCode;
+        // The gateway's body-cap 400 must read as a size error, so the
+        // image-strip ("not vision-capable") retry is skipped.
+        assert!(is_request_too_large(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"request body exceeds 5242880 byte cap"}"#
+        ));
+        assert!(is_request_too_large(StatusCode::PAYLOAD_TOO_LARGE, ""));
+        // A genuine modality rejection is NOT a size error → strip path stays.
+        assert!(!is_request_too_large(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"This model does not support image_url","type":"invalid_request_error"}}"#
+        ));
+    }
 
     fn parse_all(chunks: &[&str]) -> Vec<ProviderEvent> {
         let mut state = ParseState::default();

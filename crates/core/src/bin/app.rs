@@ -662,7 +662,12 @@ fn respawn_detached_for_gui_if_needed(cli: &Cli) {
     // Only respawn when the dispatch is actually GUI: not --cli/--print/
     // --telegram/--messenger, and either plain GUI (no --serve) or the
     // --serve --gui combo.
-    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger || cli.workflow.is_some();
+    let use_cli = cli.cli
+        || cli.print
+        || cli.telegram
+        || cli.messenger
+        || cli.workflow.is_some()
+        || cli.team_agent.is_some();
     let is_gui_dispatch = !use_cli && (!cli.serve || cli.gui);
     if !is_gui_dispatch {
         return;
@@ -792,7 +797,12 @@ async fn main() {
         None => {}
     }
 
-    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger || cli.workflow.is_some();
+    let use_cli = cli.cli
+        || cli.print
+        || cli.telegram
+        || cli.messenger
+        || cli.workflow.is_some()
+        || cli.team_agent.is_some();
 
     // Issue #109: on Windows, respawn detached so cmd.exe / PowerShell
     // return the prompt instead of waiting on the GUI window. Runs

@@ -1443,12 +1443,11 @@ async fn run_worker(
     // teammate process that happened to share this code path.
     let is_teammate = std::env::var("THCLAWS_TEAM_AGENT").is_ok();
     crate::team::set_is_team_lead(team_enabled && !is_teammate);
-    // M6.34 TEAM3: capture team_dir so the GUI's lead-process exit
-    // can scope the kill to its own teammates only. Even though the
-    // GUI doesn't currently call kill_my_teammates() at shutdown
-    // (the OS reclaims child processes when the GUI quits), recording
-    // the dir keeps parity with the CLI lead and unblocks future
-    // explicit "Stop all teammates" UI affordances.
+    // M6.34 TEAM3: capture team_dir so the GUI's lead-process exit can
+    // scope the kill to its own teammates only. The GUI DOES call
+    // kill_my_teammates() at shutdown (gui.rs) — teammates run in
+    // tmux-server-owned panes, not GUI child processes, so they are NOT
+    // reclaimed when the GUI quits; the explicit scoped kill is required.
     if team_enabled && !is_teammate {
         let td = std::env::var("THCLAWS_TEAM_DIR")
             .map(std::path::PathBuf::from)
@@ -1635,7 +1634,17 @@ async fn run_worker(
     // came back "unknown tool: Task". SUB4: cancel is threaded into
     // the factory so ctrl-C in the GUI stops in-flight subagents
     // (CLI passes None — no cancel plumbing there yet).
-    let perm_mode = if config.permissions == "auto" {
+    let perm_mode = if config.permissions == "ask" {
+        // Explicit Ask is honored even when hosted — it works via the serve
+        // approval modal (delivered over the WS + re-emitted on reconnect).
+        crate::permissions::PermissionMode::Ask
+    } else if config.permissions == "auto" {
+        crate::permissions::PermissionMode::Auto
+    } else if std::env::var("THCLAWS_HOSTED").is_ok() {
+        // Hosted safety net: an unexpected non-auto/non-ask value (e.g. a
+        // settings.json parse fallback) must not leave a managed cloud
+        // sandbox stuck in Ask with no approval UI — that's the "Write hangs,
+        // no file" failure. Default hosted to Auto.
         crate::permissions::PermissionMode::Auto
     } else {
         crate::permissions::PermissionMode::Ask
@@ -1808,7 +1817,20 @@ async fn run_worker(
         .map(|r| r.sessions_dir.clone())
         .or_else(SessionStore::default_path)
         .map(SessionStore::new);
-    let current_session = Session::new(&config.model, cwd.to_string_lossy());
+    // Reuse the most-recent session when it's still EMPTY instead of
+    // minting a new one on every launch. Each mint writes a header below
+    // (so SessionStore::list sees it), so without this an empty session
+    // file would pile up every time the app starts. A non-empty latest is
+    // left untouched — desktop still lands on a clean session (e14fdf8a),
+    // just without spawning a duplicate empty one. The reused session
+    // adopts the current default model.
+    let mut current_session = Session::new(&config.model, cwd.to_string_lossy());
+    if let Some(store) = session_store.as_ref() {
+        if let Ok(Some(mut empty)) = store.reuse_empty_latest() {
+            empty.model = config.model.clone();
+            current_session = empty;
+        }
+    }
     // Point the plan-persistence arc at the initial session's JSONL
     // path so any SubmitPlan / UpdatePlanStep call before the first
     // /load gets persisted. Subsequent session swaps reassign this
@@ -1951,8 +1973,12 @@ async fn run_worker(
     if team_enabled {
         let poller_tx = input_tx_self.clone();
         tokio::spawn(async move {
-            let mailbox = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+            // Absolute team dir (not the relative default) so a mid-session
+            // cwd change doesn't desync this poller from the teammates.
+            let mailbox = crate::team::Mailbox::new(crate::team::resolved_team_dir());
             loop {
+                // Lead heartbeat for liveness/staleness checks.
+                let _ = mailbox.write_status("lead", "active", None);
                 let unread = mailbox.read_unread("lead").unwrap_or_default();
                 if !unread.is_empty() {
                     let ids: Vec<String> = unread.iter().map(|m| m.id.clone()).collect();

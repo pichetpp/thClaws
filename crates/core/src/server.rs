@@ -186,6 +186,11 @@ struct ServeState {
     /// cloud reaper is then free to pause the workspace after its
     /// idle-timeout window.
     ws_connections: Arc<AtomicUsize>,
+    /// One-line notice surfaced to each connecting client when the
+    /// configured permission mode had to be overridden (e.g. a multiuser
+    /// pod where "ask" can't be routed per-user, so it falls back to
+    /// auto-approve). `None` when nothing was overridden.
+    permission_notice: Option<String>,
 }
 
 /// State derived from [`MultiTenantMode`] at server bootstrap. Held
@@ -259,7 +264,7 @@ pub async fn run(config: ServeConfig) -> crate::error::Result<()> {
         }
     }
 
-    let (approver, _approval_rx) = crate::permissions::GuiApprover::new();
+    let (approver, mut approval_rx) = crate::permissions::GuiApprover::new();
     let shared = Arc::new(crate::shared_session::spawn_with_approver(approver.clone()));
     // The frontend's "I'm ready" handshake unblocks deferred startup
     // (MCP spawn, etc.). Without a UI to wait on, signal immediately
@@ -309,6 +314,33 @@ pub async fn run(config: ServeConfig) -> crate::error::Result<()> {
         });
     }
 
+    // Approval bridge — the fix for the serve hang. Pre-fix this rx was
+    // dropped (`_approval_rx`), so when a tool required approval (any time
+    // the permission mode is Ask) `GuiApprover::approve()` sent the request
+    // into an unserviced channel and blocked on its oneshot FOREVER: a hung
+    // turn with no file written. We now drain the channel and broadcast each
+    // `approval_request` to every WS client; the frontend renders the modal
+    // and the decision returns via `handle_ipc`'s `approval_response` arm,
+    // which calls `approver.resolve(id, decision)`. Mirrors the AskUser
+    // bridge above (the responder oneshots live inside the GuiApprover, so
+    // no `pending_asks` bookkeeping is needed here).
+    {
+        let approval_broadcast = ask_broadcast.clone();
+        tokio::spawn(async move {
+            while let Some(req) = approval_rx.recv().await {
+                let payload = serde_json::json!({
+                    "type": "approval_request",
+                    "id": req.id,
+                    "tool_name": req.tool_name,
+                    "input": req.input,
+                    "summary": req.summary,
+                    "originator": req.originator,
+                });
+                let _ = approval_broadcast.send(payload.to_string());
+            }
+        });
+    }
+
     run_with_engine(config, approver, shared, pending_asks, ask_broadcast).await
 }
 
@@ -331,8 +363,36 @@ pub async fn run_with_engine(
     // dev-plan/42: flag the process as multiuser so global cwd/sandbox
     // mutators (IPC `set_cwd`) stay no-ops — per-session roots come from
     // the task-local working dir, not process-global state.
+    let mut permission_notice: Option<String> = None;
     if config.multi_tenant.is_some() {
         crate::workdir::set_multiuser(true);
+        // MULTIUSER approval safety net. One shared worker processes every
+        // user's turns and ShellInput carries no user_id, so an approval
+        // request can't be routed to the user who triggered it: broadcasting
+        // it pod-wide would leak one user's prompt to another, and blocking
+        // would hang. Auto-approve instead — multiuser isolates each user in
+        // their own `workspace-<user_id>/` folder, so an auto-approved tool
+        // is bounded to that user's own sandbox. `spawn_with_approver` set
+        // the mode from config.permissions; override it to Auto here.
+        let was_ask = crate::permissions::current_mode() == crate::permissions::PermissionMode::Ask;
+        crate::permissions::set_current_mode(crate::permissions::PermissionMode::Auto);
+        if was_ask {
+            // The pod was configured for "ask" — surface why it isn't honored
+            // (rare, but shouldn't be silent).
+            permission_notice = Some(
+                "“ask” permission mode isn't supported in shared (multiuser) workspaces — \
+                 tool approvals can't be routed to an individual user, so thClaws uses \
+                 auto-approve here. Your files stay isolated to your own workspace folder."
+                    .to_string(),
+            );
+            eprintln!(
+                "\x1b[33m[serve] multiuser: configured 'ask' overridden to auto-approve (not per-user routable)\x1b[0m"
+            );
+        } else {
+            eprintln!(
+                "\x1b[36m[serve] multiuser: auto-approve (folder-isolated; approvals aren't per-user routable)\x1b[0m"
+            );
+        }
     }
     // dev-plan/35 Tier 1: construct the multi-tenant registry +
     // background evictor when multi-tenant mode is configured.
@@ -372,6 +432,7 @@ pub async fn run_with_engine(
         workspace: Arc::new(workspace),
         multi_tenant: multi_tenant_state,
         ws_connections: ws_connections.clone(),
+        permission_notice,
     };
 
     // Cloud heartbeat: when running inside a thclaws.cloud workspace
@@ -1217,6 +1278,33 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
         }
     });
 
+    // Surface a one-time permission notice (e.g. a multiuser pod where a
+    // configured "ask" was overridden to auto-approve) as a chat/system line
+    // so the user understands why their setting wasn't honored.
+    if let Some(notice) = &state.permission_notice {
+        for dispatch in render_chat_dispatches(&ViewEvent::SlashOutput(notice.clone())) {
+            let _ = out_tx.send(dispatch);
+        }
+    }
+
+    // Re-emit any STILL-PENDING approval requests to this freshly-connected
+    // client. The broadcast above only reaches tabs connected at the moment
+    // a request fires, so a browser that connects later — e.g. after the
+    // user refreshes mid-turn — would never see the modal and the turn would
+    // stay hung. Replaying the unresolved set lets the reconnected tab
+    // approve and unblock it.
+    for req in state.approver.unresolved_requests() {
+        let payload = serde_json::json!({
+            "type": "approval_request",
+            "id": req.id,
+            "tool_name": req.tool_name,
+            "input": req.input,
+            "summary": req.summary,
+            "originator": req.originator,
+        });
+        let _ = out_tx.send(payload.to_string());
+    }
+
     // M6.36 SERVE3: subscribe to the broadcast and translate every
     // ViewEvent into chat-shaped + terminal-shaped envelopes, identical
     // to gui::spawn_event_translator's path. Both translators feed the
@@ -1822,6 +1910,7 @@ mod tests {
             workspace: std::sync::Arc::new(std::env::temp_dir()),
             multi_tenant,
             ws_connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            permission_notice: None,
         }
     }
 
