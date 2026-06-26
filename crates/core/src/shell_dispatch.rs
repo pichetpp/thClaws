@@ -470,10 +470,12 @@ pub async fn dispatch(
                 );
                 // GUI side: also broadcast a model_picker_open event so
                 // the existing ModelPickerModal opens with the active
-                // provider's catalogue. Skipped for tiny catalogues
-                // (<3 entries — no choice to make) and runtime-loaded
-                // backends (Ollama / LMStudio) whose model lists come
-                // from the live runtime, not the catalogue. Closes #25.
+                // provider's catalogue. Skipped only when there's nothing
+                // to choose (<2 entries) and for runtime-loaded backends
+                // (Ollama / LMStudio) whose model lists come from the live
+                // runtime, not the catalogue. (Was <3, which wrongly hid the
+                // picker for 2-model providers like DeepSeek — flash/pro is a
+                // real choice.) Closes #25.
                 let runtime_loaded = matches!(prov, "ollama" | "ollama-anthropic" | "lmstudio");
                 if !runtime_loaded {
                     let cat = crate::model_catalogue::EffectiveCatalogue::load();
@@ -489,7 +491,7 @@ pub async fn dispatch(
                             e.input_per_mtok.is_some() && e.output_per_mtok.is_some()
                         });
                     }
-                    if models.len() >= 3 {
+                    if models.len() >= 2 {
                         let _ = crate::providers::ProviderKind::detect(&state.config.model);
                         let model_rows: Vec<serde_json::Value> = models
                             .iter()

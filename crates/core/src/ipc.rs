@@ -360,6 +360,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 || crate::config::AppConfig::load()
                     .map(|c| c.image_tools_enabled)
                     .unwrap_or(false);
+            let hal_enabled = crate::config::AppConfig::load()
+                .map(|c| c.hal_enabled)
+                .unwrap_or(false);
             let dispatch = ctx.dispatch.clone();
             let approver = ctx.approver.clone();
             std::thread::spawn(move || {
@@ -374,6 +377,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         registry.register(Arc::new(crate::tools::TextToVideoTool));
                         registry.register(Arc::new(crate::tools::ImageToVideoTool));
                         registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+                    }
+
+                    if hal_enabled {
+                        registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+                        registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
                     }
                     let tool = registry
                         .get(&tool_name)
@@ -2569,6 +2577,37 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             };
             let payload = serde_json::json!({
                 "type": "media_tools_enabled_result",
+                "enabled": enabled,
+                "ok": ok,
+                "error": error,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "hal_enabled_get" => {
+            let enabled = crate::config::ProjectConfig::load()
+                .and_then(|c| c.hal_enabled)
+                .unwrap_or(false);
+            let payload = serde_json::json!({
+                "type": "hal_enabled",
+                "enabled": enabled,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "hal_enabled_set" => {
+            let enabled = msg
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut cfg = crate::config::ProjectConfig::load().unwrap_or_default();
+            cfg.hal_enabled = Some(enabled);
+            let (ok, error) = match cfg.save() {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let payload = serde_json::json!({
+                "type": "hal_enabled_result",
                 "enabled": enabled,
                 "ok": ok,
                 "error": error,

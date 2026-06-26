@@ -230,6 +230,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub image_tools_enabled: bool,
 
+    /// Opt-in flag for the HAL Public-API tools (`YouTubeTranscript`,
+    /// `WebScrape`). Off by default — same posture as the media tools:
+    /// they call a hosted service on the user's `HAL_API_KEY` (or the
+    /// gateway). `requires_env()` still hides them when no key is set
+    /// even with this flag on.
+    #[serde(default, alias = "halEnabled")]
+    pub hal_enabled: bool,
+
     /// Engine-managed browser automation (docs/browser, Phase 0+1).
     /// When `true`, `AppConfig::load()` injects the official Playwright
     /// MCP server as a synthetic engine-managed stdio config named
@@ -549,6 +557,7 @@ impl Default for AppConfig {
             claude_md_compat: false,
             openrouter_free_only: false,
             image_tools_enabled: false,
+            hal_enabled: false,
             browser_enabled: true,
             browser_headless: None,
             gateway_use_for: Vec::new(),
@@ -735,6 +744,10 @@ pub struct ProjectConfig {
     /// `mediaToolsEnabled` (preferred) or the legacy `imageToolsEnabled`.
     #[serde(rename = "imageToolsEnabled", alias = "mediaToolsEnabled")]
     pub image_tools_enabled: Option<bool>,
+    /// Opt-in flag for the HAL Public-API tools (`YouTubeTranscript`,
+    /// `WebScrape`). See [`AppConfig::hal_enabled`].
+    #[serde(rename = "halEnabled")]
+    pub hal_enabled: Option<bool>,
     /// Engine-managed Playwright browser automation. See
     /// [`AppConfig::browser_enabled`].
     #[serde(rename = "browserEnabled")]
@@ -881,6 +894,7 @@ impl Default for ProjectConfig {
             team_enabled: Some(false),
             shell_tab_enabled: Some(false),
             image_tools_enabled: Some(false),
+            hal_enabled: Some(false),
             browser_enabled: None,
             browser_headless: None,
             show_raw_response: None,
@@ -1086,6 +1100,7 @@ impl ProjectConfig {
   "skillsListingStrategy": "full",
   "teamEnabled": false,
   "shellTabEnabled": false,
+  "halEnabled": false,
   "showRawResponse": false,
   "allowedTools": null,
   "disallowedTools": null,
@@ -1211,6 +1226,9 @@ impl ProjectConfig {
         }
         if let Some(b) = self.image_tools_enabled {
             config.image_tools_enabled = b;
+        }
+        if let Some(b) = self.hal_enabled {
+            config.hal_enabled = b;
         }
         if let Some(b) = self.browser_enabled {
             config.browser_enabled = b;

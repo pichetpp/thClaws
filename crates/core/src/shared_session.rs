@@ -864,6 +864,17 @@ impl WorkerState {
             self.tool_registry.remove("ImageToVideo");
             self.tool_registry.remove("MediaJobStatus");
         }
+
+        if self.config.hal_enabled {
+            self.tool_registry.register(std::sync::Arc::new(
+                crate::tools::YouTubeTranscriptTool::new(),
+            ));
+            self.tool_registry
+                .register(std::sync::Arc::new(crate::tools::WebScrapeTool::new()));
+        } else {
+            self.tool_registry.remove("YouTubeTranscript");
+            self.tool_registry.remove("WebScrape");
+        }
         let prev_perm = self.agent.permission_mode;
         let prev_thinking = self.agent.thinking_budget;
         let new_agent = Agent::new(
@@ -1411,6 +1422,13 @@ async fn run_worker(
         tools.register(std::sync::Arc::new(crate::tools::TextToVideoTool));
         tools.register(std::sync::Arc::new(crate::tools::ImageToVideoTool));
         tools.register(std::sync::Arc::new(crate::tools::MediaJobStatusTool));
+    }
+
+    if config.hal_enabled {
+        tools.register(std::sync::Arc::new(
+            crate::tools::YouTubeTranscriptTool::new(),
+        ));
+        tools.register(std::sync::Arc::new(crate::tools::WebScrapeTool::new()));
     }
 
     // Tool-parity audit fix: respect `searchEngine` config override

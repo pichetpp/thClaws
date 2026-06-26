@@ -137,6 +137,11 @@ pub async fn build_runtime_with_provider(
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
     }
 
+    if config.hal_enabled {
+        tool_registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        tool_registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
+    }
+
     // Team tools deliberately NOT registered for the HTTP API
     // surface — multi-tenant agent_runtime serves untrusted callers,
     // and TeamCreate / SpawnTeammate spawn subprocesses outside the

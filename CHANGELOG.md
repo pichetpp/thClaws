@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.78.0] - 2026-06-27
+
+Adds a HAL tools opt-in flag, fixes HAL availability over the gateway and the /model picker, hardens OpenAI-compatible tool-call pairing, and continues tutorial screenshot wiring.
+
+### Added
+- **HAL tools opt-in.** New Settings → Optional features toggle enables the HAL tools (YouTubeTranscript, WebScrape); off by default, registered per surface like the media tools.
+- **Tutorial screenshot updates.** Wires ch04b/c/d screenshot sequences (s03–s06), aligns ch04c HAL narration, and splits ch04b slide 5→5+5b.
+
+### Changed
+- **/model picker for two-model providers.** The picker now opens for providers with exactly two models (e.g. DeepSeek), not only three or more.
+
+### Fixed
+- **HAL tools available over the gateway.** HAL tools now appear when the gateway is active (desktop proxy or cloud pod) even with no local HAL_API_KEY — availability uses the same config-aware signal as gateway routing.
+- **OpenAI-compatible tool-call pairing.** Dedups duplicate tool_call ids and keeps each turn's tool results adjacent to their assistant call, fixing intermittent "insufficient tool messages following tool_calls" errors from strict endpoints (DeepSeek, …).
+- **HAL row icon.** Uses the FileText icon; the Youtube icon isn't exported by this lucide-react version, which broke the frontend build.
+
 ## [0.77.0] - 2026-06-26
 
 Adds auto-image resize for vision, gateway-side payload bounding, monorepo orientation docs, and stability+behavior fixes across agent, team, and serve-server. Several agent tutorial chapters expanded.

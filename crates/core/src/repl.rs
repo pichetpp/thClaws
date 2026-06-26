@@ -4569,6 +4569,11 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
     }
 
+    if config.hal_enabled {
+        tool_registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        tool_registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
+    }
+
     // KMS tools always-on (pre-fix this was gated by
     // `!kms_active.is_empty()`, but /dream's side-channel agent
     // inherits this registry and needs KmsCreate/KmsWrite to
@@ -4853,6 +4858,11 @@ pub async fn run_agent_workflow(
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
     }
+
+    if config.hal_enabled && !dry_tools {
+        tool_registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        tool_registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
+    }
     let _task_store = crate::tools::tasks::register_task_tools(&mut tool_registry);
 
     let plugin_skill_dirs = crate::plugins::plugin_skill_dirs();
@@ -5055,6 +5065,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         tool_registry.register(Arc::new(crate::tools::TextToVideoTool));
         tool_registry.register(Arc::new(crate::tools::ImageToVideoTool));
         tool_registry.register(Arc::new(crate::tools::MediaJobStatusTool));
+    }
+
+    if config.hal_enabled {
+        tool_registry.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        tool_registry.register(Arc::new(crate::tools::WebScrapeTool::new()));
     }
 
     // KMS tools always-on (pre-fix this was gated by

@@ -118,6 +118,10 @@ export function SettingsMenu({
     null,
   );
   const [mediaDirty, setMediaDirty] = useState(false);
+  // Opt-in HAL tools (`halEnabled`) — YouTubeTranscript + WebScrape.
+  // Registered at agent build, so flipping needs a restart/reload.
+  const [halEnabled, setHalEnabled] = useState<boolean | null>(null);
+  const [halDirty, setHalDirty] = useState(false);
   // Opt-in Shell tab (`shellTabEnabled`). App.tsx swaps the tab live off
   // the same broadcast, so no restart note is needed here.
   const [shellTabEnabled, setShellTabEnabled] = useState<boolean | null>(null);
@@ -157,6 +161,17 @@ export function SettingsMenu({
         setMediaToolsEnabled(msg.enabled as boolean);
         setMediaDirty(true);
       } else if (
+        msg.type === "hal_enabled" &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setHalEnabled(msg.enabled as boolean);
+      } else if (
+        msg.type === "hal_enabled_result" &&
+        typeof msg.enabled === "boolean"
+      ) {
+        setHalEnabled(msg.enabled as boolean);
+        setHalDirty(true);
+      } else if (
         (msg.type === "shell_tab_enabled" ||
           msg.type === "shell_tab_enabled_result") &&
         typeof msg.enabled === "boolean"
@@ -179,6 +194,7 @@ export function SettingsMenu({
     });
     send({ type: "team_enabled_get" });
     send({ type: "media_tools_enabled_get" });
+    send({ type: "hal_enabled_get" });
     send({ type: "shell_tab_enabled_get" });
     send({ type: "browser_enabled_get" });
     send({ type: "gui_scale_get" });
@@ -198,6 +214,11 @@ export function SettingsMenu({
   const toggleMedia = () => {
     const next = !(mediaToolsEnabled ?? false);
     send({ type: "media_tools_enabled_set", enabled: next });
+  };
+
+  const toggleHal = () => {
+    const next = !(halEnabled ?? false);
+    send({ type: "hal_enabled_set", enabled: next });
   };
 
   const toggleShell = () => {
@@ -650,7 +671,7 @@ export function SettingsMenu({
               className="sm-subtle"
               style={{ color: "var(--text-secondary)", fontSize: "10px" }}
             >
-              Agent Teams · Media tools · Shell tab · Browser
+              Agent Teams · Media tools · HAL · Shell tab · Browser
             </div>
           </div>
           <span className="sm-subtle" style={{ color: "var(--text-secondary)" }}>
@@ -688,6 +709,14 @@ export function SettingsMenu({
               enabled={mediaToolsEnabled}
               dirty={mediaDirty}
               onToggle={toggleMedia}
+            />
+            <FeatureFlagRow
+              icon={<FileText size={12} />}
+              label="HAL tools"
+              desc="YouTubeTranscript, WebScrape — needs a HAL key/gateway (writes `.thclaws/settings.json`)"
+              enabled={halEnabled}
+              dirty={halDirty}
+              onToggle={toggleHal}
             />
             <FeatureFlagRow
               icon={<SquareTerminal size={12} />}

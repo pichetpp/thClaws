@@ -88,6 +88,11 @@ pub async fn run(
         tools.register(Arc::new(crate::tools::MediaJobStatusTool));
     }
 
+    if config.hal_enabled {
+        tools.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        tools.register(Arc::new(crate::tools::WebScrapeTool::new()));
+    }
+
     let provider = crate::repl::build_provider(&config)?;
     let approver: Arc<dyn ApprovalSink> = Arc::new(AutoApprover);
 

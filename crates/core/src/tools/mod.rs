@@ -214,11 +214,21 @@ pub fn reset_gates() {
         .clear();
 }
 
-/// True when the engine runs in hosted gateway mode — the runner routes
-/// LLM + keyed-service traffic through the cloud gateway with a
-/// `gw_v1_…` bearer instead of holding raw upstream keys.
-pub(crate) fn gateway_mode() -> bool {
+/// True when the cloud gateway is the active route for keyed upstreams
+/// (LLM, web search, HAL): a cloud pod (env `THCLAWS_USES_GATEWAY` or
+/// multiuser) OR the desktop "gateway proxy" config toggle — the SAME
+/// signal `gateway_route()` resolves a token for. A tool that
+/// `requires_env` a gateway-served key (HAL) counts as available whenever
+/// this is true, even with no local key (the gateway injects it).
+///
+/// Note this reads `AppConfig` (disk) for the desktop toggle, so callers
+/// should evaluate it lazily — only when a local key is actually missing.
+pub(crate) fn gateway_active() -> bool {
     std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+        || crate::workdir::is_multiuser()
+        || crate::config::AppConfig::load()
+            .map(|c| c.gateway_proxy)
+            .unwrap_or(false)
 }
 
 /// Resolved cloud-gateway route (base URL + bearer). `Some` only in
@@ -240,12 +250,7 @@ pub(crate) fn gateway_route() -> Option<GatewayRoute> {
     // pods that export THCLAWS_USES_GATEWAY. Previously this was env-only,
     // so a desktop gateway user's WebSearch silently fell back to
     // DuckDuckGo (and a scheduled run produced stale, un-searched results).
-    let pod = std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
-        || crate::workdir::is_multiuser();
-    let proxy = crate::config::AppConfig::load()
-        .map(|c| c.gateway_proxy)
-        .unwrap_or(false);
-    if !(pod || proxy) {
+    if !gateway_active() {
         return None;
     }
     let token = crate::providers::thclaws_gateway::resolve_access_key()?;
@@ -264,13 +269,15 @@ pub(crate) const GATEWAY_SERVED_ENVS: &[&str] = &["HAL_API_KEY"];
 /// Whether a tool's env-var requirements are currently satisfied.
 /// Reads `std::env` so live changes (`api_key_set` / `api_key_clear`
 /// followed by a `rebuild_agent`) take effect on the next turn
-/// without reconstructing the registry. In gateway mode a requirement
-/// on a gateway-served key counts as satisfied even with no local key.
+/// without reconstructing the registry. When the gateway is active a
+/// requirement on a gateway-served key counts as satisfied even with no
+/// local key. `gateway_active()` is evaluated lazily (it reads config
+/// from disk) — only when a local key is actually absent and the var is
+/// one the gateway fronts.
 fn tool_is_available(t: &dyn Tool) -> bool {
-    let gw = gateway_mode();
     let env_ok = t.requires_env().iter().all(|v| {
         std::env::var(v).map(|val| !val.is_empty()).unwrap_or(false)
-            || (gw && GATEWAY_SERVED_ENVS.contains(v))
+            || (GATEWAY_SERVED_ENVS.contains(v) && gateway_active())
     });
     // A gated tool is available only once its gate has been opened.
     let gate_ok = t.requires_gate().is_none_or(gate_is_active);
@@ -341,10 +348,10 @@ impl ToolRegistry {
         r.register(Arc::new(PdfReadTool));
         r.register(Arc::new(WebFetchTool::new()));
         r.register(Arc::new(WebSearchTool::default()));
-        // HAL Public API tools — hidden from the model when
-        // HAL_API_KEY isn't set (see Tool::requires_env).
-        r.register(Arc::new(YouTubeTranscriptTool::new()));
-        r.register(Arc::new(WebScrapeTool::new()));
+        // HAL Public API tools (YouTubeTranscript, WebScrape) are NOT
+        // registered here — they're opt-in via `hal_enabled` (Settings →
+        // Optional features), registered per-surface like the media tools.
+        // (They also still require HAL_API_KEY / gateway via requires_env.)
         r.register(Arc::new(AskUserTool));
         r.register(Arc::new(TodoWriteTool));
         r.register(Arc::new(QuizRenderTool::new()));
@@ -683,6 +690,28 @@ mod tests {
         }));
         let defs = reg.tool_defs();
         assert!(defs.iter().any(|d| d.name == "NeedsKey"));
+    }
+
+    #[test]
+    fn requires_env_gateway_served_key_visible_when_gateway_active() {
+        let _g = env_lock().lock().unwrap();
+        // HAL_API_KEY is gateway-served: with no local key but the gateway
+        // active, a tool requiring it stays visible (the gateway injects the
+        // real key). Uses the env signal — THCLAWS_USES_GATEWAY short-circuits
+        // gateway_active() so the assertion doesn't depend on disk config.
+        let hal = EnvGuard::new("HAL_API_KEY");
+        hal.unset();
+        let gw = EnvGuard::new("THCLAWS_USES_GATEWAY");
+        gw.set("1");
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(StubTool {
+            name: "NeedsGatewayKey",
+            env: &["HAL_API_KEY"],
+        }));
+        assert!(
+            reg.tool_defs().iter().any(|d| d.name == "NeedsGatewayKey"),
+            "gateway-served tool should be visible when the gateway is active, no local key"
+        );
     }
 
     #[test]

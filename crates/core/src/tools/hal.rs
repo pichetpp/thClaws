@@ -44,9 +44,10 @@ pub(crate) fn build_client() -> reqwest::Client {
 /// mid-session sees the change on the next tool invocation without
 /// needing a worker rebuild.
 pub(crate) fn hal_available() -> bool {
-    // Gateway mode: HAL is reachable via the gateway even with no local
-    // key (the gateway holds it). Direct mode: needs a local key.
-    if crate::tools::gateway_mode() {
+    // Gateway active (desktop proxy or cloud pod): HAL is reachable via
+    // the gateway even with no local key (the gateway holds it). Direct
+    // mode: needs a local key.
+    if crate::tools::gateway_active() {
         return true;
     }
     std::env::var("HAL_API_KEY")
@@ -195,6 +196,10 @@ impl Tool for YouTubeTranscriptTool {
     }
 
     fn requires_env(&self) -> &'static [&'static str] {
+        // HAL_API_KEY is in GATEWAY_SERVED_ENVS, so `tool_is_available`
+        // keeps these visible whenever the gateway is active (desktop proxy
+        // or cloud pod) even with no local key — `hal_post` then routes
+        // through the gateway. Direct mode needs the local key.
         &["HAL_API_KEY"]
     }
 
@@ -296,6 +301,10 @@ impl Tool for WebScrapeTool {
     }
 
     fn requires_env(&self) -> &'static [&'static str] {
+        // HAL_API_KEY is in GATEWAY_SERVED_ENVS, so `tool_is_available`
+        // keeps these visible whenever the gateway is active (desktop proxy
+        // or cloud pod) even with no local key — `hal_post` then routes
+        // through the gateway. Direct mode needs the local key.
         &["HAL_API_KEY"]
     }
 
