@@ -852,9 +852,17 @@ mod tests {
     fn hal_tools_hidden_without_key_visible_with_key() {
         let _g = env_lock().lock().unwrap();
         let key = EnvGuard::new("HAL_API_KEY");
-        let reg = ToolRegistry::with_builtins();
+        key.unset();
+        // HAL tools are opt-in (no longer in with_builtins — they register
+        // per surface when hal_enabled). Register them directly here so the
+        // test exercises their requires_env gating, not registry membership.
+        let gw = EnvGuard::new("THCLAWS_USES_GATEWAY");
+        gw.unset();
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(crate::tools::YouTubeTranscriptTool::new()));
+        reg.register(Arc::new(crate::tools::WebScrapeTool::new()));
 
-        // No key → hidden.
+        // No key (and gateway inactive) → hidden.
         let defs = reg.tool_defs();
         assert!(!defs.iter().any(|d| d.name == "YouTubeTranscript"));
         assert!(!defs.iter().any(|d| d.name == "WebScrape"));
