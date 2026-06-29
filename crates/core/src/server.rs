@@ -36,9 +36,10 @@ use crate::uploads::{
     ensure_target_dir, ensure_uploads_dir, render_upload_message, unique_path, UploadedFile,
     UPLOADS_DIRNAME, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES,
 };
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Multipart, Query, Request, State};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, Multipart, Query, Request, State};
+use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -489,6 +490,27 @@ pub async fn run_with_engine(
             // pod, so no cross-user concern (multi-tenant adds the
             // HMAC layer in build_shell_router).
             .route("/file-asset/{*rel}", get(serve_file_asset))
+            // Workspace sync (dev-plan/51): /cloud push|pull against the
+            // workspace dir. Same auth surface as /upload — the cloud ingress
+            // ForwardAuth gates hosted runners (and the multiuser_auth layer
+            // below covers multiuser pods); local --serve relies on
+            // api_v1/loopback. push raises the body limit for the tarball.
+            .route("/workspace/sync/stat", get(sync_stat))
+            .route("/workspace/sync/pull", get(sync_pull))
+            .route(
+                "/workspace/sync/push",
+                post(sync_push).layer(DefaultBodyLimit::max(300 * 1024 * 1024)),
+            )
+            // P2 incremental: manifest diff + per-subset transfer/trash.
+            .route("/workspace/sync/manifest", get(sync_manifest))
+            .route(
+                "/workspace/sync/export",
+                post(sync_export).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+            )
+            .route(
+                "/workspace/sync/trash",
+                post(sync_trash).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+            )
             .with_state(state)
             .merge(crate::api_v1::router())
     };
@@ -517,6 +539,140 @@ pub async fn run_with_engine(
         .await
         .map_err(|e| crate::error::Error::Tool(format!("serve: {e}")))?;
     Ok(())
+}
+
+// ---- Workspace sync handlers (dev-plan/51) ----
+// Tar/untar the workspace dir for `/cloud push|pull`. Reachable wherever the
+// engine serves; auth is the serving layer's job (cloud ingress ForwardAuth for
+// hosted runners — single- or multi-tenant — and api_v1/loopback for a local
+// `--serve`), same as the adjacent /upload route.
+
+#[derive(serde::Serialize)]
+struct SyncStatResp {
+    file_count: usize,
+    bytes: u64,
+    empty: bool,
+    busy: bool,
+    engine_version: &'static str,
+    workspace_id: Option<String>,
+}
+
+async fn sync_stat(State(state): State<ServeState>) -> Response {
+    let root = state.workspace.as_path();
+    match crate::cloud::wssync::stat_workspace(root) {
+        Ok(s) => Json(SyncStatResp {
+            file_count: s.file_count,
+            bytes: s.bytes,
+            empty: crate::cloud::wssync::is_empty(root).unwrap_or(false),
+            busy: crate::agent_activity::busy_count() > 0,
+            engine_version: env!("CARGO_PKG_VERSION"),
+            workspace_id: crate::cloud::wssync::read_binding(root).workspace_id,
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PullQuery {
+    #[serde(default)]
+    include_runtime: bool,
+}
+
+async fn sync_pull(State(state): State<ServeState>, Query(q): Query<PullQuery>) -> Response {
+    if crate::agent_activity::busy_count() > 0 {
+        return (StatusCode::CONFLICT, "workspace busy (active turn)").into_response();
+    }
+    match crate::cloud::wssync::tar_workspace(state.workspace.as_path(), q.include_runtime) {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "application/gzip")], bytes).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PushQuery {
+    #[serde(default)]
+    delete: bool,
+    workspace_id: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct PushResp {
+    written: usize,
+    deleted: usize,
+    trashed: bool,
+}
+
+async fn sync_push(
+    State(state): State<ServeState>,
+    Query(q): Query<PushQuery>,
+    body: Bytes,
+) -> Response {
+    if crate::agent_activity::busy_count() > 0 {
+        return (StatusCode::CONFLICT, "workspace busy (active turn)").into_response();
+    }
+    let root = state.workspace.as_path();
+    match crate::cloud::wssync::untar_workspace(&body, root, q.delete) {
+        Ok(r) => {
+            let mut b = crate::cloud::wssync::read_binding(root);
+            if let Some(id) = q.workspace_id {
+                b.workspace_id = Some(id);
+            }
+            b.last_push = Some(unix_now_string());
+            let _ = crate::cloud::wssync::write_binding(root, &b);
+            Json(PushResp {
+                written: r.written,
+                deleted: r.deleted,
+                trashed: r.trash_dir.is_some(),
+            })
+            .into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+fn unix_now_string() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
+}
+
+// P2 incremental endpoints.
+
+async fn sync_manifest(State(state): State<ServeState>) -> Response {
+    if crate::agent_activity::busy_count() > 0 {
+        return (StatusCode::CONFLICT, "workspace busy (active turn)").into_response();
+    }
+    match crate::cloud::wssync::build_manifest(state.workspace.as_path()) {
+        Ok(m) => Json(m).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+async fn sync_export(State(state): State<ServeState>, Json(paths): Json<Vec<String>>) -> Response {
+    if crate::agent_activity::busy_count() > 0 {
+        return (StatusCode::CONFLICT, "workspace busy (active turn)").into_response();
+    }
+    match crate::cloud::wssync::tar_paths(state.workspace.as_path(), &paths) {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "application/gzip")], bytes).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+async fn sync_trash(State(state): State<ServeState>, Json(paths): Json<Vec<String>>) -> Response {
+    if crate::agent_activity::busy_count() > 0 {
+        return (StatusCode::CONFLICT, "workspace busy (active turn)").into_response();
+    }
+    match crate::cloud::wssync::trash_paths(state.workspace.as_path(), &paths) {
+        Ok(r) => Json(PushResp {
+            written: r.written,
+            deleted: r.deleted,
+            trashed: r.trash_dir.is_some(),
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
 }
 
 /// Build the Mode B Axum router. Mounts the bound shell at

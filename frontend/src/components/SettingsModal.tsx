@@ -790,6 +790,28 @@ interface CloudConfig {
   token_writable: boolean;
 }
 
+// dev-plan/51 P3b: runs a `/cloud push|pull` slash command in the shared
+// session (output streams to Chat) — pure convenience over typing the slash.
+function SyncButton({ label, cmd, enabled }: { label: string; cmd: string; enabled: boolean }) {
+  return (
+    <button
+      onClick={() => send({ type: "shell_input", text: cmd })}
+      disabled={!enabled}
+      className="px-2.5 py-1.5 rounded text-xs font-medium whitespace-nowrap"
+      style={{
+        background: enabled ? "var(--accent)" : "var(--bg-primary)",
+        color: enabled ? "#fff" : "var(--text-secondary)",
+        border: "1px solid var(--border)",
+        cursor: enabled ? "pointer" : "default",
+        opacity: enabled ? 1 : 0.6,
+      }}
+      title={enabled ? `Run ${cmd} (watch output in Chat)` : "Save a thClaws.cloud CLI token above first"}
+    >
+      {label}
+    </button>
+  );
+}
+
 function CloudSection() {
   const [cfg, setCfg] = useState<CloudConfig>({
     url: null,
@@ -1004,6 +1026,23 @@ function CloudSection() {
             {phoneHome.msg}
           </div>
         )}
+      </div>
+
+      {/* dev-plan/51: workspace sync — mirror this folder to/from a hosted
+          cloud workspace. Runs /cloud push|pull in the shared session; output
+          streams to Chat (close Settings to watch). */}
+      <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
+        <div className="text-xs font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
+          🔄 Workspace sync
+        </div>
+        <div className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
+          Mirror this folder to/from your hosted cloud workspace. Runs in Chat —
+          close Settings to watch the result.
+        </div>
+        <div className="flex gap-1.5">
+          <SyncButton label="⬆ Push to cloud" cmd="/cloud push" enabled={cfg.has_token} />
+          <SyncButton label="⬇ Pull from cloud" cmd="/cloud pull" enabled={cfg.has_token} />
+        </div>
       </div>
     </div>
   );

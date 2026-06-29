@@ -3642,6 +3642,46 @@ pub async fn dispatch(
                         crate::cloud::cmd::publish_cwd_lines(None, cloud_cfg.as_ref()).await
                     }
                     CloudSlash::Unbind => crate::cloud::cmd::unbind_lines(),
+                    CloudSlash::Push {
+                        delete,
+                        dry_run,
+                        workspace,
+                        force_rebind,
+                    } => {
+                        let cwd = std::env::current_dir().unwrap_or_default();
+                        crate::cloud::cmd::push_lines(
+                            &cwd,
+                            None,
+                            cloud_cfg.as_ref(),
+                            crate::cloud::cmd::SyncOpts {
+                                delete,
+                                dry_run,
+                                workspace,
+                                force_rebind,
+                            },
+                        )
+                        .await
+                    }
+                    CloudSlash::Pull {
+                        delete,
+                        dry_run,
+                        workspace,
+                        force_rebind,
+                    } => {
+                        let cwd = std::env::current_dir().unwrap_or_default();
+                        crate::cloud::cmd::pull_lines(
+                            &cwd,
+                            None,
+                            cloud_cfg.as_ref(),
+                            crate::cloud::cmd::SyncOpts {
+                                delete,
+                                dry_run,
+                                workspace,
+                                force_rebind,
+                            },
+                        )
+                        .await
+                    }
                 };
                 for line in lines {
                     let _ = events_tx_clone.send(ViewEvent::SlashOutput(line));

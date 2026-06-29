@@ -26,6 +26,7 @@ pub mod client;
 pub mod cmd;
 pub mod manifest;
 pub mod pack;
+pub mod wssync;
 
 pub const DEFAULT_CLOUD_URL: &str = "https://thclaws.cloud";
 

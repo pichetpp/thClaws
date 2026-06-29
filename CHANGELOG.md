@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.81.0] — 2026-06-30
+
+Introduces seamless desktop–cloud workspace sync with resilient push/pull flows, and polishes cloud onboarding with broader user auto-grants.
+
+### Added
+- **Desktop-to-cloud workspace sync.** `/cloud push|pull <slug>` commands and Settings panel now enable direct and incremental sync between local and hosted workspaces, with robust em-dash and Unicode slug support.
+- **Push/Pull UI in Settings.** Adds one-click Push/Pull buttons to the desktop app for immediate workspace transfers to and from thClaws.cloud.
+- **Auto-grant for cloud guests.** Whitelisted cloud guests are now automatically granted user status on every sign-in for smoother onboarding.
+
+### Changed
+- **Incremental sync and resume.** Push/pull operations now use a manifest-diff with built-in auto-resume for interrupted transfers.
+
+### Fixed
+- **Sync endpoint reliability on single-tenant runners.** Repairs 404 errors when syncing workspaces in single-tenant cloud runner environments, resuming stalled probes.
+
 ## [0.80.0] — 2026-06-29
 
 Strengthens PDF and KMS ingest for Thai documents, advances agent publishing via source-level visibility and batch tooling, and brings tutorial documentation current with capstone and GUI coverage.
