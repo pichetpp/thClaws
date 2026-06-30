@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.83.0] — 2026-06-30
+
+Auto-discovers OpenCode-Go model routing from the live model list, so new models reach the correct API dialect without a code change.
+
+### Added
+- **Auto-discovered wire routing for OpenCode-Go.** The OpenCode-Go provider now probes `/v1/models` on first use and caches each model's `wire` hint, so newly added models route to the correct API dialect (OpenAI / Anthropic / Alibaba) automatically — no static-list edit or release required. Probe failures, or models without a hint, fall back silently to the built-in tables, preserving offline and backward-compatible behavior. (#175)
+
 ## [0.82.0] — 2026-06-30
 
 Consolidates all KMS stores with a new `/kms consolidate` command and documents cloud workspace sync in the tutorial capstone.
