@@ -309,8 +309,9 @@ pub fn inject_inline_bridge_with_id(html: &[u8], shell_id: &str) -> Vec<u8> {
         .unwrap_or_else(|_| "\"\"".into())
         .replace("</", "<\\/");
     let bridge_safe = bridge.replace("</", "<\\/");
+    let chrome = super::shared_chrome_head();
     let injection = format!(
-        "<script>window.__thclaws_shell_id={id_json};</script><script>{bridge_safe}</script>"
+        "<script>window.__thclaws_shell_id={id_json};</script><script>{bridge_safe}</script>{chrome}"
     );
     let lower = html.to_ascii_lowercase();
     if let Some(idx) = find_subslice(&lower, b"<head>") {
@@ -380,7 +381,8 @@ pub fn inject_mode_b_head_with(
         // also resolves the bridge asset.
         ws_url.strip_suffix("/__ws").unwrap_or(ws_url)
     );
-    let injection = format!("{marker}{bridge_src}");
+    let chrome = super::shared_chrome_head();
+    let injection = format!("{marker}{bridge_src}{chrome}");
 
     let lower = html.to_ascii_lowercase();
     if let Some(idx) = find_subslice(&lower, b"<head>") {
@@ -551,6 +553,37 @@ mod tests {
         assert!(
             !inner.contains("</script>"),
             "mode-b marker body contains an early </script>: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn inline_inject_includes_shared_theme_and_chrome() {
+        let html = b"<html><head></head><body></body></html>";
+        let out = inject_inline_bridge_with_id(html, "demo");
+        let out_s = std::str::from_utf8(&out).expect("utf8");
+        // Shared theme tokens + the <thc-header> component runtime ride
+        // along with the bridge, so studios don't ship their own.
+        assert!(out_s.contains("--accent"), "theme tokens missing");
+        assert!(
+            out_s.contains("customElements.define(\"thc-header\""),
+            "thc-header runtime missing"
+        );
+        // The chrome block must not break out of its own tags: the only
+        // closers present are the single wrapper `</style>` + `</script>`.
+        let chrome = super::super::shared_chrome_head();
+        assert_eq!(chrome.matches("</style>").count(), 1, "early </style>");
+        assert_eq!(chrome.matches("</script>").count(), 1, "early </script>");
+    }
+
+    #[test]
+    fn mode_b_inject_includes_shared_theme_and_chrome() {
+        let html = b"<html><head></head><body></body></html>";
+        let out = inject_mode_b_head_with(html, "/t/x/__ws", "demo", "sess");
+        let out_s = std::str::from_utf8(&out).expect("utf8");
+        assert!(out_s.contains("--accent"), "theme tokens missing");
+        assert!(
+            out_s.contains("customElements.define(\"thc-header\""),
+            "thc-header runtime missing"
         );
     }
 }

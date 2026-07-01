@@ -797,6 +797,32 @@ pub struct SyncOpts {
     pub force_rebind: bool,
 }
 
+/// Push, streaming each progress line to `emit` the moment it is produced.
+pub async fn push_streaming(
+    cwd: &Path,
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+    opts: SyncOpts,
+    emit: &mut (dyn FnMut(String) + Send),
+) {
+    if let Err(e) = sync_inner(cwd, cloud_url, cloud_cfg, opts, true, emit).await {
+        emit(format!("push failed: {}", e));
+    }
+}
+
+/// Pull, streaming each progress line to `emit` the moment it is produced.
+pub async fn pull_streaming(
+    cwd: &Path,
+    cloud_url: Option<&str>,
+    cloud_cfg: Option<&CloudConfig>,
+    opts: SyncOpts,
+    emit: &mut (dyn FnMut(String) + Send),
+) {
+    if let Err(e) = sync_inner(cwd, cloud_url, cloud_cfg, opts, false, emit).await {
+        emit(format!("pull failed: {}", e));
+    }
+}
+
 pub async fn push_lines(
     cwd: &Path,
     cloud_url: Option<&str>,
@@ -804,9 +830,7 @@ pub async fn push_lines(
     opts: SyncOpts,
 ) -> Vec<String> {
     let mut log = Vec::new();
-    if let Err(e) = sync_inner(cwd, cloud_url, cloud_cfg, opts, true, &mut log).await {
-        log.push(format!("push failed: {}", e));
-    }
+    push_streaming(cwd, cloud_url, cloud_cfg, opts, &mut |l| log.push(l)).await;
     log
 }
 
@@ -817,9 +841,7 @@ pub async fn pull_lines(
     opts: SyncOpts,
 ) -> Vec<String> {
     let mut log = Vec::new();
-    if let Err(e) = sync_inner(cwd, cloud_url, cloud_cfg, opts, false, &mut log).await {
-        log.push(format!("pull failed: {}", e));
-    }
+    pull_streaming(cwd, cloud_url, cloud_cfg, opts, &mut |l| log.push(l)).await;
     log
 }
 
@@ -854,7 +876,7 @@ async fn sync_inner(
     cloud_cfg: Option<&CloudConfig>,
     opts: SyncOpts,
     is_push: bool,
-    log: &mut Vec<String>,
+    emit: &mut (dyn FnMut(String) + Send),
 ) -> Result<(), String> {
     // dev-plan/51 #3: both ends must be idle. Refuse if a local turn is running.
     if crate::agent_activity::busy_count() > 0 {
@@ -865,9 +887,10 @@ async fn sync_inner(
     if token.is_none() {
         return Err("not logged in — paste your CLI token in Settings → thClaws.cloud".into());
     }
+    emit("Connecting to thClaws.cloud…".into());
     let client = Client::new(&url, token);
     let ws = resolve_workspace(&client, opts.workspace.as_deref()).await?;
-    log.push(format!("Workspace: {} ({})", ws.slug, ws.id));
+    emit(format!("Workspace: {} ({})", ws.slug, ws.id));
     let jwt = client.cli_exchange().await?;
     // Probe the runner directly — status strings ("ready"/"running") aren't a
     // reliable "is it up" signal, so try /sync/stat and only wake on failure.
@@ -881,12 +904,12 @@ async fn sync_inner(
             ));
         }
         Err(_) => {
-            log.push(format!(
+            emit(format!(
                 "Workspace not responding ({}) — resuming…",
                 ws.status
             ));
             client.wake_workspace(&ws.id).await?;
-            wait_for_runner(&client, &ws.url, &jwt, log).await?
+            wait_for_runner(&client, &ws.url, &jwt, emit).await?
         }
     };
     if stat.busy {
@@ -912,7 +935,7 @@ async fn sync_inner(
                 let local = wssync::build_manifest(cwd)?;
                 let (upload, extraneous) = wssync::diff(&local, &remote);
                 if opts.dry_run {
-                    log.push(format!(
+                    emit(format!(
                         "[dry-run] incremental push → '{}': {} file(s) to upload{}",
                         ws.slug,
                         upload.len(),
@@ -924,10 +947,9 @@ async fn sync_inner(
                     ));
                     return Ok(());
                 }
-                log.push(format!("Pushing {} changed file(s)…", upload.len()));
+                emit(format!("Pushing {} changed file(s)…", upload.len()));
                 let tarball = wssync::tar_paths(cwd, &upload)?;
-                let r = client
-                    .ws_sync_push(&ws.url, &jwt, tarball, false, &ws.id)
+                let r = push_with_progress(&client, &ws.url, &jwt, tarball, false, &ws.id, emit)
                     .await?;
                 let deleted = if opts.delete && !extraneous.is_empty() {
                     client
@@ -938,7 +960,7 @@ async fn sync_inner(
                     0
                 };
                 write_push_binding(cwd, &ws, &url, &local_binding)?;
-                log.push(format!(
+                emit(format!(
                     "✓ pushed {} file(s){} to '{}' (incremental)",
                     r.written,
                     if deleted > 0 {
@@ -952,7 +974,7 @@ async fn sync_inner(
             None => {
                 let local = wssync::stat_workspace(cwd)?;
                 if opts.dry_run {
-                    log.push(format!(
+                    emit(format!(
                         "[dry-run] would push {} local file(s) → cloud '{}' (cloud has {}){}",
                         local.file_count,
                         ws.slug,
@@ -965,17 +987,17 @@ async fn sync_inner(
                     ));
                     return Ok(());
                 }
-                log.push(format!(
+                emit(format!(
                     "Packing {} file(s) ({:.1} KB)…",
                     local.file_count,
                     local.bytes as f64 / 1024.0
                 ));
                 let tarball = wssync::tar_workspace(cwd, false)?;
-                let r = client
-                    .ws_sync_push(&ws.url, &jwt, tarball, opts.delete, &ws.id)
-                    .await?;
+                let r =
+                    push_with_progress(&client, &ws.url, &jwt, tarball, opts.delete, &ws.id, emit)
+                        .await?;
                 write_push_binding(cwd, &ws, &url, &local_binding)?;
-                log.push(format!(
+                emit(format!(
                     "✓ pushed {} file(s){} to '{}'",
                     r.written,
                     if r.deleted > 0 {
@@ -1000,7 +1022,7 @@ async fn sync_inner(
                 let local = wssync::build_manifest(cwd)?;
                 let (download, extraneous) = wssync::diff(&remote, &local);
                 if opts.dry_run {
-                    log.push(format!(
+                    emit(format!(
                         "[dry-run] incremental pull ← '{}': {} file(s) to download{}",
                         ws.slug,
                         download.len(),
@@ -1012,7 +1034,7 @@ async fn sync_inner(
                     ));
                     return Ok(());
                 }
-                log.push(format!("Pulling {} changed file(s)…", download.len()));
+                emit(format!("Pulling {} changed file(s)…", download.len()));
                 if !download.is_empty() {
                     let bytes = client.ws_sync_export(&ws.url, &jwt, &download).await?;
                     wssync::untar_workspace(&bytes, cwd, false)?;
@@ -1023,7 +1045,7 @@ async fn sync_inner(
                     0
                 };
                 write_pull_binding(cwd, &ws, &url, &local_binding)?;
-                log.push(format!(
+                emit(format!(
                     "✓ pulled {} file(s){} into {} (incremental)",
                     download.len(),
                     if deleted > 0 {
@@ -1037,7 +1059,7 @@ async fn sync_inner(
             None => {
                 if opts.dry_run {
                     let local = wssync::stat_workspace(cwd)?;
-                    log.push(format!(
+                    emit(format!(
                         "[dry-run] would pull cloud '{}' ({} file(s)) → local (has {}){}",
                         ws.slug,
                         stat.file_count,
@@ -1050,14 +1072,14 @@ async fn sync_inner(
                     ));
                     return Ok(());
                 }
-                log.push(format!(
+                emit(format!(
                     "Pulling cloud '{}' ({} file(s))…",
                     ws.slug, stat.file_count
                 ));
                 let bytes = client.ws_sync_pull(&ws.url, &jwt, false).await?;
                 let r = wssync::untar_workspace(&bytes, cwd, opts.delete)?;
                 write_pull_binding(cwd, &ws, &url, &local_binding)?;
-                log.push(format!(
+                emit(format!(
                     "✓ pulled {} file(s){} into {}",
                     r.written,
                     if r.deleted > 0 {
@@ -1073,12 +1095,65 @@ async fn sync_inner(
     Ok(())
 }
 
+/// Upload the tarball, emitting a live percentage readout for uploads large
+/// enough that the transfer is the slow part. Small tarballs skip the ticker
+/// (the surrounding "Pushing…"/"✓ pushed" lines already bracket them).
+async fn push_with_progress(
+    client: &Client,
+    ws_url: &str,
+    jwt: &str,
+    tarball: Vec<u8>,
+    delete: bool,
+    workspace_id: &str,
+    emit: &mut (dyn FnMut(String) + Send),
+) -> Result<crate::cloud::client::SyncPushResp, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    const TICKER_THRESHOLD: u64 = 256 * 1024;
+    let total = tarball.len() as u64;
+    if total < TICKER_THRESHOLD {
+        return client
+            .ws_sync_push(ws_url, jwt, tarball, delete, workspace_id, None)
+            .await;
+    }
+    let sent = Arc::new(AtomicU64::new(0));
+    let fut = client.ws_sync_push(
+        ws_url,
+        jwt,
+        tarball,
+        delete,
+        workspace_id,
+        Some(sent.clone()),
+    );
+    tokio::pin!(fut);
+    let total_mb = total as f64 / 1_048_576.0;
+    let mut last_pct = u64::MAX;
+    loop {
+        tokio::select! {
+            r = &mut fut => return r,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
+                let done = sent.load(Ordering::Relaxed).min(total);
+                let pct = done * 100 / total;
+                if pct != last_pct {
+                    last_pct = pct;
+                    emit(format!(
+                        "  uploading… {:.1}/{:.1} MB ({}%)",
+                        done as f64 / 1_048_576.0,
+                        total_mb,
+                        pct
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Poll the runner's `/sync/stat` until it answers (after a resume) or times out.
 async fn wait_for_runner(
     client: &Client,
     ws_url: &str,
     jwt: &str,
-    log: &mut Vec<String>,
+    emit: &mut (dyn FnMut(String) + Send),
 ) -> Result<crate::cloud::client::SyncStatResp, String> {
     let mut last = String::new();
     for attempt in 0..30 {
@@ -1093,7 +1168,7 @@ async fn wait_for_runner(
             Err(e) => last = e,
         }
         if attempt == 0 {
-            log.push("Waiting for the workspace to come up…".into());
+            emit("Waiting for the workspace to come up…".into());
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }

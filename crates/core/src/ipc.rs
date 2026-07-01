@@ -125,6 +125,37 @@ fn strip_wrapping_quotes(s: &str) -> &str {
     }
 }
 
+/// Whether the installed shell `shell_id` declares `perm` in its
+/// manifest. Used to enforce the `model.read` / `model.write` flags on
+/// the `gui_shell_model_*` arms (a shell can't switch the app model
+/// without explicitly asking for it).
+fn shell_has_permission(shell_id: &str, perm: &str) -> bool {
+    if shell_id.is_empty() {
+        return false;
+    }
+    crate::gui_shell::ShellRegistry::new()
+        .resolve(shell_id)
+        .map(|s| s.manifest().permissions.iter().any(|p| p == perm))
+        .unwrap_or(false)
+}
+
+/// Serialise a research `JobView` for the `thclaws.research.*` bridge
+/// API (JobStatus/SystemTime aren't Serialize, so map by hand).
+fn job_view_json(v: &crate::research::JobView) -> serde_json::Value {
+    serde_json::json!({
+        "id": v.id,
+        "query": v.query,
+        "status": v.status.as_str(),
+        "phase": v.phase,
+        "iterations_done": v.iterations_done,
+        "source_count": v.source_count,
+        "score": v.last_score,
+        "kms_target": v.kms_target,
+        "result_page": v.result_page,
+        "error": v.error,
+    })
+}
+
 /// Dispatch a single inbound IPC message. Routes by `msg.type` to one
 /// of ~70 message-type arms (see the body for the full inventory).
 ///
@@ -557,6 +588,239 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     "replyTo": request_id,
                     "error": e.to_string(),
                 }),
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        // GUI Shell model widget (thclaws.model.*). Gated by manifest
+        // permissions: `model.read` for get/list, `model.write` for set.
+        // A shell that doesn't declare them gets an error and <thc-model>
+        // renders nothing.
+        "gui_shell_model_get" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let reply = if !shell_has_permission(shell_id, "model.read") {
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "error": "permission 'model.read' not granted in manifest",
+                })
+            } else {
+                let cfg = crate::config::AppConfig::load().unwrap_or_default();
+                let provider = cfg.detect_provider().unwrap_or("unknown");
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "result": {
+                        "provider": provider,
+                        "model": cfg.model,
+                        "writable": shell_has_permission(shell_id, "model.write"),
+                    },
+                })
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        "gui_shell_model_list" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let shell_id = msg
+                .get("shellId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !shell_has_permission(&shell_id, "model.read") {
+                (ctx.dispatch)(
+                    serde_json::json!({
+                        "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                        "error": "permission 'model.read' not granted in manifest",
+                    })
+                    .to_string(),
+                );
+            } else {
+                // Full cross-provider catalogue — the same grouped payload
+                // the main-app sidebar picker uses, so a shell can switch
+                // provider AND model. build_all_models_payload is async
+                // (live-polls local runtimes), so reply from a task.
+                let dispatch = ctx.dispatch.clone();
+                tokio::spawn(async move {
+                    let payload = crate::providers::build_all_models_payload().await;
+                    let groups = serde_json::from_str::<serde_json::Value>(&payload)
+                        .ok()
+                        .and_then(|v| v.get("groups").cloned())
+                        .unwrap_or_else(|| serde_json::Value::Array(vec![]));
+                    let cfg = crate::config::AppConfig::load().unwrap_or_default();
+                    let reply = serde_json::json!({
+                        "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                        "result": { "current": cfg.model, "groups": groups },
+                    });
+                    dispatch(reply.to_string());
+                });
+            }
+        }
+
+        "gui_shell_model_set" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let model = msg
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let reply = if !shell_has_permission(shell_id, "model.write") {
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "error": "permission 'model.write' not granted in manifest",
+                })
+            } else if model.is_empty() {
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "error": "gui_shell_model_set: missing 'model'",
+                })
+            } else {
+                // Same path as the `model_set` arm: persist, reload, and
+                // broadcast provider_update so the sidebar + every shell's
+                // thclaws.model.onChange see the switch.
+                let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+                project.set_model(&model);
+                let _ = project.save();
+                let new_cfg = crate::config::AppConfig::load().unwrap_or_default();
+                let provider_name = new_cfg.detect_provider().unwrap_or("unknown");
+                let ready = crate::providers::provider_has_credentials(&new_cfg);
+                (ctx.dispatch)(
+                    serde_json::json!({
+                        "type": "provider_update",
+                        "provider": provider_name,
+                        "model": new_cfg.model,
+                        "provider_ready": ready,
+                    })
+                    .to_string(),
+                );
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::ReloadConfig);
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "result": { "ok": true, "model": new_cfg.model },
+                })
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        // Deterministic KMS API (thclaws.kms.*) — no LLM. Gated by
+        // `kms.read`. list = knowledge bases; browse = one base's pages.
+        "gui_shell_kms_list" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let reply = if !shell_has_permission(shell_id, "kms.read") {
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "error": "permission 'kms.read' not granted in manifest",
+                })
+            } else {
+                let payload = crate::kms::build_update_payload();
+                let mut kmss = payload
+                    .get("kmss")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                // Enrich each base with a deterministic page count so a
+                // shell can render it without a browse round-trip per base.
+                for k in kmss.iter_mut() {
+                    if let Some(name) = k.get("name").and_then(|v| v.as_str()) {
+                        let pages = crate::kms::browse(name).map(|l| l.pages.len()).unwrap_or(0);
+                        k["pages"] = serde_json::json!(pages);
+                    }
+                }
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "result": { "kmss": kmss },
+                })
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        "gui_shell_kms_browse" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let reply = if !shell_has_permission(shell_id, "kms.read") {
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "error": "permission 'kms.read' not granted in manifest",
+                })
+            } else {
+                match crate::kms::browse(name) {
+                    Some(l) => serde_json::json!({
+                        "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                        "result": { "kms": l.kms, "pages": l.pages, "sources": l.sources },
+                    }),
+                    None => serde_json::json!({
+                        "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                        "error": format!("no KMS named '{name}'"),
+                    }),
+                }
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        // Deterministic research-job API (thclaws.research.*) — no LLM.
+        // Gated by `research.read`. Reads the live job registry (running +
+        // recently-completed), the real source of {status, score, …}.
+        "gui_shell_research_list" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let reply = if !shell_has_permission(shell_id, "research.read") {
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "error": "permission 'research.read' not granted in manifest",
+                })
+            } else {
+                let jobs: Vec<serde_json::Value> = crate::research::manager()
+                    .list()
+                    .iter()
+                    .map(job_view_json)
+                    .collect();
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "result": { "jobs": jobs },
+                })
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        "gui_shell_research_get" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let job_id = msg.get("jobId").and_then(|v| v.as_str()).unwrap_or("");
+            let reply = if !shell_has_permission(shell_id, "research.read") {
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "error": "permission 'research.read' not granted in manifest",
+                })
+            } else {
+                let job = crate::research::manager()
+                    .get(job_id)
+                    .map(|v| job_view_json(&v))
+                    .unwrap_or(serde_json::Value::Null);
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id, "replyTo": request_id,
+                    "result": { "job": job },
+                })
             };
             (ctx.dispatch)(reply.to_string());
         }

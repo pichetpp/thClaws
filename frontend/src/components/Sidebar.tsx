@@ -121,8 +121,12 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
 
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>("");
-  const [activeProvider, setActiveProvider] = useState("anthropic");
-  const [activeModel, setActiveModel] = useState("claude-sonnet-4-5");
+  // Start blank, not a hardcoded default: the Sidebar unmounts in
+  // full-screen and remounts with empty state, so a literal default here
+  // would flash the wrong provider/model until config_poll corrects it.
+  // We request config_poll on mount (below) to fill these immediately.
+  const [activeProvider, setActiveProvider] = useState("");
+  const [activeModel, setActiveModel] = useState("");
   const [providerReady, setProviderReady] = useState(true);
   // Inline model picker dropdown anchored to the Provider section.
   // null means closed; opens on click of the active model row. #49.
@@ -240,6 +244,10 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
     // rendered blank until some worker push refired sessions_list.
     // Ask for a fresh list on every mount.
     send({ type: "sessions_request" });
+    // Same remount problem for the Provider/Model section: without this
+    // it would show blank (or, pre-fix, a wrong hardcoded default) until
+    // the periodic 5 s config_poll fires. Ask for it immediately.
+    send({ type: "config_poll" });
     return unsub;
   }, []);
 

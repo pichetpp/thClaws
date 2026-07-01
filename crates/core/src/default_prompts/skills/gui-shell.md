@@ -53,6 +53,54 @@ const v = await thclaws.storage.get(key);
 
 You don't ship the bridge — it's injected into every shell's `<head>` at serve time.
 
+## Shared chrome — `<thc-header>` (also injected)
+
+Alongside the bridge, every shell gets a shared theme (design tokens keyed on the host's `data-theme`) and a `<thc-header>` navbar component — so you don't hand-roll a header or re-declare colors. Use it as your top bar:
+
+```html
+<thc-header label="My Studio">
+  <svg slot="icon" ...>…</svg>                       <!-- optional brand icon -->
+  <button slot="actions" id="search" title="Search">…</button>  <!-- your buttons -->
+</thc-header>
+```
+
+```js
+document.querySelector("thc-header").setStatus("working…");   // right-side status text
+```
+
+The right side is, left → right: `[status] [bridge-status] [your slot="actions" buttons] [theme toggle] [full-screen toggle]`. The **theme** and **full-screen** toggles are standard and always pinned far-right — the component wires them to `thclaws.ui` for you (theme toggle appears only in full-screen / standalone, where the app's own switch is out of reach). Add your own controls via `slot="actions"` (e.g. a search button) and wire their clicks in your `main.js`; buttons with no class get `.thc-iconbtn` to match. Don't re-implement an exit-fullscreen or theme button yourself — use these.
+
+### `<thc-model>` — active-model widget (permission-gated)
+
+A drop-in widget showing / switching the active model. Its behaviour is decided entirely by the **manifest permissions** you declare — no flag, no widget:
+
+- `model.read` → read-only badge of the current model.
+- `model.write` → the same picker as the main-app sidebar: a trigger that opens a searchable, provider-grouped dropdown (tier dividers, context sizes, current highlighted) to switch **provider + model** across the whole catalogue (the provider follows the chosen model id).
+- neither → renders nothing.
+
+**Standard placement is the sidebar, not the navbar.** Use `<thc-sidebar>` for your left column — it pins the model picker at the top automatically (it just disappears when the shell has no `model.*` permission) and makes everything you put inside the scrollable body below:
+
+```html
+<div class="app">
+  <thc-sidebar>
+    <div class="rail-header">…</div>   <!-- your sidebar content -->
+    <div class="rail-body">…</div>
+  </thc-sidebar>
+  <main>…</main>
+</div>
+```
+
+Add `no-model` to `<thc-sidebar>` to opt out of the auto picker, or drop a bare `<thc-model>` anywhere if you want it elsewhere. Declare the permission(s) in `GuiShellCreate` `permissions: ["model.read"]` (or `["model.read","model.write"]`). The matching bridge API is `thclaws.model.get()` / `.list()` / `.set(id)` / `.onChange(cb)` if you'd rather build your own UI. Switching the model is app-wide and persists, so every shell's `onChange` fires.
+
+## Deterministic data APIs (no LLM) — `thclaws.kms.*` / `thclaws.research.*`
+
+Read workspace data directly instead of prompting the agent for it — no token cost, nothing in the shared transcript, and the values are real (not model-inferred). Each is permission-gated:
+
+- **`kms.read`** → `thclaws.kms.list()` → `{kmss:[{name, scope, active, pages}]}`; `thclaws.kms.browse(name)` → `{kms, pages, sources}`.
+- **`research.read`** → `thclaws.research.list()` → `{jobs:[{id, query, status, phase, iterations_done, source_count, score, kms_target, result_page, error}]}` from the live research-job registry; `thclaws.research.get(id)` → `{job|null}`. `status` ∈ `pending|running|done|cancelled|failed`.
+
+Rule of thumb: if a panel shows workspace *state* (a list, a status, counts), read it with these — never a sentinel prompt through `thclaws.run()`. That path costs a full model turn each poll and can hallucinate. (research-console's rail uses these.)
+
 ## Install + iterate
 
 1. `GuiShellCreate` writes the folder.

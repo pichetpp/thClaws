@@ -42,6 +42,16 @@ const ALLOWED_PERMISSION_PREFIXES: &[&str] = &[
     "fs.shell-scoped",
     "tools.invoke:",
     "network.outbound:",
+    // Model widget (thclaws.model.*): read = view current + list;
+    // write = switch the active model. Absent ⇒ the bridge rejects the
+    // call and <thc-model> renders nothing.
+    "model.read",
+    "model.write",
+    // Deterministic data APIs (no LLM): thclaws.kms.* / thclaws.research.*
+    // let a shell read the knowledge base + research-job registry directly
+    // instead of prompting the model for it.
+    "kms.read",
+    "research.read",
 ];
 
 impl ShellManifest {
@@ -82,7 +92,8 @@ impl ShellManifest {
             if !ok {
                 return Err(format!(
                     "unknown permission '{p}'. Allowed: agent.run, session.read, session.list, \
-                     fs.shell-scoped, tools.invoke:<tool>, network.outbound:<host>"
+                     fs.shell-scoped, tools.invoke:<tool>, network.outbound:<host>, model.read, \
+                     model.write, kms.read, research.read"
                 ));
             }
         }
@@ -119,5 +130,37 @@ mod tests {
         assert_eq!(m.id, "session-explorer");
         assert_eq!(m.min_bridge_version, "1");
         assert_eq!(m.permissions.len(), 2);
+    }
+
+    fn manifest_with(perms: &[&str]) -> ShellManifest {
+        ShellManifest {
+            id: "demo".into(),
+            name: "Demo".into(),
+            version: "0.1.0".into(),
+            description: "d".into(),
+            entry: "index.html".into(),
+            icon: None,
+            min_bridge_version: "1".into(),
+            permissions: perms.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_model_flags() {
+        assert!(manifest_with(&["model.read", "model.write"])
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_data_api_flags() {
+        assert!(manifest_with(&["kms.read", "research.read"])
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_permission() {
+        assert!(manifest_with(&["model.delete"]).validate().is_err());
     }
 }

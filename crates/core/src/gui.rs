@@ -470,13 +470,19 @@ fn serve_gui_shell_asset(
 /// manually. If no `<head>` is present (rare — shells are encouraged to
 /// declare one), prepend a minimal head wrapper at the top of the body.
 fn inject_bridge_script(html: &[u8]) -> Vec<u8> {
-    const TAG: &[u8] = b"<script src=\"thclaws://localhost/gui-shell-bridge.js\"></script>";
+    // Bridge (external, custom-protocol asset) + the shared theme/chrome
+    // runtime inlined right after it — same head injection in every serve
+    // path (Mode A here, Mode B/C in gui_shell::serve).
+    let mut tag: Vec<u8> =
+        b"<script src=\"thclaws://localhost/gui-shell-bridge.js\"></script>".to_vec();
+    tag.extend_from_slice(crate::gui_shell::shared_chrome_head().as_bytes());
+    let tag = tag.as_slice();
     let lower = html.to_ascii_lowercase();
     if let Some(idx) = find_subslice(&lower, b"<head>") {
         let insert_at = idx + b"<head>".len();
-        let mut out = Vec::with_capacity(html.len() + TAG.len());
+        let mut out = Vec::with_capacity(html.len() + tag.len());
         out.extend_from_slice(&html[..insert_at]);
-        out.extend_from_slice(TAG);
+        out.extend_from_slice(tag);
         out.extend_from_slice(&html[insert_at..]);
         out
     } else if let Some(idx) = find_subslice(&lower, b"<head ") {
@@ -486,17 +492,17 @@ fn inject_bridge_script(html: &[u8]) -> Vec<u8> {
             .position(|&b| b == b'>')
             .map(|p| idx + p + 1)
             .unwrap_or(idx);
-        let mut out = Vec::with_capacity(html.len() + TAG.len());
+        let mut out = Vec::with_capacity(html.len() + tag.len());
         out.extend_from_slice(&html[..after_open]);
-        out.extend_from_slice(TAG);
+        out.extend_from_slice(tag);
         out.extend_from_slice(&html[after_open..]);
         out
     } else {
         // No head — prepend one. Wraps the bridge in <head> so a strict
         // parser still treats the rest as body.
-        let mut out = Vec::with_capacity(html.len() + TAG.len() + b"<head></head>".len());
+        let mut out = Vec::with_capacity(html.len() + tag.len() + b"<head></head>".len());
         out.extend_from_slice(b"<head>");
-        out.extend_from_slice(TAG);
+        out.extend_from_slice(tag);
         out.extend_from_slice(b"</head>");
         out.extend_from_slice(html);
         out

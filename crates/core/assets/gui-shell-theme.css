@@ -1,0 +1,573 @@
+/* thClaws GUI Shell — shared theme + chrome styling.
+ *
+ * Injected automatically into every shell's <head> at serve time (next
+ * to the bridge runtime), so shells don't re-declare the design tokens
+ * or the <thc-*> chrome styling themselves. Authored against the
+ * `data-theme` attribute the bridge sets on <html>; falls back to the
+ * OS preference until the host handshake resolves.
+ *
+ * SSOT for the thClaws palette (emerald accent, slate neutrals). A shell
+ * that wants a bespoke look just overrides any token in its own
+ * style.css `:root {}` — the studio's <link> loads after this <style>,
+ * so equal-specificity rules win for the studio.
+ */
+
+/* Dark is the base (shells are dark-first); light via host data-theme
+ * or OS preference before the host handshake lands. */
+:root {
+  --bg-primary: #0e1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #1c2128;
+  --bg-elevated: #21262d;
+  --bg-rail: #161b22;
+  --border: #30363d;
+  --border-strong: #484f58;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --accent: #2dd4bf;
+  --accent-strong: #5eead4;
+  --accent-dim: rgba(45, 212, 191, 0.15);
+  --accent-soft: rgba(45, 212, 191, 0.22);
+  --danger: #f85149;
+  --danger-dim: rgba(248, 81, 73, 0.15);
+  --warning: #d29922;
+  --warn: #d29922;
+  --warn-soft: rgba(210, 153, 34, 0.15);
+  --success: #2ea043;
+  --ok: #2ea043;
+  --radius: 8px;
+}
+
+:root[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #eaeef2;
+  --bg-elevated: #ffffff;
+  --bg-rail: #f6f8fa;
+  --border: #d0d7de;
+  --border-strong: #afb8c1;
+  --text-primary: #1f2328;
+  --text-secondary: #59636e;
+  --text-muted: #818b98;
+  --accent: #0d9488;
+  --accent-strong: #0b7c72;
+  --accent-dim: rgba(13, 148, 136, 0.08);
+  --accent-soft: rgba(13, 148, 136, 0.14);
+  --danger: #cf222e;
+  --danger-dim: rgba(207, 34, 46, 0.08);
+  --warning: #9a6700;
+  --warn: #9a6700;
+  --warn-soft: rgba(154, 103, 0, 0.1);
+  --success: #1a7f37;
+  --ok: #1a7f37;
+}
+
+/* Until the host sets data-theme, honour the OS preference. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f6f8fa;
+    --bg-tertiary: #eaeef2;
+    --bg-elevated: #ffffff;
+    --bg-rail: #f6f8fa;
+    --border: #d0d7de;
+    --border-strong: #afb8c1;
+    --text-primary: #1f2328;
+    --text-secondary: #59636e;
+    --text-muted: #818b98;
+    --accent: #0d9488;
+    --accent-strong: #0b7c72;
+    --accent-dim: rgba(13, 148, 136, 0.08);
+    --accent-soft: rgba(13, 148, 136, 0.14);
+    --danger: #cf222e;
+    --danger-dim: rgba(207, 34, 46, 0.08);
+    --warning: #9a6700;
+    --warn: #9a6700;
+    --warn-soft: rgba(154, 103, 0, 0.1);
+    --success: #1a7f37;
+    --ok: #1a7f37;
+  }
+}
+
+/* Low-specificity base reset so studios override freely. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:where(html, body) {
+  height: 100%;
+  margin: 0;
+}
+
+:where(body) {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── <thc-header> shared chrome ─────────────────────────────────── */
+
+thc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex: 0 0 auto;
+}
+
+thc-header .thc-header-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+thc-header .thc-header-icon {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+thc-header .thc-header-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+thc-header .thc-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+/* Author-supplied slot="actions" buttons sit here, just left of the two
+ * pinned standard controls. */
+thc-header .thc-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+thc-header .thc-header-actions:empty {
+  display: none;
+}
+
+thc-header .thc-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+thc-header .thc-bridge {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+thc-header .thc-bridge.ok {
+  color: var(--success);
+}
+
+thc-header .thc-bridge.err {
+  color: var(--danger);
+}
+
+thc-header .thc-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  padding: 5px;
+  cursor: pointer;
+  line-height: 0;
+}
+
+thc-header .thc-iconbtn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+thc-header .thc-iconbtn[hidden] {
+  display: none;
+}
+
+/* ── <thc-model> active-model widget ───────────────────────────── */
+
+thc-model {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+thc-model[hidden] {
+  display: none;
+}
+
+.thc-model-badge {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.thc-model-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.thc-model-trigger:hover {
+  border-color: var(--border-strong);
+}
+
+.thc-model-provider {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
+.thc-model-current {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thc-model-caret {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.thc-model-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.thc-model-panel[hidden] {
+  display: none;
+}
+
+.thc-model-search {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.thc-model-search-input {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-size: 12px;
+  outline: none;
+}
+
+.thc-model-list {
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.thc-model-tier {
+  padding: 8px 8px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-primary);
+  border-top: 1px solid var(--border);
+}
+
+.thc-model-tier:first-child {
+  border-top: none;
+}
+
+.thc-model-group {
+  position: sticky;
+  top: 0;
+  padding: 4px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+}
+
+.thc-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thc-model-row:hover {
+  background: var(--bg-tertiary);
+}
+
+.thc-model-row.is-current {
+  background: var(--bg-tertiary);
+  border-left-color: var(--accent);
+}
+
+.thc-model-row-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thc-model-row-ctx {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.thc-model-empty {
+  padding: 12px 8px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* ── <thc-sidebar> standard sidebar layout ─────────────────────── */
+
+thc-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-rail);
+  border-right: 1px solid var(--border);
+  /* visible so the model picker's dropdown can overlay the body below */
+  overflow: visible;
+}
+
+/* Model picker pinned at the top; collapses (no border/space) when the
+ * shell lacks model.* permission, since <thc-model> hides itself. */
+thc-sidebar > .thc-sidebar-model {
+  display: block;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+thc-sidebar > .thc-sidebar-model[hidden] {
+  display: none;
+}
+
+thc-sidebar > .thc-sidebar-model .thc-model-trigger {
+  width: 100%;
+  max-width: none;
+}
+
+thc-sidebar > .thc-sidebar-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── <thc-chat> conversation view ──────────────────────────────── */
+
+thc-chat {
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+thc-chat .thc-chat-scroll {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+thc-chat .thc-msg {
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+thc-chat .thc-msg-user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+thc-chat .thc-msg-agent,
+thc-chat .thc-msg-system {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+thc-chat .thc-msg-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+
+thc-chat .thc-msg-body {
+  padding: 12px 16px;
+  border-radius: 12px;
+  line-height: 1.55;
+  font-size: 14px;
+  word-wrap: break-word;
+}
+
+thc-chat .thc-msg-user .thc-msg-body {
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-dim);
+  color: var(--text-primary);
+}
+
+thc-chat .thc-msg-agent .thc-msg-body {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+thc-chat .thc-msg-system .thc-msg-body {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* Tool-call chip — grey + quiet, like the main app's inline tool row. */
+thc-chat .thc-chat-tool {
+  align-self: flex-start;
+  max-width: 760px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+thc-chat .thc-chat-tool::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+/* Streaming cursor on the in-flight agent bubble. */
+thc-chat .thc-chat-streaming::after {
+  content: "▋";
+  margin-left: 1px;
+  color: var(--accent);
+  animation: thc-chat-blink 1s steps(2) infinite;
+}
+
+@keyframes thc-chat-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Markdown inside bubbles. */
+thc-chat .thc-msg-body p {
+  margin-bottom: 8px;
+}
+thc-chat .thc-msg-body p:last-child {
+  margin-bottom: 0;
+}
+thc-chat .thc-msg-body h1,
+thc-chat .thc-msg-body h2,
+thc-chat .thc-msg-body h3 {
+  margin: 8px 0 4px;
+  line-height: 1.3;
+}
+thc-chat .thc-msg-body code {
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12.5px;
+}
+thc-chat .thc-msg-body pre {
+  background: var(--bg-tertiary);
+  padding: 10px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 6px 0;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+thc-chat .thc-msg-body pre code {
+  background: none;
+  padding: 0;
+}
+thc-chat .thc-msg-body ul,
+thc-chat .thc-msg-body ol {
+  margin: 4px 0 8px 24px;
+}
+thc-chat .thc-msg-body li {
+  margin-bottom: 2px;
+}
+thc-chat .thc-msg-body a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+thc-chat .thc-msg-body a:hover {
+  color: var(--accent-strong);
+}
+thc-chat .thc-msg-body strong {
+  font-weight: 600;
+}
+thc-chat .thc-msg-body em {
+  font-style: italic;
+}

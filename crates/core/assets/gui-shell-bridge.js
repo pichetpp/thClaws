@@ -24,10 +24,24 @@
 //   thclaws.ui.isFullscreen          — bool, host is showing us full-screen
 //   thclaws.ui.onFullscreen(cb)      -> unsubscribe()    // fires with current state
 //   thclaws.ui.exitFullscreen()      -> void             // ask host to leave full-screen
+//   thclaws.ui.toggleFullscreen()    -> void             // enter/leave full-screen (⌘⇧U)
 //   thclaws.ui.claimExitControl()    -> void             // hide the host's fallback chip
 //   thclaws.ui.theme                 — "light" | "dark", host's resolved theme
 //   thclaws.ui.onTheme(cb)           -> unsubscribe()    // fires with current theme
+//   thclaws.ui.setTheme(mode)        -> void             // ask host to switch app theme
+//   thclaws.ui.toggleTheme()         -> void             // flip light/dark
 //                                    // (bridge also sets data-theme + color-scheme on <html>)
+//
+//   thclaws.model.get()              -> Promise<{provider, model, writable}>  // needs model.read
+//   thclaws.model.list()             -> Promise<{current, groups:[{provider, models:[{id}]}]}>  // model.read (all providers)
+//   thclaws.model.set(id)            -> Promise<{ok, model}>                   // needs model.write
+//   thclaws.model.onChange(cb)       -> unsubscribe()     // fires when the active model changes
+//   thclaws.model.current            — {provider, model} | null, last seen
+//
+//   thclaws.kms.list()               -> Promise<{kmss:[{name,scope,active}]}>   // needs kms.read
+//   thclaws.kms.browse(name)         -> Promise<{kms, pages, sources}>          // needs kms.read
+//   thclaws.research.list()          -> Promise<{jobs:[…]}>                     // needs research.read
+//   thclaws.research.get(id)         -> Promise<{job|null}>                     // needs research.read
 
 (() => {
   // Mode A URL: thclaws://localhost/gui-shell/<id>/<path>?session=<sid>
@@ -131,6 +145,11 @@
         } catch (e) {
           /* document not ready / sandboxed — CSS default applies */
         }
+      }
+      // Cache the latest model so thclaws.model.onChange can replay it
+      // and thclaws.model.current is always readable.
+      if (data.event === "model" && window.thclaws && window.thclaws.model) {
+        window.thclaws.model.current = data.payload || null;
       }
       const set = subscribers.get(data.event);
       if (set) {
@@ -476,6 +495,49 @@
         );
       },
 
+      // Toggle the host's full-screen UI (enter if windowed, leave if
+      // full-screen) — the same action as the ⌘⇧U / Ctrl⇧U hotkey. No-op
+      // in Mode B, where the shell already owns the whole page.
+      toggleFullscreen() {
+        if (isModeB) return;
+        parent.postMessage(
+          { ns: "thclaws-shell", type: "hotkey", key: "toggle-fullscreen-ui" },
+          "*",
+        );
+      },
+
+      // Ask the host to switch the app theme ("light" | "dark"). The host
+      // persists it (same path as Settings), applies it app-wide, and
+      // echoes the resolved theme back as a `theme` event so this shell
+      // re-themes too. In Mode B there's no host to ask, so we flip the
+      // shell document's own `data-theme` directly.
+      setTheme(mode) {
+        const next = mode === "light" ? "light" : "dark";
+        if (isModeB) {
+          window.thclaws.ui.theme = next;
+          try {
+            const de = document.documentElement;
+            de.setAttribute("data-theme", next);
+            de.style.colorScheme = next;
+          } catch (e) {
+            /* document not ready */
+          }
+          handleShellEvent({ event: "theme", payload: { mode: next } });
+          return;
+        }
+        parent.postMessage(
+          { ns: "thclaws-shell", type: "ui", key: "set-theme", mode: next },
+          "*",
+        );
+      },
+
+      // Convenience: flip between light and dark from the current theme.
+      toggleTheme() {
+        window.thclaws.ui.setTheme(
+          window.thclaws.ui.theme === "dark" ? "light" : "dark",
+        );
+      },
+
       // Tell the host this shell renders its own exit control, so the
       // host can hide its fallback chip. Safe to call repeatedly.
       claimExitControl() {
@@ -515,6 +577,79 @@
         );
         Promise.resolve().then(() => callback(window.thclaws.ui.theme));
         return unsub;
+      },
+    },
+
+    // Active-model widget surface. Gated host-side by the shell's
+    // manifest permissions: `model.read` (get/list) and `model.write`
+    // (set). Without them the calls reject — <thc-model> then renders
+    // nothing. `set` changes the app-wide model (same as the sidebar
+    // picker), so every shell's onChange fires.
+    model: {
+      // Last {provider, model} seen via a "model" event; null until one
+      // arrives. onChange replays this on subscribe.
+      current: null,
+
+      get() {
+        return send("model_get", {});
+      },
+      list() {
+        return send("model_list", {});
+      },
+      set(id) {
+        if (typeof id !== "string" || !id) {
+          return Promise.reject(
+            new TypeError("thclaws.model.set: id must be a non-empty string"),
+          );
+        }
+        return send("model_set", { model: id });
+      },
+
+      // Fires when the active model changes (from this shell, another
+      // shell, or the main sidebar). Replays the current value on the
+      // next tick. Returns an unsubscribe function.
+      onChange(callback) {
+        if (typeof callback !== "function") {
+          throw new TypeError("thclaws.model.onChange: callback must be a function");
+        }
+        const unsub = window.thclaws.on("model", (p) => callback(p));
+        Promise.resolve().then(() => {
+          if (window.thclaws.model.current) callback(window.thclaws.model.current);
+        });
+        return unsub;
+      },
+    },
+
+    // Deterministic knowledge-base API (needs `kms.read`). No LLM — reads
+    // the KMS store directly instead of prompting the agent.
+    kms: {
+      // -> { kmss: [{ name, scope, active }] }
+      list() {
+        return send("kms_list", {});
+      },
+      // -> { kms, pages:[{…}], sources:[{…}] }
+      browse(name) {
+        if (typeof name !== "string" || !name) {
+          return Promise.reject(
+            new TypeError("thclaws.kms.browse: name must be a non-empty string"),
+          );
+        }
+        return send("kms_browse", { name: name });
+      },
+    },
+
+    // Deterministic research-job API (needs `research.read`). No LLM —
+    // reads the live job registry (running + recently-completed), the real
+    // source of {status, score, phase, …}.
+    research: {
+      // -> { jobs: [{ id, query, status, phase, iterations_done,
+      //              source_count, score, kms_target, result_page, error }] }
+      list() {
+        return send("research_list", {});
+      },
+      // -> { job: {…} | null }
+      get(id) {
+        return send("research_get", { jobId: id });
       },
     },
 

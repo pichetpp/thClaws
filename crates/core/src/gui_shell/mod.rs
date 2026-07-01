@@ -27,3 +27,22 @@ pub use tokens::ShellToken;
 /// Injected into every shell's `<head>` at HTML serve time so authors
 /// don't have to ship the bridge themselves.
 pub const BRIDGE_RUNTIME: &str = include_str!("../../assets/gui-shell-bridge.js");
+
+/// Shared design-token + chrome stylesheet, injected as an inline
+/// `<style>` next to the bridge so shells don't re-declare the palette
+/// or `<thc-*>` styling. SSOT for the thClaws GUI-Shell look.
+pub const THEME_RUNTIME: &str = include_str!("../../assets/gui-shell-theme.css");
+
+/// Shared chrome runtime (`<thc-header>` web component), injected as an
+/// inline `<script>` after the bridge so every shell gets the same
+/// navbar/bridge-status/full-screen behaviour for free.
+pub const UI_RUNTIME: &str = include_str!("../../assets/gui-shell-ui.js");
+
+/// Build the inline `<style>` + `<script>` block for the shared theme +
+/// chrome runtime, escaped so neither can break out of its tag. Injected
+/// right after the bridge in every serve path (Mode A/B/C).
+pub fn shared_chrome_head() -> String {
+    let theme_safe = THEME_RUNTIME.replace("</", "<\\/");
+    let ui_safe = UI_RUNTIME.replace("</", "<\\/");
+    format!("<style>{theme_safe}</style><script>{ui_safe}</script>")
+}

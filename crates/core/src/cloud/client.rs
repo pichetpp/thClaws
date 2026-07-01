@@ -252,7 +252,9 @@ impl Client {
     }
 
     /// Upload a `.tar.gz` to the cloud workspace. `workspace_id` records the
-    /// binding on the runner.
+    /// binding on the runner. When `progress` is set, the body is streamed in
+    /// chunks and the counter is bumped as each is handed to the socket, so the
+    /// caller can render a live byte/percentage readout.
     pub async fn ws_sync_push(
         &self,
         ws_url: &str,
@@ -260,6 +262,7 @@ impl Client {
         tarball: Vec<u8>,
         delete: bool,
         workspace_id: &str,
+        progress: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<SyncPushResp, String> {
         let url = format!(
             "{}/workspace/sync/push?delete={}&workspace_id={}",
@@ -267,12 +270,33 @@ impl Client {
             delete,
             urlencoding::encode(workspace_id)
         );
+        let body = match progress {
+            Some(counter) => {
+                use bytes::Bytes;
+                use std::sync::atomic::Ordering;
+                let full = Bytes::from(tarball);
+                let total = full.len();
+                let mut offset = 0usize;
+                let stream = futures::stream::iter(std::iter::from_fn(move || {
+                    if offset >= total {
+                        return None;
+                    }
+                    let end = (offset + 64 * 1024).min(total);
+                    let chunk = full.slice(offset..end);
+                    offset = end;
+                    counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                    Some(Ok::<Bytes, std::io::Error>(chunk))
+                }));
+                reqwest::Body::wrap_stream(stream)
+            }
+            None => reqwest::Body::from(tarball),
+        };
         let res = self
             .http
             .post(&url)
             .header("Authorization", format!("Bearer {}", jwt))
             .header("Content-Type", "application/gzip")
-            .body(tarball)
+            .body(body)
             .send()
             .await
             .map_err(|e| format!("network: {}", e))?;

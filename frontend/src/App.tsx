@@ -10,6 +10,7 @@ import { BrowserView } from "./components/BrowserView";
 import { LoginButton } from "./components/LoginButton";
 import { RunningChip } from "./components/RunningChip";
 import { useBusyState } from "./hooks/useBusyState";
+import { useTheme } from "./hooks/useTheme";
 import { Sidebar } from "./components/Sidebar";
 import { PlanSidebar } from "./components/PlanSidebar";
 import { GoalSidebar } from "./components/GoalSidebar";
@@ -415,6 +416,11 @@ export default function App() {
   // to paste.
   useEditingShortcuts();
 
+  // Lets a full-screen GUI shell flip the app theme from its own navbar
+  // (the host's theme switch is hidden in full-screen). Persists + syncs
+  // app-wide, same as Settings → Theme.
+  const { setMode } = useTheme();
+
   // dev-plan/36 — auto-attach to the right session on tab open. Two
   // cases, handled by a SINGLE auto-load that fires ONCE per mount:
   //
@@ -553,6 +559,11 @@ export default function App() {
         setExitControlClaimed(true);
         return;
       }
+      // Shell asked to switch the app theme (its navbar theme toggle).
+      if (data.type === "ui" && data.key === "set-theme") {
+        if (data.mode === "light" || data.mode === "dark") setMode(data.mode);
+        return;
+      }
       if (data.type !== "hotkey") return;
       // Explicit exit (shell's own exit button) vs toggle (⌘⇧U).
       if (data.key === "exit-fullscreen-ui") {
@@ -571,7 +582,7 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown, { capture: true });
       window.removeEventListener("message", onMessage);
     };
-  }, []);
+  }, [setMode]);
 
   const [started, setStarted] = useState(false);
   const [currentCwd, setCurrentCwd] = useState("");

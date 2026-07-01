@@ -10816,20 +10816,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         CloudSlash::Push { delete, dry_run, workspace, force_rebind } => {
                             let cwd = std::env::current_dir().unwrap_or_default();
                             let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind };
-                            for line in
-                                crate::cloud::cmd::push_lines(&cwd, None, cloud_cfg.as_ref(), opts).await
-                            {
-                                println!("{line}");
-                            }
+                            crate::cloud::cmd::push_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
                         }
                         CloudSlash::Pull { delete, dry_run, workspace, force_rebind } => {
                             let cwd = std::env::current_dir().unwrap_or_default();
                             let opts = crate::cloud::cmd::SyncOpts { delete, dry_run, workspace, force_rebind };
-                            for line in
-                                crate::cloud::cmd::pull_lines(&cwd, None, cloud_cfg.as_ref(), opts).await
-                            {
-                                println!("{line}");
-                            }
+                            crate::cloud::cmd::pull_streaming(&cwd, None, cloud_cfg.as_ref(), opts, &mut |line| println!("{line}")).await;
                         }
                     }
                 }

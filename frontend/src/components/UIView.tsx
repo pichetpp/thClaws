@@ -120,13 +120,25 @@ export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
   useEffect(() => {
     // backend -> iframe: forward gui_shell_event dispatches.
     const unsub = subscribe((msg: any) => {
-      if (msg?.type !== "gui_shell_event") return;
-      // Tier 1: no sessionId filtering — single shared session, every
-      // active shell tab gets every event. Tier 2 adds per-tab session
-      // ids and we filter here.
       const target = iframeRef.current?.contentWindow;
       if (!target) return;
-      target.postMessage({ ns: "thclaws-shell-event", ...msg }, "*");
+      if (msg?.type === "gui_shell_event") {
+        // Tier 1: no sessionId filtering — single shared session, every
+        // active shell tab gets every event. Tier 2 adds per-tab session
+        // ids and we filter here.
+        target.postMessage({ ns: "thclaws-shell-event", ...msg }, "*");
+      } else if (msg?.type === "provider_update") {
+        // Re-emit model changes (from the sidebar, /model, etc.) into the
+        // shell as a `model` bridge event so thclaws.model.onChange fires.
+        target.postMessage(
+          {
+            ns: "thclaws-shell-event",
+            event: "model",
+            payload: { provider: msg.provider, model: msg.model },
+          },
+          "*",
+        );
+      }
     });
     return unsub;
   }, []);

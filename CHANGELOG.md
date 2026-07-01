@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.84.0] — 2026-07-01
+
+Major UI and cloud-dashboard refreshes: dedicated Access Keys page, refined workspace visuals, and a surge of new features for custom GUI shells.
+
+### Added
+- **Dedicated "thClaws.cloud Access Keys" page.** Added a full-page management view for access keys at `/access-keys`, accessible independently of the dashboard.
+- **GUI Shell: standard theme and header.** Introduced a standard theme, `<thc-header>` chrome, sidebar layout with a pinned model picker, and full-screen toggles for GUI Shell extensions.
+- **GUI Shell: deterministic research data APIs.** Added deterministic `thclaws.kms/research` data APIs for GUI Shells, enabling non-LLM-backed access to research data.
+- **GUI Shell: shared conversation component.** Provided a standard `<thc-chat>` conversation block, including contextual grey tool chips, for all GUI Shells.
+- **GUI Shell: searchable model picker.** Added a main-app-style, searchable model picker component for custom shells.
+- **GUI Shell: permission-gated model picker.** Enabled permission-scoped `<thc-model>` provider + model picker for shell environments.
+- **Cloud: live workspace push/pull streaming.** `/cloud` sync commands now stream transfer progress live with upload percentages.
+
+### Fixed
+- **Access Keys link and menu.** Updated both the Access Keys menu and credit link to point to `/access-keys`, fixing previous routing issues.
+- **Access Keys page discoverability.** Moved Access Keys to its new location, ensuring the page is reachable from the dashboard.
+- **Workspace-list visuals.** Workspace list icon now uses a 16:9 uncropped image, and agent entries show a small icon instead of a cropped banner.
+- **Sidebar model selection.** Prevents flashing a stale model when exiting full-screen mode.
+- **Research Agent.** Improved adaptive depth, page-scoped gates, and final re-verification logic in the research-agent.
+
+### Changed
+- **Cloud: removed gateway-key API.** Deprecated and removed the user-facing gateway-key API library, REST endpoint, and related router hooks.
+
 ## [0.83.0] — 2026-06-30
 
 Auto-discovers OpenCode-Go model routing from the live model list, so new models reach the correct API dialect without a code change.
