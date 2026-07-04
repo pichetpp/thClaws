@@ -28,6 +28,7 @@ pub const MAX_SYNC_BYTES: u64 = 250 * 1024 * 1024;
 
 const BINDING_REL: &str = ".thclaws/cloud-sync.json";
 const SETTINGS_REL: &str = ".thclaws/settings.json";
+const SYNCIGNORE_REL: &str = ".thclaws/syncignore";
 const TRASH_PREFIX: &str = ".sync-trash";
 
 /// Records which hosted workspace a folder is paired with. Lives at
@@ -112,9 +113,54 @@ fn walk_inner(
     Ok(())
 }
 
-/// Synced (non-excluded) files, relative to `root`.
+/// User exclude patterns from `.thclaws/syncignore` (dev-plan/51 open
+/// question, resolved 2026-07-04): one path per line, `/`-separated,
+/// `#` comments + blank lines skipped, trailing `/` tolerated. A line
+/// matches its exact rel path or anything under it (prefix at a `/`
+/// boundary). Deliberately NOT a glob engine — plain prefixes cover the
+/// real use (keep big data/build dirs out of the sync) with zero
+/// pattern-language surprises. The file itself lives inside the synced
+/// set, so a push propagates the ignore list to the other side.
+fn load_syncignore(root: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(root.join(SYNCIGNORE_REL)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            l.trim_start_matches("./")
+                .trim_end_matches('/')
+                .replace('\\', "/")
+        })
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn ignored_by(rel: &str, patterns: &[String]) -> bool {
+    // The sync plumbing itself can't be ignored away — losing the
+    // binding / settings / the ignore file mid-round-trip is a foot-gun.
+    // Ancestor DIRS are exempt too (the walk prunes whole subtrees, so
+    // an ignored `.thclaws` must still descend far enough to keep them).
+    const PLUMBING: &[&str] = &[BINDING_REL, SETTINGS_REL, SYNCIGNORE_REL];
+    if PLUMBING
+        .iter()
+        .any(|p| rel == *p || p.starts_with(&format!("{rel}/")))
+    {
+        return false;
+    }
+    patterns
+        .iter()
+        .any(|p| rel == p || rel.starts_with(&format!("{p}/")))
+}
+
+/// Synced (non-excluded) files, relative to `root`. Applies the strip
+/// set plus the user's `.thclaws/syncignore`.
 fn walk_synced(root: &Path) -> Result<Vec<PathBuf>, String> {
-    walk(root, &|rel| !excluded(rel))
+    let ignores = load_syncignore(root);
+    walk(root, &|rel| {
+        !excluded(rel) && !ignored_by(&norm(rel), &ignores)
+    })
 }
 
 pub fn stat_workspace(root: &Path) -> Result<SyncStat, String> {
@@ -574,5 +620,55 @@ mod tests {
         assert!(!dst.join("stale.txt").exists(), "extraneous removed");
         assert_eq!(w.written, 2);
         assert_eq!(t.deleted, 1);
+    }
+
+    #[test]
+    fn syncignore_excludes_prefixes_but_not_plumbing() {
+        let root = tmp("ignore");
+        write(&root, "keep.txt", "k");
+        write(&root, "bigdata/blob.bin", "xxxx");
+        write(&root, "bigdata/sub/deep.bin", "yyyy");
+        write(&root, "node_modules/pkg/index.js", "js");
+        write(&root, ".thclaws/settings.json", "{}");
+        write(
+            &root,
+            ".thclaws/syncignore",
+            "# comment\n\nbigdata/\nnode_modules\n.thclaws\n",
+        );
+        let files: Vec<String> = walk_synced(&root)
+            .unwrap()
+            .iter()
+            .map(|r| norm(r))
+            .collect();
+        assert!(files.contains(&"keep.txt".to_string()));
+        assert!(!files.iter().any(|f| f.starts_with("bigdata")));
+        assert!(!files.iter().any(|f| f.starts_with("node_modules")));
+        // Plumbing survives even a `.thclaws` wholesale ignore.
+        assert!(files.contains(&".thclaws/settings.json".to_string()));
+        assert!(files.contains(&".thclaws/syncignore".to_string()));
+        // Prefix must respect the `/` boundary: `bigdata2.txt` is NOT
+        // covered by the `bigdata` pattern.
+        write(&root, "bigdata2.txt", "z");
+        let files: Vec<String> = walk_synced(&root)
+            .unwrap()
+            .iter()
+            .map(|r| norm(r))
+            .collect();
+        assert!(files.contains(&"bigdata2.txt".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn syncignore_applies_to_manifest_and_stat() {
+        let root = tmp("ignore-manifest");
+        write(&root, "a.txt", "a");
+        write(&root, "skipme/b.txt", "b");
+        write(&root, ".thclaws/syncignore", "skipme\n");
+        let m = build_manifest(&root).unwrap();
+        assert!(m.iter().any(|e| e.path == "a.txt"));
+        assert!(!m.iter().any(|e| e.path.starts_with("skipme")));
+        let s = stat_workspace(&root).unwrap();
+        assert_eq!(s.file_count, m.len());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

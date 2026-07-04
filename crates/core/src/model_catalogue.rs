@@ -1030,6 +1030,7 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
         ProviderKind::Minimax => "minimax",
         ProviderKind::Moonshot => "moonshot",
         ProviderKind::XAi => "xai",
+        ProviderKind::Groq => "groq",
     }
 }
 

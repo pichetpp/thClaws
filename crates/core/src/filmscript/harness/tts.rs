@@ -310,19 +310,29 @@ const OPENAI_TTS_MODEL: &str = "gpt-4o-mini-tts";
 /// is an ElevenLabs voice id; `model` overrides `eleven_v3` (the ONLY
 /// Thai-capable model — `eleven_multilingual_v2` mis-speaks Thai). mp3 out.
 async fn elevenlabs_tts(text: &str, voice: &str, model: Option<&str>) -> Result<Vec<u8>> {
-    let key = env_key("ELEVENLABS_API_KEY")
-        .ok_or_else(|| Error::Tool("ELEVENLABS_API_KEY not set for elevenlabs TTS voice".into()))?;
+    // BYOK-or-gateway (dev-plan/53 Stage D). Auth scheme differs by
+    // route: ElevenLabs itself wants `xi-api-key`; the gateway auths on
+    // `Authorization: Bearer` and injects the real xi-api-key upstream.
+    let ep = crate::media::provider::resolve_endpoint(
+        &["ELEVENLABS_API_KEY"],
+        "https://api.elevenlabs.io",
+        "elevenlabs",
+    )?;
     let body = json!({
         "text": text,
         "model_id": model.unwrap_or(ELEVENLABS_TTS_MODEL),
         "voice_settings": { "stability": 0.45, "similarity_boost": 0.8 },
     });
-    let resp = http()
-        .post(format!(
-            "https://api.elevenlabs.io/v1/text-to-speech/{voice}"
-        ))
-        .header("xi-api-key", &key)
-        .header("Accept", "audio/mpeg")
+    let mut req = crate::multi_tenant::attach_member(
+        http().post(format!("{}/v1/text-to-speech/{voice}", ep.base_url)),
+    )
+    .header("Accept", "audio/mpeg");
+    req = if ep.via_gateway {
+        req.bearer_auth(&ep.api_key)
+    } else {
+        req.header("xi-api-key", &ep.api_key)
+    };
+    let resp = req
         .json(&body)
         .send()
         .await

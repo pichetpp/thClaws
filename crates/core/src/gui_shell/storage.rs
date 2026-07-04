@@ -132,6 +132,29 @@ pub fn set_in(
     write_at(&path, &mut map, key, value)
 }
 
+/// Remove `key` from the shell's storage (dev-plan/39 Tier 3
+/// `thclaws.storage.delete`). No-op if the key is absent. Distinct from
+/// `set(key, null)`, which stores an explicit null.
+pub fn delete(shell_id: &str, session_id: &str, key: &str) -> Result<()> {
+    let path = storage_path(shell_id, session_id)?;
+    let mut map = load_all(shell_id, session_id)?;
+    remove_at(&path, &mut map, key)
+}
+
+/// Override-rooted [`delete`].
+pub fn delete_in(override_root: &Path, shell_id: &str, session_id: &str, key: &str) -> Result<()> {
+    let path = storage_path_in(override_root, shell_id, session_id)?;
+    let mut map = load_all_in(override_root, shell_id, session_id)?;
+    remove_at(&path, &mut map, key)
+}
+
+fn remove_at(path: &Path, map: &mut BTreeMap<String, Value>, key: &str) -> Result<()> {
+    if map.remove(key).is_none() {
+        return Ok(()); // absent → nothing to rewrite
+    }
+    persist(path, map)
+}
+
 fn write_at(path: &Path, map: &mut BTreeMap<String, Value>, key: &str, value: Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -142,8 +165,34 @@ fn write_at(path: &Path, map: &mut BTreeMap<String, Value>, key: &str, value: Va
         })?;
     }
     map.insert(key.to_string(), value);
+    persist(path, map)
+}
+
+/// dev-plan/39 Tier 3: per-shell storage quota. A shell can't grow its
+/// KV file past this — writes over it fail with a clear error rather
+/// than letting a runaway shell fill the workspace disk.
+pub const MAX_STORAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Atomic serialize + temp-write + rename of the whole map, enforcing
+/// the per-shell quota on the serialized size.
+fn persist(path: &Path, map: &BTreeMap<String, Value>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Error::Tool(format!(
+                "gui-shell: cannot create storage dir '{}': {e}",
+                parent.display()
+            ))
+        })?;
+    }
     let body = serde_json::to_string_pretty(map)
         .map_err(|e| Error::Tool(format!("gui-shell: serialize storage: {e}")))?;
+    if body.len() > MAX_STORAGE_BYTES {
+        return Err(Error::Tool(format!(
+            "gui-shell: storage quota exceeded ({} bytes > {} byte cap) — delete keys or store less",
+            body.len(),
+            MAX_STORAGE_BYTES
+        )));
+    }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, body).map_err(|e| {
         Error::Tool(format!(
@@ -239,6 +288,33 @@ mod tests {
         assert!(storage_path_in(dir.path(), "../etc", "sess").is_err());
         assert!(storage_path_in(dir.path(), "good", "..").is_err());
         assert!(storage_path_in(dir.path(), "", "sess").is_err());
+    }
+
+    #[test]
+    fn delete_removes_key_and_is_noop_when_absent() {
+        let dir = std::env::temp_dir().join(format!("gs-del-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        set_in(&dir, "sh", "sess", "a", serde_json::json!(1)).unwrap();
+        set_in(&dir, "sh", "sess", "b", serde_json::json!(2)).unwrap();
+        delete_in(&dir, "sh", "sess", "a").unwrap();
+        assert!(get_in(&dir, "sh", "sess", "a").unwrap().is_null());
+        assert_eq!(
+            get_in(&dir, "sh", "sess", "b").unwrap(),
+            serde_json::json!(2)
+        );
+        // Deleting an absent key is a no-op (no error).
+        delete_in(&dir, "sh", "sess", "ghost").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quota_rejects_oversize_write() {
+        let dir = std::env::temp_dir().join(format!("gs-quota-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let big = "x".repeat(MAX_STORAGE_BYTES + 1);
+        let err = set_in(&dir, "sh", "sess", "k", serde_json::json!(big)).unwrap_err();
+        assert!(format!("{err}").contains("quota exceeded"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -53,18 +53,33 @@ pub(crate) fn upload_base() -> String {
 
 pub struct KieUploader {
     api_key: String,
+    base: String,
     client: reqwest::Client,
 }
 
 impl KieUploader {
     pub fn new(api_key: String) -> Self {
+        Self::with_base(api_key, upload_base())
+    }
+
+    pub fn with_base(api_key: String, base: String) -> Self {
         Self {
             api_key,
+            base,
             client: reqwest::Client::builder()
                 .user_agent(USER_AGENT)
                 .build()
                 .expect("reqwest client"),
         }
+    }
+
+    /// BYOK-or-gateway endpoint (dev-plan/53 Stage D). Gateway mode
+    /// routes to `<gateway>/kie/api/file-stream-upload` — auth'd but
+    /// free (Kie uploads cost nothing); the gateway swaps in the
+    /// platform key and forwards to the upload host.
+    pub fn resolve() -> Result<Self> {
+        let ep = crate::media::provider::resolve_endpoint(&["KIE_API_KEY"], &upload_base(), "kie")?;
+        Ok(Self::with_base(ep.api_key, ep.base_url))
     }
 
     /// Upload `path`, returning a Kie-fetchable URL. Content-hash
@@ -91,17 +106,18 @@ impl KieUploader {
             .text("uploadPath", "thclaws-film")
             .part("file", part);
 
-        let resp: serde_json::Value = self
-            .client
-            .post(format!("{}/api/file-stream-upload", upload_base()))
-            .bearer_auth(&self.api_key)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| Error::Tool(format!("kie upload: {e}")))?
-            .json()
-            .await
-            .map_err(|e| Error::Tool(format!("kie upload response: {e}")))?;
+        let resp: serde_json::Value = crate::multi_tenant::attach_member(
+            self.client
+                .post(format!("{}/api/file-stream-upload", self.base)),
+        )
+        .bearer_auth(&self.api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| Error::Tool(format!("kie upload: {e}")))?
+        .json()
+        .await
+        .map_err(|e| Error::Tool(format!("kie upload response: {e}")))?;
 
         let url = resp["data"]["fileUrl"]
             .as_str()

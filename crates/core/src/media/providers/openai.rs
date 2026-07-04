@@ -101,8 +101,7 @@ impl ImageProvider for OpenAiImageProvider {
                 "{}/v1/images/generations",
                 ep.base_url.trim_end_matches('/')
             );
-            let resp = client
-                .post(&url)
+            let resp = crate::multi_tenant::attach_member(client.post(&url))
                 .bearer_auth(&ep.api_key)
                 .header("content-type", "application/json")
                 .json(&body)
@@ -146,8 +145,7 @@ impl ImageProvider for OpenAiImageProvider {
             .text("n", "1")
             .part("image", part);
         let url = format!("{}/v1/images/edits", ep.base_url.trim_end_matches('/'));
-        let resp = client
-            .post(&url)
+        let resp = crate::multi_tenant::attach_member(client.post(&url))
             .bearer_auth(&ep.api_key)
             .multipart(form)
             .send()

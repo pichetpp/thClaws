@@ -1837,12 +1837,46 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
             let prompt = args.trim();
             if prompt.is_empty() {
                 SlashCommand::Unknown(
-                    "usage: /translate <text or file path>   (alias for /agent translator …)"
+                    "usage: /translate [--language=<code>] <text or file path>   (alias for /agent translator …)"
                         .into(),
                 )
             } else {
                 SlashCommand::Agent {
                     name: "translator".into(),
+                    prompt: prompt.to_string(),
+                }
+            }
+        }
+        // Parse-time alias: `/summarize xxx` → `/agent summarizer xxx`.
+        // Same dispatch path as /agent, so behavior, permissions, and any
+        // settings.json model override already apply.
+        "summarize" | "summarise" => {
+            let prompt = args.trim();
+            if prompt.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /summarize [--language=<code>] <text or file path>   (alias for /agent summarizer …)"
+                        .into(),
+                )
+            } else {
+                SlashCommand::Agent {
+                    name: "summarizer".into(),
+                    prompt: prompt.to_string(),
+                }
+            }
+        }
+        // Parse-time alias: `/extract xxx` → `/agent content-extractor xxx`.
+        // The subagent allow-lists FetchImages, which opens the gated
+        // `content-extractor` tool group for its isolated run.
+        "extract" | "clip" => {
+            let prompt = args.trim();
+            if prompt.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /extract <url | file path | pasted text>   (alias for /agent content-extractor …)"
+                        .into(),
+                )
+            } else {
+                SlashCommand::Agent {
+                    name: "content-extractor".into(),
                     prompt: prompt.to_string(),
                 }
             }
@@ -3970,10 +4004,21 @@ pub fn render_help() -> &'static str {
      /dream [FOCUS]       Consolidate KMS by mining recent sessions (GUI-only)\n  \
      \x20                   Built-in side-channel agent. Optional FOCUS biases\n  \
      \x20                   the consolidation toward a topic (e.g. /dream auth).\n  \
-     /translate PROMPT    Alias for /agent translator PROMPT (GUI-only).\n  \
+     /translate [--language=<code>] PROMPT\n  \
+     \x20                   Alias for /agent translator PROMPT (GUI-only).\n  \
      \x20                   Runs the built-in translator subagent in the\n  \
-     \x20                   background. Override its model via settings.json\n  \
-     \x20                   `translator_subagent_model`.\n  \
+     \x20                   background. --language=<code> (ISO 639-1, e.g. th)\n  \
+     \x20                   pins the target language. Override its model via\n  \
+     \x20                   settings.json `translator_subagent_model`.\n  \
+     /summarize [--language=<code>] PROMPT\n  \
+     \x20                   Alias for /agent summarizer PROMPT (GUI-only).\n  \
+     \x20                   Runs the built-in summarizer subagent in the\n  \
+     \x20                   background. --language=<code> (ISO 639-1) sets the\n  \
+     \x20                   summary's output language.\n  \
+     /extract PROMPT      Alias for /agent content-extractor PROMPT (GUI-only).\n  \
+     \x20                   Clips a URL / file / pasted page into clean markdown\n  \
+     \x20                   with images downloaded local. Runs isolated (keeps the\n  \
+     \x20                   raw page out of your context); fan out for batch.\n  \
      /cloud status        Show the configured catalog URL + whether a\n  \
      \x20                   CLI token is stored.\n  \
      /cloud list [--mine] Browse thClaws.cloud catalog (dev-plan/34).\n  \
@@ -4347,6 +4392,24 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 OpenAIProvider::new(key)
                     .with_base_url(url)
                     .with_strip_model_prefix("xai/"),
+            ))
+        }
+        ProviderKind::Groq => {
+            // Groq (LPU cloud). OpenAI-compatible /chat/completions at
+            // api.groq.com/openai/v1. Models use `groq/<id>` form
+            // (e.g. groq/llama-3.3-70b-versatile); strip the prefix
+            // before forwarding. Override the base via GROQ_BASE_URL.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "GROQ_BASE_URL",
+                "https://api.groq.com/openai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("groq/"),
             ))
         }
         ProviderKind::AzureAIFoundry => {
@@ -13787,6 +13850,45 @@ mod tests {
             Some(SlashCommand::Agent {
                 name: "translator".into(),
                 prompt: "แปลไฟล์ src/foo.md เป็นภาษาไทย".into(),
+            }),
+        );
+    }
+
+    /// `/summarize xxx` (and the `/summarise` spelling) is a parse-time
+    /// alias for `/agent summarizer xxx` — same dispatch path as /translate.
+    #[test]
+    fn parse_slash_summarize_aliases_to_agent_summarizer() {
+        assert_eq!(
+            parse_slash("/summarize --language=th report.md"),
+            Some(SlashCommand::Agent {
+                name: "summarizer".into(),
+                prompt: "--language=th report.md".into(),
+            }),
+        );
+        assert_eq!(
+            parse_slash("/summarise this paragraph"),
+            Some(SlashCommand::Agent {
+                name: "summarizer".into(),
+                prompt: "this paragraph".into(),
+            }),
+        );
+    }
+
+    /// `/extract` (and `/clip`) alias to `/agent content-extractor`.
+    #[test]
+    fn parse_slash_extract_aliases_to_agent_content_extractor() {
+        assert_eq!(
+            parse_slash("/extract https://example.com/post"),
+            Some(SlashCommand::Agent {
+                name: "content-extractor".into(),
+                prompt: "https://example.com/post".into(),
+            }),
+        );
+        assert_eq!(
+            parse_slash("/clip docs/page.html"),
+            Some(SlashCommand::Agent {
+                name: "content-extractor".into(),
+                prompt: "docs/page.html".into(),
             }),
         );
     }

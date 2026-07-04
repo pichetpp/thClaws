@@ -80,14 +80,6 @@ pub async fn generate_clip(
     }
 }
 
-fn env_key(name: &str) -> Result<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| Error::Tool(format!("{name} not set — required for this backend (BYOK)")))
-}
-
 fn http() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -114,13 +106,28 @@ fn ltx_base() -> String {
 }
 
 /// LTX sync `/v1/{op}` returns the MP4 bytes directly (no job/poll). A JSON
-/// body instead of video means an API error.
+/// body instead of video means an API error. BYOK-or-gateway endpoint
+/// (dev-plan/53 Stage D): the a2v payload carries a `duration` billing
+/// hint for the gateway meter; LTX's own a2v API derives length from
+/// the audio and takes no duration, so the hint is stripped here on
+/// the direct path (the gateway strips it on the metered path).
 async fn ltx_generate(payload: &Value, out: &Path) -> Result<()> {
-    let key = env_key("LTX_API_KEY")?;
-    let url = format!("{}/v1/{}", ltx_base(), ltx_endpoint(payload));
-    let resp = http()
-        .post(&url)
-        .bearer_auth(&key)
+    let ep = crate::media::provider::resolve_endpoint(&["LTX_API_KEY"], &ltx_base(), "ltx")?;
+    let op = ltx_endpoint(payload);
+    let stripped;
+    let payload = if op == "audio-to-video" && !ep.via_gateway {
+        let mut v = payload.clone();
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("duration");
+        }
+        stripped = v;
+        &stripped
+    } else {
+        payload
+    };
+    let url = format!("{}/v1/{}", ep.base_url, op);
+    let resp = crate::multi_tenant::attach_member(http().post(&url))
+        .bearer_auth(&ep.api_key)
         .json(payload)
         .send()
         .await
@@ -155,18 +162,22 @@ const DASHSCOPE_BASE: &str = "https://dashscope-intl.aliyuncs.com";
 const DASHSCOPE_PATH: &str = "/api/v1/services/aigc/video-generation/video-synthesis";
 
 async fn dashscope_submit(payload: &Value) -> Result<String> {
-    let key = env_key("DASHSCOPE_API_KEY")?;
-    let resp: Value = http()
-        .post(format!("{DASHSCOPE_BASE}{DASHSCOPE_PATH}"))
-        .bearer_auth(&key)
-        .header("X-DashScope-Async", "enable")
-        .json(payload)
-        .send()
-        .await
-        .map_err(|e| Error::Tool(format!("dashscope submit: {e}")))?
-        .json()
-        .await
-        .map_err(|e| Error::Tool(format!("dashscope submit response: {e}")))?;
+    let ep = crate::media::provider::resolve_endpoint(
+        &["DASHSCOPE_API_KEY"],
+        DASHSCOPE_BASE,
+        "dashscope",
+    )?;
+    let resp: Value =
+        crate::multi_tenant::attach_member(http().post(format!("{}{DASHSCOPE_PATH}", ep.base_url)))
+            .bearer_auth(&ep.api_key)
+            .header("X-DashScope-Async", "enable")
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("dashscope submit: {e}")))?
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("dashscope submit response: {e}")))?;
     resp.pointer("/output/task_id")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -179,7 +190,11 @@ async fn dashscope_submit(payload: &Value) -> Result<String> {
 }
 
 async fn dashscope_poll(task_id: &str, cancel: &AtomicBool) -> Result<String> {
-    let key = env_key("DASHSCOPE_API_KEY")?;
+    let ep = crate::media::provider::resolve_endpoint(
+        &["DASHSCOPE_API_KEY"],
+        DASHSCOPE_BASE,
+        "dashscope",
+    )?;
     let started = std::time::Instant::now();
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -191,15 +206,16 @@ async fn dashscope_poll(task_id: &str, cancel: &AtomicBool) -> Result<String> {
                 POLL_TIMEOUT.as_secs()
             )));
         }
-        let resp: Value = http()
-            .get(format!("{DASHSCOPE_BASE}/api/v1/tasks/{task_id}"))
-            .bearer_auth(&key)
-            .send()
-            .await
-            .map_err(|e| Error::Tool(format!("dashscope poll: {e}")))?
-            .json()
-            .await
-            .map_err(|e| Error::Tool(format!("dashscope poll response: {e}")))?;
+        let resp: Value = crate::multi_tenant::attach_member(
+            http().get(format!("{}/api/v1/tasks/{task_id}", ep.base_url)),
+        )
+        .bearer_auth(&ep.api_key)
+        .send()
+        .await
+        .map_err(|e| Error::Tool(format!("dashscope poll: {e}")))?
+        .json()
+        .await
+        .map_err(|e| Error::Tool(format!("dashscope poll response: {e}")))?;
         match resp.pointer("/output/task_status").and_then(Value::as_str) {
             Some("SUCCEEDED") => {
                 return resp

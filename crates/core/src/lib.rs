@@ -88,6 +88,7 @@ pub mod memory;
 pub mod messenger;
 pub mod model_catalogue;
 pub mod multi_tenant;
+pub mod net_guard;
 pub mod oauth;
 pub mod permissions;
 /// Phone-home channel — local engine dials out to thClaws.cloud over the

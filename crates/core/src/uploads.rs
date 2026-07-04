@@ -2,7 +2,7 @@
 //! browser-chat surface).
 //!
 //! Two responsibilities: pick a non-colliding filename under the
-//! workspace `uploads/` dir, and synthesize a user-turn chat message
+//! workspace `_uploads/` dir, and synthesize a user-turn chat message
 //! after one or more files land. The agent picks the synthetic message
 //! up via the normal session input path, so project `AGENTS.md` /
 //! `CLAUDE.md` instructions steer behavior (e.g. "when the user
@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 
 pub const UPLOAD_MAX_BYTES: u64 = 25 * 1024 * 1024;
 pub const UPLOAD_MAX_FILES: usize = 5;
-pub const UPLOADS_DIRNAME: &str = "uploads";
+// Underscore prefix marks it as a purpose-specific workspace subfolder (user
+// uploads / drag-drop), visible to the user and readable by the agent.
+pub const UPLOADS_DIRNAME: &str = "_uploads";
 
 /// Resolve a non-colliding destination path under `dir` for an upload
 /// whose client-supplied filename is `filename`. Strategy:
@@ -94,7 +96,7 @@ fn sanitize_filename(raw: &str) -> String {
     trimmed.to_string()
 }
 
-/// Ensure `<workspace>/uploads/` exists and return the absolute path.
+/// Ensure `<workspace>/_uploads/` exists and return the absolute path.
 /// Idempotent; safe to call before every upload.
 pub fn ensure_uploads_dir(workspace: &Path) -> std::io::Result<PathBuf> {
     let dir = workspace.join(UPLOADS_DIRNAME);
@@ -105,7 +107,7 @@ pub fn ensure_uploads_dir(workspace: &Path) -> std::io::Result<PathBuf> {
 /// Ensure `<workspace>/<rel>/` exists and return the absolute path,
 /// rejecting any `rel` that would escape the workspace. Used by the
 /// upload endpoint's `?dir=` param so a shell can stage files into a
-/// specific subfolder (e.g. `raw/`) instead of the default `uploads/`.
+/// specific subfolder (e.g. `raw/`) instead of the default `_uploads/`.
 /// `rel` must be a relative path with only normal components — no `..`,
 /// no leading `/`, no drive/root — anything else returns an error
 /// rather than writing outside the workspace.
@@ -138,13 +140,13 @@ pub fn ensure_target_dir(workspace: &Path, rel: &str) -> std::io::Result<PathBuf
 ///
 /// ```text
 /// [Uploaded 2 files via serve:
-///   - uploads/photo_3.jpg (image/jpeg, 1.2 MB)
-///   - uploads/notes.pdf (application/pdf, 240 KB)
+///   - _uploads/photo_3.jpg (image/jpeg, 1.2 MB)
+///   - _uploads/notes.pdf (application/pdf, 240 KB)
 /// ]
 /// ```
 ///
 /// `relative_paths` should already be expressed relative to the
-/// workspace root (e.g. `uploads/photo_3.jpg`) so the agent can
+/// workspace root (e.g. `_uploads/photo_3.jpg`) so the agent can
 /// pass them straight to `Read` / `PdfRead` / `XlsxRead` without
 /// translation.
 pub fn render_upload_message(origin: &str, files: &[UploadedFile]) -> String {
@@ -160,7 +162,7 @@ pub fn render_upload_message(origin: &str, files: &[UploadedFile]) -> String {
 /// The hint renders as an extra line in the bracketed block:
 /// ```text
 /// [Uploaded 1 file via line:
-///   - uploads/photo_3.jpg (image/jpeg, 1.2 MB)
+///   - _uploads/photo_3.jpg (image/jpeg, 1.2 MB)
 ///   Local classification: receipt, text-heavy, restaurant bill
 ///   Read the file and respond.]
 /// ```

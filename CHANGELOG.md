@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.86.0] — 2026-07-05
+
+Custom GUI shells graduate to first-class apps: they can approve tool calls in their own UI, stream a turn event-by-event, upload files, and store data — and the catalog now shows exactly what a shell can do before you install it. Plus a fix for `agent/*` models failing when thClaws is opened from the Dock.
+
+### Added
+- **GUI Shell inline tool approvals.** A shell with its own approve/deny UI no longer gets the full-screen system prompt on a mutating tool call — it renders its own widget (`thclaws.approvals.subscribe`/`respond`) and the engine waits for that verdict instead.
+- **GUI Shell `streamTurn` — event-by-event turns.** `thclaws.streamTurn(prompt)` returns an async-iterable that yields text, tool calls, and tool results in arrival order, for turn-by-turn shell UIs.
+- **GUI Shell `uploadFile`.** Shells can upload a file into the workspace and get back a servable URL to use as an `<img>`/link — per-user isolated in shared workspaces.
+- **GUI Shell storage: delete + quota.** `thclaws.storage.delete(key)` removes a key (distinct from setting it null); per-shell storage is now capped at 10 MB.
+- **Catalog shows shell capabilities before install.** An agent's detail page now lists what its shell can do ("Run the Bash tool", "Read your knowledge base", …) so you can see what you're consenting to.
+
+### Fixed
+- **`agent/*` models now work when thClaws is launched from the Dock/Finder or a scheduled job.** These models run the Claude Code `claude` CLI as a subprocess; a GUI/scheduled launch inherits a minimal `PATH` and couldn't find it (`spawn claude: No such file or directory`). thClaws now locates `claude` in the usual install spots even when `PATH` is bare, and gives an actionable error if it's genuinely missing.
+- **GUI Shell bridge calls no longer hang.** Several bridge methods (`storage.delete`, `permissions.list`/`has`, `awaitApproval`, `uploadFile`) had no engine handler and left their promise pending forever; they're now wired (or fail fast with a clear error), and every bridge call self-times-out rather than hanging.
+- **Custom shells can only invoke the tools they declare.** A shell's tool calls are now gated by its manifest `tools.invoke:*` permissions instead of being unrestricted.
+
 ## [0.85.0] — 2026-07-03
 
 FilmScript: turn a screenplay into a finished AI short. A new `.film` DSL and the Movie Maker agent compile a script into a multi-backend video with Thai dialogue, and the agent can now watch its own output back. Plus scheduled-run error visibility.

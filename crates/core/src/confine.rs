@@ -59,6 +59,17 @@ pub struct ConfinePolicy {
     pub mode: ConfineMode,
     pub write_roots: Vec<PathBuf>,
     pub deny_read: Vec<PathBuf>,
+    /// Read ALLOWLIST (dev-plan/45): `Some` ⇒ reads/execs are restricted to
+    /// these roots (plus the write roots) at the OS level. Landlock has no
+    /// deny-rule, only grants — so cross-user read masking is expressed as
+    /// an allowlist. Active in multiuser pods only: the grant set is the
+    /// user's own workspace + system dirs, deliberately WITHOUT `/proc`
+    /// (blocks `/proc/<pid>/environ` credential exfil between same-uid
+    /// processes) and WITHOUT the shared workspace parent (blocks reading
+    /// co-tenants' `workspace-<id>/`). `None` ⇒ reads unrestricted (desktop
+    /// behaviour unchanged; the dotfile `deny_read` list above still applies
+    /// via Seatbelt/bwrap).
+    pub read_roots: Option<Vec<PathBuf>>,
 }
 
 struct ConfineSettings {
@@ -124,17 +135,29 @@ pub fn current_policy() -> Option<ConfinePolicy> {
         &workspace,
         &s.extra_write,
         &s.extra_deny_read,
+        crate::workdir::is_multiuser(),
     ))
 }
+
+/// System roots granted for reads in read-mask (multiuser) mode. Everything a
+/// toolchain legitimately reads — binaries, libs, config, cgroup limits —
+/// WITHOUT `/proc` (env exfil) and WITHOUT the workspace parent (co-tenants).
+const READ_MASK_SYSTEM_ROOTS: &[&str] = &[
+    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt", "/var", "/run", "/srv",
+    "/sys", "/nix",
+];
 
 /// Pure policy builder (testable without the global): workspace + tmp always
 /// writable; `workspace` mode adds the package-manager cache allowlist;
 /// `strict` adds nothing. Secret dotfiles are always read-denied.
+/// `read_mask` (multiuser pods) additionally restricts reads to an allowlist
+/// — see [`ConfinePolicy::read_roots`].
 pub fn build_policy(
     mode: ConfineMode,
     workspace: &Path,
     extra_write: &[PathBuf],
     extra_deny_read: &[PathBuf],
+    read_mask: bool,
 ) -> ConfinePolicy {
     let mut write_roots: Vec<PathBuf> = vec![canon(workspace)];
     // tmp is always writable (build tools, $TMPDIR).
@@ -227,10 +250,27 @@ pub fn build_policy(
     deny_read.sort();
     deny_read.dedup();
 
+    let read_roots = read_mask.then(|| {
+        let mut roots: Vec<PathBuf> = READ_MASK_SYSTEM_ROOTS
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .collect();
+        // The pod's own home (toolchain dotdirs, venvs). In a multiuser pod
+        // this is the shared runtime user's home, not a tenant's.
+        if let Some(h) = crate::util::home_dir() {
+            roots.push(canon(&h));
+        }
+        roots.sort();
+        roots.dedup();
+        roots
+    });
+
     ConfinePolicy {
         mode,
         write_roots,
         deny_read,
+        read_roots,
     }
 }
 
@@ -467,6 +507,14 @@ mod linux {
         | FS_MAKE_FIFO
         | FS_MAKE_BLOCK
         | FS_MAKE_SYM;
+    // Read/exec bits for the multiuser read-mask (dev-plan/45). Handling
+    // these makes every unlisted path unreadable — including `/proc`
+    // (same-uid `/proc/<pid>/environ` credential exfil) and co-tenants'
+    // `workspace-<id>/` trees.
+    const FS_EXECUTE: u64 = 1 << 0;
+    const FS_READ_FILE: u64 = 1 << 2;
+    const FS_READ_DIR: u64 = 1 << 3;
+    const READ_ACCESS: u64 = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR;
     const RULE_PATH_BENEATH: libc::c_int = 1;
 
     /// Prefer **Landlock** — a filesystem LSM that needs NO user namespace, so
@@ -485,7 +533,7 @@ mod linux {
         bwrap_wrap(command, policy)
     }
 
-    /// Re-exec `<self> __confine --write <root> … -- sh -c <command>`.
+    /// Re-exec `<self> __confine --write <root> … [--read <root> …] -- sh -c <command>`.
     fn landlock_reexec(command: &str, policy: &ConfinePolicy) -> Option<tokio::process::Command> {
         let exe = std::env::current_exe().ok()?;
         let (shell, flag) = crate::util::shell_invocation();
@@ -494,6 +542,13 @@ mod linux {
         for r in &policy.write_roots {
             if r.exists() {
                 c.arg("--write").arg(r);
+            }
+        }
+        if let Some(read_roots) = &policy.read_roots {
+            for r in read_roots {
+                if r.exists() {
+                    c.arg("--read").arg(r);
+                }
             }
         }
         c.arg("--").arg(shell).arg(flag).arg(command);
@@ -538,11 +593,15 @@ mod linux {
             std::process::exit(selftest());
         }
         let mut write_roots: Vec<PathBuf> = Vec::new();
+        let mut read_roots: Vec<PathBuf> = Vec::new();
         let mut argv: Vec<std::ffi::OsString> = Vec::new();
         let mut i = 0;
         while i < rest.len() {
             if rest[i].to_str() == Some("--write") && i + 1 < rest.len() {
                 write_roots.push(PathBuf::from(&rest[i + 1]));
+                i += 2;
+            } else if rest[i].to_str() == Some("--read") && i + 1 < rest.len() {
+                read_roots.push(PathBuf::from(&rest[i + 1]));
                 i += 2;
             } else if rest[i].to_str() == Some("--") {
                 argv = rest[i + 1..].to_vec();
@@ -555,7 +614,8 @@ mod linux {
             eprintln!("thclaws __confine: no command after --");
             std::process::exit(2);
         }
-        match apply_landlock(&write_roots) {
+        let read_mask = (!read_roots.is_empty()).then_some(read_roots.as_slice());
+        match apply_landlock(&write_roots, read_mask) {
             Ok(true) => {}
             // Confiner can't enforce (Landlock absent, or EINVAL on some
             // container kernels). Emit the sentinel so the Bash chokepoint
@@ -576,9 +636,14 @@ mod linux {
         std::process::exit(127);
     }
 
-    /// Install a Landlock ruleset confining writes to `roots`. `Ok(true)` =
-    /// enforced; `Ok(false)` = Landlock unavailable on this kernel (fall back).
-    fn apply_landlock(roots: &[PathBuf]) -> std::io::Result<bool> {
+    /// Install a Landlock ruleset confining writes to `write_roots` and — when
+    /// `read_roots` is `Some` (multiuser read-mask) — reads/execs to
+    /// `read_roots ∪ write_roots`. `Ok(true)` = enforced; `Ok(false)` =
+    /// Landlock unavailable on this kernel (fall back).
+    fn apply_landlock(
+        write_roots: &[PathBuf],
+        read_roots: Option<&[PathBuf]>,
+    ) -> std::io::Result<bool> {
         #[repr(C)]
         struct RulesetAttr {
             handled_access_fs: u64,
@@ -588,8 +653,12 @@ mod linux {
             allowed_access: u64,
             parent_fd: i32,
         }
+        let handled = match read_roots {
+            Some(_) => WRITE_ACCESS | READ_ACCESS,
+            None => WRITE_ACCESS,
+        };
         let attr = RulesetAttr {
-            handled_access_fs: WRITE_ACCESS,
+            handled_access_fs: handled,
         };
         let rs = unsafe {
             libc::syscall(
@@ -603,17 +672,34 @@ mod linux {
             return Ok(false); // ENOSYS / not supported → fall back
         }
         let rs = rs as libc::c_int;
-        for root in roots {
+        // File-only access bits. A path_beneath rule on a NON-directory
+        // (e.g. the /dev/null … device write-roots) must carry ONLY these
+        // — handing Landlock a dir-only bit (MAKE_*/REMOVE_*/READ_DIR) on a
+        // file is EINVAL, which fails the WHOLE ruleset and silently drops
+        // us to unconfined. This bit us on the hosted runners: /dev/null in
+        // write_roots made every confined spawn fall back to no-enforce.
+        const FILE_ONLY_ACCESS: u64 = FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE;
+        let add_rule = |rs: libc::c_int, root: &PathBuf, access: u64| -> std::io::Result<bool> {
             let cpath = match std::ffi::CString::new(root.as_os_str().as_bytes()) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(_) => return Ok(true), // unrepresentable path — skip
             };
             let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
             if fd < 0 {
-                continue; // nonexistent path — skip
+                return Ok(true); // nonexistent path — skip
             }
+            // Directory? Non-dirs get the file-only access subset.
+            let is_dir = unsafe {
+                let mut st: libc::stat = std::mem::zeroed();
+                libc::fstat(fd, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFDIR
+            };
+            let allowed = if is_dir {
+                access
+            } else {
+                access & FILE_ONLY_ACCESS
+            };
             let pb = PathBeneathAttr {
-                allowed_access: WRITE_ACCESS,
+                allowed_access: allowed,
                 parent_fd: fd,
             };
             let r = unsafe {
@@ -627,8 +713,26 @@ mod linux {
             };
             unsafe { libc::close(fd) };
             if r != 0 {
-                unsafe { libc::close(rs) };
                 return Err(std::io::Error::last_os_error());
+            }
+            Ok(true)
+        };
+        // Write roots must stay readable/executable when reads are handled
+        // (a venv or build tree inside the workspace is both).
+        let write_access = match read_roots {
+            Some(_) => WRITE_ACCESS | READ_ACCESS,
+            None => WRITE_ACCESS,
+        };
+        for root in write_roots {
+            if let Err(e) = add_rule(rs, root, write_access) {
+                unsafe { libc::close(rs) };
+                return Err(e);
+            }
+        }
+        for root in read_roots.unwrap_or(&[]) {
+            if let Err(e) = add_rule(rs, root, READ_ACCESS) {
+                unsafe { libc::close(rs) };
+                return Err(e);
             }
         }
         unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
@@ -640,20 +744,27 @@ mod linux {
         Ok(true)
     }
 
-    /// Self-test: grant write on a temp dir, restrict, confirm inside-write
-    /// succeeds and a sibling-dir write is denied. Exit 0 iff it confines.
+    /// Self-test: grant write on a temp dir PLUS a device node (`/dev/null`
+    /// — the real policy always includes it; a dir-only access bit on a
+    /// non-directory used to EINVAL the whole ruleset), restrict, confirm
+    /// inside-write succeeds and a sibling-dir write is denied. Exit 0 iff
+    /// it confines.
     fn selftest() -> i32 {
         let base = std::env::temp_dir();
         let ws = base.join(format!("thclaws-ll-ws-{}", std::process::id()));
         let out = base.join(format!("thclaws-ll-out-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&ws);
         let _ = std::fs::create_dir_all(&out);
-        let enforced = matches!(apply_landlock(std::slice::from_ref(&ws)), Ok(true));
+        let roots = [ws.clone(), PathBuf::from("/dev/null")];
+        let enforced = matches!(apply_landlock(&roots, None), Ok(true));
         let inside_ok = enforced && std::fs::write(ws.join("ok"), b"x").is_ok();
         let outside_denied = enforced && std::fs::write(out.join("bad"), b"x").is_err();
+        // /dev/null must remain writable (a device write-root the file-only
+        // access mask should have preserved).
+        let devnull_ok = enforced && std::fs::write("/dev/null", b"x").is_ok();
         let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(&out);
-        if inside_ok && outside_denied {
+        if inside_ok && outside_denied && devnull_ok {
             0
         } else {
             EXIT_NO_ENFORCE
@@ -763,7 +874,7 @@ mod tests {
     #[test]
     fn policy_has_workspace_tmp_and_secrets_denied() {
         let ws = std::env::temp_dir();
-        let pol = build_policy(ConfineMode::Workspace, &ws, &[], &[]);
+        let pol = build_policy(ConfineMode::Workspace, &ws, &[], &[], false);
         // /tmp is writable (canonicalized — /private/tmp on macOS).
         let tmp = canon(Path::new("/tmp"));
         assert!(
@@ -776,7 +887,7 @@ mod tests {
             "workspace must be writable"
         );
         // strict mode drops the cache allowlist.
-        let strict = build_policy(ConfineMode::Strict, &ws, &[], &[]);
+        let strict = build_policy(ConfineMode::Strict, &ws, &[], &[], false);
         if let Some(h) = crate::util::home_dir() {
             assert!(
                 !strict.write_roots.iter().any(|p| *p == h.join(".cargo")),
@@ -785,11 +896,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn read_mask_allowlists_system_but_never_proc() {
+        let ws = std::env::temp_dir();
+        // Desktop (no mask): reads unrestricted.
+        let pol = build_policy(ConfineMode::Workspace, &ws, &[], &[], false);
+        assert!(pol.read_roots.is_none());
+        // Multiuser mask: system roots granted, /proc and the workspace
+        // PARENT deliberately absent (co-tenant + /proc/<pid>/environ
+        // masking — the dev-plan/45 boundary).
+        let pol = build_policy(ConfineMode::Workspace, &ws, &[], &[], true);
+        let roots = pol.read_roots.as_deref().expect("mask on");
+        assert!(!roots.is_empty());
+        assert!(
+            roots.iter().all(|p| !p.starts_with("/proc")),
+            "/proc must never be read-granted, got {roots:?}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            roots.iter().any(|p| p == Path::new("/usr")),
+            "system dirs must be readable"
+        );
+        // The workspace itself is covered by the WRITE roots (which the
+        // Landlock arm grants read+exec on when the mask is active).
+        assert!(pol.write_roots.iter().any(|p| p.starts_with(&canon(&ws))));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_profile_shape() {
         let ws = std::env::temp_dir();
-        let pol = build_policy(ConfineMode::Workspace, &ws, &[], &[]);
+        let pol = build_policy(ConfineMode::Workspace, &ws, &[], &[], false);
         let prof = macos::seatbelt_profile(&pol);
         assert!(prof.contains("(deny file-write*)"));
         assert!(prof.contains("(allow file-write*"));
@@ -806,7 +943,7 @@ mod tests {
             return; // confiner unavailable on this box — skip
         }
         let ws = tempfile::tempdir().unwrap();
-        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[]);
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
 
         // INSIDE → allowed.
         let inside = ws.path().join("ok.txt");
@@ -857,7 +994,7 @@ mod tests {
             return;
         }
         let ws = tempfile::tempdir().unwrap();
-        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[]);
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
         let pid = std::process::id();
 
         // (command, must_succeed). Each runs with cwd = workspace.

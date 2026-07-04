@@ -27,7 +27,7 @@ pub enum SaveUploadError {
     Write(PathBuf, std::io::Error),
 }
 
-/// Decode + persist a single uploaded file under `<workspace>/uploads/`.
+/// Decode + persist a single uploaded file under `<workspace>/_uploads/`.
 /// Returns the [`UploadedFile`] descriptor the caller renders into
 /// the synthetic chat turn via
 /// [`crate::uploads::render_upload_message`]. `workspace` is captured
@@ -78,10 +78,10 @@ mod tests {
             Some("text/plain".into()),
         )
         .expect("save");
-        assert_eq!(saved.relative_path, "uploads/hello.txt");
+        assert_eq!(saved.relative_path, "_uploads/hello.txt");
         assert_eq!(saved.size_bytes, 5);
         assert_eq!(saved.media_type.as_deref(), Some("text/plain"));
-        let disk = std::fs::read(td.path().join("uploads/hello.txt")).unwrap();
+        let disk = std::fs::read(td.path().join("_uploads/hello.txt")).unwrap();
         assert_eq!(disk, bytes);
     }
 
@@ -92,8 +92,8 @@ mod tests {
         let b64 = B64.encode(bytes);
         let first = save_upload(td.path(), "note.pdf", &b64, 3, None).unwrap();
         let second = save_upload(td.path(), "note.pdf", &b64, 3, None).unwrap();
-        assert_eq!(first.relative_path, "uploads/note.pdf");
-        assert_eq!(second.relative_path, "uploads/note_1.pdf");
+        assert_eq!(first.relative_path, "_uploads/note.pdf");
+        assert_eq!(second.relative_path, "_uploads/note_1.pdf");
     }
 
     #[test]

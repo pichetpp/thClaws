@@ -79,6 +79,7 @@ pub fn provider_segment(kind: ProviderKind) -> Option<&'static str> {
         ProviderKind::ThaiLLM => Some("thaillm"),
         ProviderKind::XAi => Some("xai"),
         ProviderKind::Moonshot => Some("moonshot"),
+        ProviderKind::Groq => Some("groq"),
         _ => None,
     }
 }
@@ -123,6 +124,7 @@ pub fn segment_for_provider_name(name: &str) -> Option<&'static str> {
         "thaillm" => Some("thaillm"),
         "xai" => Some("xai"),
         "moonshot" => Some("moonshot"),
+        "groq" => Some("groq"),
         _ => None,
     }
 }
@@ -161,6 +163,7 @@ fn native_key_present_by_segment(segment: &str) -> bool {
         "thaillm" => "THAILLM_API_KEY",
         "xai" => "XAI_API_KEY",
         "moonshot" => "MOONSHOT_API_KEY",
+        "groq" => "GROQ_API_KEY",
         _ => return false,
     };
     match std::env::var(var) {
@@ -354,8 +357,10 @@ mod tests {
         // Featured providers added to the gateway in part 3.
         assert_eq!(provider_segment(ProviderKind::XAi), Some("xai"));
         assert_eq!(provider_segment(ProviderKind::Moonshot), Some("moonshot"));
+        assert_eq!(provider_segment(ProviderKind::Groq), Some("groq"));
         assert_eq!(segment_for_provider_name("xai"), Some("xai"));
         assert_eq!(segment_for_provider_name("moonshot"), Some("moonshot"));
+        assert_eq!(segment_for_provider_name("groq"), Some("groq"));
     }
 
     #[test]

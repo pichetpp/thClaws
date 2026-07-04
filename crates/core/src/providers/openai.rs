@@ -380,8 +380,7 @@ impl OpenAIProvider {
     /// out so `stream` can issue a second attempt (image-stripped retry)
     /// without duplicating the header/auth wiring.
     async fn send_body(&self, body: &Value) -> Result<reqwest::Response> {
-        self.client
-            .post(&self.base_url)
+        crate::multi_tenant::attach_member(self.client.post(&self.base_url))
             .header(self.auth_header_name(), self.auth_header_value())
             .header("content-type", "application/json")
             .json(body)

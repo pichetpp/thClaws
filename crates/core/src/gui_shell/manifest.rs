@@ -52,6 +52,12 @@ const ALLOWED_PERMISSION_PREFIXES: &[&str] = &[
     // instead of prompting the model for it.
     "kms.read",
     "research.read",
+    // dev-plan/39 Tier 3: the shell hosts its own approve/deny widget
+    // (thclaws.approvals.*) for mutating tool calls instead of the
+    // full-screen system modal. Declarative signal for the marketplace
+    // install screen; the functional route is driven per-call by the
+    // bridge sending `preferInline` once an approval handler is registered.
+    "approval.inline",
 ];
 
 impl ShellManifest {
@@ -93,7 +99,7 @@ impl ShellManifest {
                 return Err(format!(
                     "unknown permission '{p}'. Allowed: agent.run, session.read, session.list, \
                      fs.shell-scoped, tools.invoke:<tool>, network.outbound:<host>, model.read, \
-                     model.write, kms.read, research.read"
+                     model.write, kms.read, research.read, approval.inline"
                 ));
             }
         }

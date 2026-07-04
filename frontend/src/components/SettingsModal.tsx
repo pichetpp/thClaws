@@ -55,6 +55,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   "opencode-go": "OpenCode Go",
   moonshot: "Moonshot AI (Kimi)",
   xai: "xAI (Grok)",
+  groq: "Groq",
   minimax: "MiniMax",
   azure: "Azure AI Foundry",
   "openai-compat": "OpenAI-Compatible (custom endpoint)",

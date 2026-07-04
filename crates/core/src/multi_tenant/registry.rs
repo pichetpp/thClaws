@@ -198,6 +198,9 @@ impl UserSessionRegistry {
         let user_state = UserStatePaths::new(&state_root, user_id);
         let mut roots = SessionRoots::for_user_state(&user_state);
         roots.workspace_root = workspace_root;
+        // dev-plan/45 A2: outbound gateway calls in this member's turns
+        // carry their id for billing attribution + per-member caps.
+        roots.member_id = Some(user_id.as_str().to_string());
         let handle = Arc::new(spawn_with_roots(self.config.approver.clone(), Some(roots)));
         let session = Arc::new(UserSession {
             user_id: user_id.clone(),

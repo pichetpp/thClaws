@@ -541,7 +541,7 @@ fn resolve_shot(
         }
     }
 
-    let mut bad_value = |field: &str, got: &str, allowed: &str, errors: &mut Vec<CompileError>| {
+    let bad_value = |field: &str, got: &str, allowed: &str, errors: &mut Vec<CompileError>| {
         errors.push(CompileError::error(
             "E_BAD_VALUE",
             Some(sid),

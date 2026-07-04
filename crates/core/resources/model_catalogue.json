@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-06-30T00:00:00Z",
+  "fetched_at": "2026-07-05T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -150,6 +150,15 @@
           "output_per_mtok": 15.0,
           "cached_input_per_mtok": 0.3,
           "cache_creation_per_mtok": 3.75
+        },
+        "claude-sonnet-5": {
+          "context": 1000000,
+          "source": "https://api.anthropic.com/v1/models + litellm:claude-sonnet-5",
+          "verified_at": "2026-07-05",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 10.0,
+          "cached_input_per_mtok": 0.2,
+          "cache_creation_per_mtok": 2.5
         }
       }
     },
@@ -299,6 +308,15 @@
           "output_per_mtok": 15.0,
           "cached_input_per_mtok": 0.3,
           "cache_creation_per_mtok": 3.75
+        },
+        "agent/claude-sonnet-5": {
+          "context": 200000,
+          "source": "derived:claude-sonnet-5 + litellm:claude-sonnet-5",
+          "verified_at": "2026-07-05",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 10.0,
+          "cached_input_per_mtok": 0.2,
+          "cache_creation_per_mtok": 2.5
         }
       }
     },
@@ -1078,26 +1096,6 @@
           "source": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
           "verified_at": "2026-06-02",
           "chat": false
-        },
-        "dashscope/happyhorse-1.0-t2v": {
-          "source": "https://help.aliyun.com/zh/model-studio/ — happyhorse video, per-second billing",
-          "verified_at": "2026-07-02",
-          "chat": false,
-          "kind": "video",
-          "video_price_per_second_usd": {
-            "720P": 0.14,
-            "1080P": 0.24
-          }
-        },
-        "dashscope/happyhorse-1.0-i2v": {
-          "source": "https://help.aliyun.com/zh/model-studio/ — happyhorse video, per-second billing",
-          "verified_at": "2026-07-02",
-          "chat": false,
-          "kind": "video",
-          "video_price_per_second_usd": {
-            "720P": 0.14,
-            "1080P": 0.24
-          }
         }
       }
     },
@@ -1182,6 +1180,13 @@
           "input_per_mtok": 0.1,
           "output_per_mtok": 0.4,
           "cached_input_per_mtok": 0.01
+        },
+        "gemini-2.5-flash-native-audio-latest": {
+          "context": 1048576,
+          "source": "https://generativelanguage.googleapis.com/v1beta/models + litellm:gemini-2.5-flash-native-audio-latest",
+          "verified_at": "2026-07-05",
+          "input_per_mtok": 0.3,
+          "output_per_mtok": 2.5
         },
         "gemini-2.5-pro": {
           "context": 2000000,
@@ -1974,10 +1979,10 @@
           "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
           "verified_at": "2026-05-04"
         },
-        "nvidia/z-ai/glm-5.1": {
+        "nvidia/z-ai/glm-5.2": {
           "context": 131072,
-          "source": "https://integrate.api.nvidia.com/v1/models (context unverified)",
-          "verified_at": "2026-05-04"
+          "source": "https://integrate.api.nvidia.com/v1/models",
+          "verified_at": "2026-07-05"
         },
         "nvidia/zyphra/zamba2-7b-instruct": {
           "context": 131072,
@@ -2172,11 +2177,6 @@
           "verified_at": "2026-04-26"
         },
         "ollama-cloud/qwen3.5:397b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context unverified)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/rnj-1:8b": {
           "context": 262144,
           "source": "https://ollama.com/v1/models (context unverified)",
           "verified_at": "2026-04-26"
@@ -7318,6 +7318,11 @@
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
         },
+        "tokenrouter/anthropic/claude-fable-5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-05"
+        },
         "tokenrouter/anthropic/claude-haiku-4.5": {
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
@@ -7368,6 +7373,11 @@
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
         },
+        "tokenrouter/anthropic/claude-sonnet-5": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-05"
+        },
         "tokenrouter/bytedance-seed/seedream-4.5": {
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
@@ -7406,26 +7416,6 @@
           "input_per_mtok": 0.435,
           "output_per_mtok": 0.87
         },
-        "tokenrouter/dreamina-seedance-2-0-260128": {
-          "context": 128000,
-          "source": "https://api.tokenrouter.com/v1/models",
-          "verified_at": "2026-06-14"
-        },
-        "tokenrouter/dreamina-seedance-2-0-fast-260128": {
-          "context": 128000,
-          "source": "https://api.tokenrouter.com/v1/models",
-          "verified_at": "2026-06-14"
-        },
-        "tokenrouter/dreamina-seedance-2-0-mini-260615": {
-          "context": 128000,
-          "source": "https://api.tokenrouter.com/v1/models",
-          "verified_at": "2026-06-26"
-        },
-        "tokenrouter/dreamina-seedance-2-0-mini-ep": {
-          "context": 128000,
-          "source": "https://api.tokenrouter.com/v1/models",
-          "verified_at": "2026-06-26"
-        },
         "tokenrouter/ex/gpt-5.4": {
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
@@ -7455,6 +7445,11 @@
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
+        },
+        "tokenrouter/kling-3.0-turbo": {
+          "context": 128000,
+          "source": "https://api.tokenrouter.com/v1/models",
+          "verified_at": "2026-07-05"
         },
         "tokenrouter/kling-v2-6": {
           "context": 128000,
@@ -7706,11 +7701,6 @@
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-14"
         },
-        "tokenrouter/tokenrouter/gpt-5.6-mercury": {
-          "context": 128000,
-          "source": "https://api.tokenrouter.com/v1/models",
-          "verified_at": "2026-06-14"
-        },
         "tokenrouter/x-ai/grok-4.1-fast": {
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
@@ -7795,6 +7785,201 @@
           "context": 128000,
           "source": "https://api.tokenrouter.com/v1/models",
           "verified_at": "2026-06-17"
+        }
+      }
+    },
+    "groq": {
+      "list_url": "https://api.groq.com/openai/v1/models",
+      "default_context": 131072,
+      "models": {
+        "groq/llama-3.1-8b-instant": {
+          "context": 128000,
+          "source": "https://api.groq.com/openai/v1/models + litellm:llama-3.1-8b-instant",
+          "verified_at": "2026-07-04",
+          "input_per_mtok": 0.05,
+          "output_per_mtok": 0.08
+        },
+        "groq/llama-3.3-70b-versatile": {
+          "context": 128000,
+          "source": "https://api.groq.com/openai/v1/models + litellm:llama-3.3-70b-versatile",
+          "verified_at": "2026-07-04",
+          "input_per_mtok": 0.59,
+          "output_per_mtok": 0.79
+        },
+        "groq/meta-llama/llama-4-scout-17b-16e-instruct": {
+          "context": 131072,
+          "source": "https://api.groq.com/openai/v1/models + litellm:meta-llama/llama-4-scout-17b-16e-instruct",
+          "verified_at": "2026-07-04",
+          "input_per_mtok": 0.11,
+          "output_per_mtok": 0.34
+        },
+        "groq/openai/gpt-oss-120b": {
+          "context": 131072,
+          "source": "https://api.groq.com/openai/v1/models + litellm:openai/gpt-oss-120b",
+          "verified_at": "2026-07-04",
+          "input_per_mtok": 0.15,
+          "output_per_mtok": 0.6
+        },
+        "groq/openai/gpt-oss-20b": {
+          "context": 131072,
+          "source": "https://api.groq.com/openai/v1/models + litellm:openai/gpt-oss-20b",
+          "verified_at": "2026-07-04",
+          "input_per_mtok": 0.075,
+          "output_per_mtok": 0.3
+        },
+        "groq/qwen/qwen3-32b": {
+          "context": 131000,
+          "source": "https://api.groq.com/openai/v1/models + litellm:qwen/qwen3-32b",
+          "verified_at": "2026-07-04",
+          "input_per_mtok": 0.29,
+          "output_per_mtok": 0.59
+        },
+        "groq/qwen/qwen3.6-27b": {
+          "context": 131072,
+          "source": "https://api.groq.com/openai/v1/models + manual:qwen/qwen3.6-27b",
+          "verified_at": "2026-07-04",
+          "input_per_mtok": 0.6,
+          "output_per_mtok": 3.0
+        },
+        "groq/whisper-large-v3": {
+          "chat": false,
+          "kind": "audio",
+          "audio_price_per_second_usd": 3.08333e-05,
+          "source": "https://groq.com/pricing + manual:whisper-large-v3",
+          "verified_at": "2026-07-04"
+        },
+        "groq/whisper-large-v3-turbo": {
+          "chat": false,
+          "kind": "audio",
+          "audio_price_per_second_usd": 1.11111e-05,
+          "source": "https://groq.com/pricing + manual:whisper-large-v3-turbo",
+          "verified_at": "2026-07-04"
+        }
+      }
+    },
+    "ltx": {
+      "list_url": "https://docs.ltx.video/pricing",
+      "models": {
+        "ltx/ltx-2-3-fast": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "1080P": 0.06
+          },
+          "source": "https://docs.ltx.video/pricing + manual:ltx-2-3-fast",
+          "verified_at": "2026-07-04"
+        },
+        "ltx/ltx-2-3-pro": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "1080P": 0.08
+          },
+          "source": "https://docs.ltx.video/pricing + manual:ltx-2-3-pro",
+          "verified_at": "2026-07-04"
+        },
+        "ltx/ltx-2-3-pro-audio": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "1080P": 0.1
+          },
+          "source": "https://docs.ltx.video/pricing + manual:ltx-2-3-pro-audio",
+          "verified_at": "2026-07-04"
+        }
+      }
+    },
+    "elevenlabs": {
+      "list_url": "https://elevenlabs.io/pricing/api",
+      "models": {
+        "elevenlabs/eleven_v3": {
+          "chat": false,
+          "kind": "tts",
+          "tts_price_per_kchar_usd": 0.1,
+          "source": "https://elevenlabs.io/pricing/api + manual:eleven_v3",
+          "verified_at": "2026-07-04"
+        },
+        "elevenlabs/eleven_multilingual_v2": {
+          "chat": false,
+          "kind": "tts",
+          "tts_price_per_kchar_usd": 0.1,
+          "source": "https://elevenlabs.io/pricing/api + manual:eleven_multilingual_v2",
+          "verified_at": "2026-07-04"
+        },
+        "elevenlabs/eleven_flash_v2_5": {
+          "chat": false,
+          "kind": "tts",
+          "tts_price_per_kchar_usd": 0.05,
+          "source": "https://elevenlabs.io/pricing/api + manual:eleven_flash_v2_5",
+          "verified_at": "2026-07-04"
+        },
+        "elevenlabs/eleven_turbo_v2_5": {
+          "chat": false,
+          "kind": "tts",
+          "tts_price_per_kchar_usd": 0.05,
+          "source": "https://elevenlabs.io/pricing/api + manual:eleven_turbo_v2_5",
+          "verified_at": "2026-07-04"
+        }
+      }
+    },
+    "kie": {
+      "list_url": "https://kie.ai",
+      "models": {
+        "kie/grok-imagine/text-to-video": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.015
+          },
+          "source": "https://kie.ai grok-imagine (billed by creditsConsumed) + manual:grok-imagine/text-to-video",
+          "verified_at": "2026-07-04"
+        },
+        "kie/grok-imagine/image-to-video": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.015
+          },
+          "source": "https://kie.ai grok-imagine (billed by creditsConsumed) + manual:grok-imagine/image-to-video",
+          "verified_at": "2026-07-04"
+        },
+        "kie/bytedance/seedance-2": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.06,
+            "1080P": 0.15
+          },
+          "source": "https://kie.ai seedance-2 (billed by creditsConsumed) + manual:bytedance/seedance-2",
+          "verified_at": "2026-07-04"
+        },
+        "kie/bytedance/seedance-2-fast": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.06,
+            "1080P": 0.15
+          },
+          "source": "https://kie.ai seedance-2-fast (billed by creditsConsumed) + manual:bytedance/seedance-2-fast",
+          "verified_at": "2026-07-04"
+        },
+        "kie/veo3_fast": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.05
+          },
+          "source": "https://kie.ai veo3 fast $0.40/8s clip (billed by creditsConsumed) + manual:veo3_fast",
+          "verified_at": "2026-07-04"
+        },
+        "kie/veo3": {
+          "chat": false,
+          "kind": "video",
+          "video_price_per_second_usd": {
+            "720P": 0.25
+          },
+          "source": "https://kie.ai veo3 quality $2.00/8s clip (billed by creditsConsumed) + manual:veo3",
+          "verified_at": "2026-07-04"
         }
       }
     }

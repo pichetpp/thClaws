@@ -137,6 +137,10 @@ pub struct SessionRoots {
     /// its cwd, system prompt, skills, and todos here instead of process
     /// cwd.
     pub workspace_root: Option<PathBuf>,
+    /// dev-plan/45 A2: the authenticated member's user id, threaded to
+    /// the worker so every turn runs under a member scope and outbound
+    /// gateway calls carry `X-Thclaws-Member` for billing attribution.
+    pub member_id: Option<String>,
 }
 
 impl SessionRoots {
@@ -151,7 +155,14 @@ impl SessionRoots {
             storage_dir: paths.storage_dir(),
             usage_dir: paths.usage_dir(),
             workspace_root: None,
+            member_id: None,
         }
+    }
+
+    /// Builder: record the authenticated member id (dev-plan/45 A2).
+    pub fn with_member_id(mut self, id: String) -> Self {
+        self.member_id = Some(id);
+        self
     }
 
     /// Builder: set the per-user working directory (dev-plan/42).

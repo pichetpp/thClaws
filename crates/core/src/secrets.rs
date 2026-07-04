@@ -109,6 +109,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::Moonshot,
     ProviderKind::XAi,
     ProviderKind::Minimax,
+    ProviderKind::Groq,
 ];
 
 /// Non-LLM service keys we surface in the same Settings modal as the

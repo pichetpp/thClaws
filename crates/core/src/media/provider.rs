@@ -160,6 +160,12 @@ pub trait VideoProvider: Send + Sync {
 pub struct ResolvedEndpoint {
     pub base_url: String,
     pub api_key: String,
+    /// True when routed through the thClaws Gateway (metered) rather
+    /// than the provider directly (BYOK). Callers that must vary the
+    /// auth-header scheme (ElevenLabs `xi-api-key` vs the gateway's
+    /// `Authorization: Bearer`) or strip gateway-only billing hints
+    /// branch on this.
+    pub via_gateway: bool,
 }
 
 /// Resolve `(base_url, api_key)` for a provider, mirroring the
@@ -183,6 +189,7 @@ pub fn resolve_endpoint(
             return Ok(ResolvedEndpoint {
                 base_url: native_base.to_string(),
                 api_key: key.clone(),
+                via_gateway: false,
             });
         }
     }
@@ -191,16 +198,18 @@ pub fn resolve_endpoint(
         return Ok(ResolvedEndpoint {
             base_url: format!("{}/{}", base.trim_end_matches('/'), gateway_segment),
             api_key: gw_key,
+            via_gateway: true,
         });
     }
     native
         .map(|k| ResolvedEndpoint {
             base_url: native_base.to_string(),
             api_key: k,
+            via_gateway: false,
         })
         .ok_or_else(|| {
             Error::Tool(format!(
-                "no API key for image generation — set one of {native_key_vars:?}, or enable the thClaws Gateway (sign in to thClaws.cloud, add a `gateway` key, or set THCLAWS_GATEWAY_API_KEY)"
+                "no API key — set one of {native_key_vars:?}, or enable the thClaws Gateway (sign in to thClaws.cloud, add a `gateway` key, or set THCLAWS_GATEWAY_API_KEY)"
             ))
         })
 }

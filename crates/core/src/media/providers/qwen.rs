@@ -111,8 +111,7 @@ impl ImageProvider for QwenImageProvider {
             .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| Error::Tool(format!("http client: {e}")))?;
-        let resp = client
-            .post(&url)
+        let resp = crate::multi_tenant::attach_member(client.post(&url))
             .bearer_auth(&ep.api_key)
             .header("content-type", "application/json")
             .json(&body)

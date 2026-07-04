@@ -19,7 +19,7 @@
 use super::super::{
     compile_phase1, compile_phase2, AssetRequest, PartialShot, Phase1Result, ResolvedAsset,
 };
-use super::kie::{resolve_kie_key, KieClient};
+use super::kie::KieClient;
 use super::upload::KieUploader;
 use super::{atomic_write_json, cache_dir, ffprobe_duration_ms, job_dir, sha256_hex};
 use crate::error::{Error, Result};
@@ -150,7 +150,9 @@ pub fn start(script: &str, budget_usd: f64, resume: bool) -> Result<String> {
         )));
     }
     super::check_av_tools()?;
-    let kie_key = resolve_kie_key()?;
+    // Pre-flight the Kie endpoint (BYOK key or gateway access) before
+    // any state is created — run_job re-resolves inside the worker.
+    let _ = KieClient::resolve()?;
 
     let job_id = job_id_for_script(script);
     {
@@ -207,7 +209,7 @@ pub fn start(script: &str, budget_usd: f64, resume: bool) -> Result<String> {
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            let outcome = rt.block_on(run_job(&jid, &script, &kie_key, &flag));
+            let outcome = rt.block_on(run_job(&jid, &script, &flag));
             let mut st = JobState::load(&jid).unwrap_or(state);
             match outcome {
                 Ok(()) => st.state = STATE_DONE.into(),
@@ -256,10 +258,10 @@ fn chain_warnings(p1: &Phase1Result) -> Vec<String> {
     warnings
 }
 
-async fn run_job(job_id: &str, script: &str, kie_key: &str, cancel: &AtomicBool) -> Result<()> {
+async fn run_job(job_id: &str, script: &str, cancel: &AtomicBool) -> Result<()> {
     let p1 = compile_phase1(script);
-    let uploader = KieUploader::new(kie_key.to_string());
-    let kie = KieClient::new(kie_key.to_string());
+    let uploader = KieUploader::resolve()?;
+    let kie = KieClient::resolve()?;
     let mut assets: Vec<ResolvedAsset> = Vec::new();
     let mut state = JobState::load(job_id)?;
 

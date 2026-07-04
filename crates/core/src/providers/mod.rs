@@ -107,6 +107,14 @@ pub enum ProviderKind {
     /// upstream request); bare `grok-*` ids also route here. Key
     /// `XAI_API_KEY`.
     XAi,
+    /// Groq (groq.com) — LPU-hosted open models (Llama, GPT-OSS, Qwen,
+    /// Kimi). OpenAI-compatible `/chat/completions` at
+    /// `api.groq.com/openai/v1` (override via `GROQ_BASE_URL`). Models
+    /// route via the `groq/<id>` prefix (e.g.
+    /// `groq/llama-3.3-70b-versatile`), stripped before the upstream
+    /// request. Key `GROQ_API_KEY` (shared with the whisper
+    /// transcription path in `tools/watch_video.rs`).
+    Groq,
 }
 
 /// Two-tier provider classification.
@@ -220,6 +228,7 @@ impl ProviderKind {
         Self::OpenCodeGo,
         Self::Moonshot,
         Self::XAi,
+        Self::Groq,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -248,6 +257,7 @@ impl ProviderKind {
             Self::OpenCodeGo => "opencode-go",
             Self::Moonshot => "moonshot",
             Self::XAi => "xai",
+            Self::Groq => "groq",
         }
     }
 
@@ -335,6 +345,10 @@ impl ProviderKind {
             // grok-4 / grok-3 lines (those are aliases of it upstream).
             // The `xai/` prefix is stripped before the upstream request.
             Self::XAi => "xai/grok-4.3",
+            // Groq — Llama 3.3 70B is the most general-purpose model on
+            // the LPU cloud. The `groq/` prefix is stripped before the
+            // upstream request.
+            Self::Groq => "groq/llama-3.3-70b-versatile",
         }
     }
 
@@ -359,6 +373,7 @@ impl ProviderKind {
             Self::OpenCodeGo => Some("OPENCODE_GO_BASE_URL"),
             Self::Moonshot => Some("MOONSHOT_BASE_URL"),
             Self::XAi => Some("XAI_BASE_URL"),
+            Self::Groq => Some("GROQ_BASE_URL"),
             _ => None,
         }
     }
@@ -422,6 +437,8 @@ impl ProviderKind {
             Self::Moonshot => Some("https://api.moonshot.ai/v1"),
             // xAI — public OpenAI-compatible endpoint.
             Self::XAi => Some("https://api.x.ai/v1"),
+            // Groq — the OpenAI-compat surface lives under /openai/v1.
+            Self::Groq => Some("https://api.groq.com/openai/v1"),
             _ => None,
         }
     }
@@ -471,6 +488,7 @@ impl ProviderKind {
             Self::OpenCodeGo => Some("OPENCODE_GO_API_KEY"),
             Self::Moonshot => Some("MOONSHOT_API_KEY"),
             Self::XAi => Some("XAI_API_KEY"),
+            Self::Groq => Some("GROQ_API_KEY"),
         }
     }
 
@@ -568,7 +586,8 @@ impl ProviderKind {
             | Self::TokenRouter
             | Self::Minimax
             | Self::Moonshot
-            | Self::XAi => None,
+            | Self::XAi
+            | Self::Groq => None,
         }
     }
 
@@ -693,6 +712,12 @@ impl ProviderKind {
             // openrouter/x-ai/grok-* is caught by the `openrouter/`
             // branch above, so this never steals those.
             Some(Self::XAi)
+        } else if model.starts_with("groq/") {
+            // Groq (LPU cloud). Models look like
+            // groq/llama-3.3-70b-versatile or groq/moonshotai/kimi-k2-instruct;
+            // the `groq/` prefix is stripped before the request reaches
+            // the OpenAI-compatible upstream at api.groq.com/openai/v1.
+            Some(Self::Groq)
         } else {
             None
         }

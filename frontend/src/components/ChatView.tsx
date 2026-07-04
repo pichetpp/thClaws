@@ -113,6 +113,11 @@ type AskPrompt = {
 const SUPPORTED_IMAGE_MIME = /^image\/(png|jpeg|jpg|webp|gif)$/;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB per attachment
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MB per uploaded file (--serve / webapp upload)
+// A pasted text blob at/above this length is routed to an _uploads/ file (path
+// injected) instead of dumped into the composer. ~2k chars ≈ 2-3 dense
+// paragraphs — small enough to stay editable inline, large enough that a whole
+// article / log / source file goes to a file so it doesn't bloat the prompt.
+const PASTE_TO_FILE_THRESHOLD = 2000;
 const MAX_UPLOAD_FILES = 5;
 
 const HAS_WRY_TRANSPORT =
@@ -273,6 +278,10 @@ export function ChatView({ active, modalOpen }: Props) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  // IDs of drag-drop `file_upload` requests in flight, so the shared
+  // `file_upload_result` subscriber injects the path only for OUR uploads
+  // (the Files tab uses the same IPC with its own ids).
+  const droppedUploadIds = useRef<Set<string>>(new Set());
   const copiedTimerRef = useRef<number | null>(null);
   const errorTimerRef = useRef<number | null>(null);
   const waitingTimerRef = useRef<number | null>(null);
@@ -345,18 +354,54 @@ export function ChatView({ active, modalOpen }: Props) {
     }
   };
 
+  /// Save a dropped file to the workspace `_uploads/` dir (backend
+  /// `file_upload` IPC — works desktop + `--serve`) and, on success, inject
+  /// its workspace-relative path into the composer as text. This is what lets
+  /// a dropped doc feed `/summarize`, `/translate`, `/extract` — the subagents
+  /// Read the path, so the file's bytes never bloat the prompt. Images get
+  /// this too (path injected) *and* the inline attach below.
+  const uploadAndInjectPath = async (file: File) => {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      showAttachmentError(
+        `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)} MB (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)`,
+      );
+      return;
+    }
+    let data: string;
+    try {
+      data = await blobToBase64(file);
+    } catch {
+      showAttachmentError(`Couldn't read ${file.name}`);
+      return;
+    }
+    const id = crypto.randomUUID();
+    droppedUploadIds.current.add(id);
+    const safeName = (file.name.split(/[/\\]/).pop() || "file").trim() || "file";
+    setUploading(true);
+    send({ type: "file_upload", id, path: `_uploads/${safeName}`, data });
+  };
+
   const onPaste = (e: React.ClipboardEvent) => {
     if (askPrompt) return;
     const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of Array.from(items)) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
-        const file = item.getAsFile();
-        if (file) {
-          e.preventDefault();
-          void addImageBlob(file);
+    if (items) {
+      for (const item of Array.from(items)) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) {
+            e.preventDefault();
+            void addImageBlob(file);
+          }
         }
       }
+    }
+    // Large text paste → save it to _uploads/ and inject the path, instead of
+    // stuffing the composer (and, on send, the whole prompt). Small pastes fall
+    // through to the default textarea insert so short snippets stay editable.
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (text.length >= PASTE_TO_FILE_THRESHOLD) {
+      e.preventDefault();
+      void uploadAndInjectPath(new File([text], "pasted.txt", { type: "text/plain" }));
     }
   };
 
@@ -378,9 +423,13 @@ export function ChatView({ active, modalOpen }: Props) {
     const files = e.dataTransfer?.files;
     if (!files) return;
     for (const file of Array.from(files)) {
-      if (file.type.startsWith("image/")) {
+      // Images within the inline limit: attach (so the model SEES them) AND
+      // save+inject path. Oversized images skip the inline attach (its error
+      // toast would collide with the upload's) but still get the path.
+      if (file.type.startsWith("image/") && file.size <= MAX_IMAGE_BYTES) {
         void addImageBlob(file);
       }
+      void uploadAndInjectPath(file);
     }
   };
 
@@ -430,6 +479,25 @@ export function ChatView({ active, modalOpen }: Props) {
   useEffect(() => {
     const unsub = subscribe((msg) => {
       switch (msg.type) {
+        case "file_upload_result": {
+          // Only handle results for OUR drag-drop uploads (the Files tab
+          // uses the same IPC with its own id-correlation).
+          const rid = typeof msg.id === "string" ? (msg.id as string) : "";
+          if (!droppedUploadIds.current.has(rid)) break;
+          droppedUploadIds.current.delete(rid);
+          // Keep the spinner up while other files in the same batch finish.
+          setUploading(droppedUploadIds.current.size > 0);
+          if (msg.ok && typeof msg.path === "string") {
+            const path = msg.path as string;
+            // Inject the saved path into the composer as text (space-padded),
+            // so the user can prepend /summarize · /translate · /extract.
+            setInput((prev) => `${prev}${prev && !prev.endsWith(" ") ? " " : ""}${path} `);
+            inputRef.current?.focus();
+          } else {
+            showAttachmentError(`Upload failed: ${(msg.error as string) ?? "unknown"}`);
+          }
+          break;
+        }
         case "chat_user_message": {
           // Echo of a prompt the user submitted (possibly from the
           // Terminal tab — we render it as a user bubble either way).
@@ -1399,7 +1467,7 @@ export function ChatView({ active, modalOpen }: Props) {
       ? "Waiting for response..."
       : attachments.length > 0
         ? "Add a prompt (or send as-is)..."
-        : "Type a message — paste or drop an image to attach...";
+        : "Type a message — drop a file to add its path (or paste/drop an image to attach)...";
 
   return (
     <div className="flex flex-col h-full">
@@ -1590,7 +1658,7 @@ export function ChatView({ active, modalOpen }: Props) {
                 onClick={onUploadButtonClick}
                 disabled={uploading || streaming}
                 aria-label="Upload files"
-                title={`Upload up to ${MAX_UPLOAD_FILES} files (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB each) to ./uploads/`}
+                title={`Upload up to ${MAX_UPLOAD_FILES} files (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB each) to _uploads/`}
                 className="px-2 py-2 rounded text-sm transition-colors inline-flex items-center justify-center"
                 style={{
                   background: "var(--bg-tertiary)",

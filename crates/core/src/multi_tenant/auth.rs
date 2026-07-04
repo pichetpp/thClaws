@@ -81,15 +81,88 @@ pub enum AuthError {
     ProofNotHex,
     #[error("HMAC verification failed")]
     HmacMismatch,
+    #[error("X-Thclaws-User-Sig missing (pod requires the Ed25519 proof)")]
+    SigMissing,
+    #[error("X-Thclaws-User-Sig is not a valid 64-byte hex signature")]
+    SigMalformed,
+    #[error("Ed25519 signature verification failed")]
+    SigMismatch,
+}
+
+/// How the pod authenticates identity headers. `Ed25519` is dev-plan/45
+/// item B: the API holds the per-workspace signing key and the pod gets
+/// only this verifying key (`THCLAWS_CLOUD_PUBKEY`), so nothing readable
+/// inside the pod can forge a co-tenant's proof. When the pubkey is
+/// configured the signature is REQUIRED — no HMAC downgrade (the HMAC
+/// secret sits in the same pod env an attacker can read).
+#[derive(Clone)]
+pub enum IdentityVerifier {
+    Hmac { secret: Vec<u8> },
+    Ed25519 { key: ed25519_dalek::VerifyingKey },
+}
+
+impl fmt::Debug for IdentityVerifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hmac { .. } => f.write_str("IdentityVerifier::Hmac(<redacted>)"),
+            Self::Ed25519 { .. } => f.write_str("IdentityVerifier::Ed25519(pubkey)"),
+        }
+    }
+}
+
+impl IdentityVerifier {
+    /// Build from the pod env: `THCLAWS_CLOUD_PUBKEY` (hex, 32 bytes)
+    /// wins; else the HMAC secret. `None` if the pubkey is set but
+    /// malformed (fail-closed — better to refuse startup than silently
+    /// downgrade to the forgeable symmetric proof).
+    pub fn from_secret_and_pubkey(secret: &[u8], pubkey_hex: Option<&str>) -> Option<Self> {
+        match pubkey_hex.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(hex) => {
+                let bytes = hex_decode(hex)?;
+                let arr: [u8; 32] = bytes.try_into().ok()?;
+                let key = ed25519_dalek::VerifyingKey::from_bytes(&arr).ok()?;
+                Some(Self::Ed25519 { key })
+            }
+            None => Some(Self::Hmac {
+                secret: secret.to_vec(),
+            }),
+        }
+    }
 }
 
 /// Verify all three cloud-routing headers and produce a trusted
-/// [`UserId`] on success.
+/// [`UserId`] on success (symmetric HMAC path — see [`verify_identity`]
+/// for the pubkey-aware entry point).
 pub fn verify_user_header(
     user_id_header: &str,
     timestamp_secs_header: &str,
     proof_hex_header: &str,
     secret: &[u8],
+    now_secs: u64,
+) -> Result<UserId, AuthError> {
+    verify_identity(
+        user_id_header,
+        timestamp_secs_header,
+        proof_hex_header,
+        None,
+        &IdentityVerifier::Hmac {
+            secret: secret.to_vec(),
+        },
+        now_secs,
+    )
+}
+
+/// Verify the cloud-routing identity headers against the pod's
+/// configured verifier. With [`IdentityVerifier::Ed25519`] the
+/// `X-Thclaws-User-Sig` header (`sig_hex_header`) is REQUIRED and the
+/// legacy HMAC proof is ignored; with `Hmac` the proof header is
+/// checked as before.
+pub fn verify_identity(
+    user_id_header: &str,
+    timestamp_secs_header: &str,
+    proof_hex_header: &str,
+    sig_hex_header: Option<&str>,
+    verifier: &IdentityVerifier,
     now_secs: u64,
 ) -> Result<UserId, AuthError> {
     let user_id = user_id_header.trim();
@@ -115,17 +188,31 @@ pub fn verify_user_header(
         return Err(AuthError::ClockSkew(skew));
     }
 
-    let proof_hex = proof_hex_header.trim();
-    if proof_hex.is_empty() {
-        return Err(AuthError::ProofMissing);
-    }
-    let provided = hex_decode(proof_hex).ok_or(AuthError::ProofNotHex)?;
-
     let message = format!("{user_id}:{timestamp_secs}");
-    let expected = hmac_sha256(secret, message.as_bytes());
-
-    if !constant_time_eq(&provided, &expected) {
-        return Err(AuthError::HmacMismatch);
+    match verifier {
+        IdentityVerifier::Hmac { secret } => {
+            let proof_hex = proof_hex_header.trim();
+            if proof_hex.is_empty() {
+                return Err(AuthError::ProofMissing);
+            }
+            let provided = hex_decode(proof_hex).ok_or(AuthError::ProofNotHex)?;
+            let expected = hmac_sha256(secret, message.as_bytes());
+            if !constant_time_eq(&provided, &expected) {
+                return Err(AuthError::HmacMismatch);
+            }
+        }
+        IdentityVerifier::Ed25519 { key } => {
+            let sig_hex = sig_hex_header.map(str::trim).unwrap_or("");
+            if sig_hex.is_empty() {
+                return Err(AuthError::SigMissing);
+            }
+            let bytes = hex_decode(sig_hex).ok_or(AuthError::SigMalformed)?;
+            let sig = ed25519_dalek::Signature::from_slice(&bytes)
+                .map_err(|_| AuthError::SigMalformed)?;
+            use ed25519_dalek::Verifier;
+            key.verify(message.as_bytes(), &sig)
+                .map_err(|_| AuthError::SigMismatch)?;
+        }
     }
 
     Ok(UserId(user_id.to_string()))
@@ -397,5 +484,95 @@ mod tests {
     #[test]
     fn constant_time_eq_lengths_differ() {
         assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    fn ed25519_pair() -> (ed25519_dalek::SigningKey, IdentityVerifier) {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let v = IdentityVerifier::Ed25519 {
+            key: sk.verifying_key(),
+        };
+        (sk, v)
+    }
+
+    fn ed25519_sign(sk: &ed25519_dalek::SigningKey, user: &str, ts: u64) -> String {
+        use ed25519_dalek::Signer;
+        hex_encode(&sk.sign(format!("{user}:{ts}").as_bytes()).to_bytes())
+    }
+
+    #[test]
+    fn ed25519_round_trip_sign_then_verify() {
+        let (sk, v) = ed25519_pair();
+        let now = 1_700_000_000u64;
+        let sig = ed25519_sign(&sk, "usr_abc123", now);
+        let got = verify_identity("usr_abc123", &now.to_string(), "", Some(&sig), &v, now).unwrap();
+        assert_eq!(got.as_str(), "usr_abc123");
+    }
+
+    #[test]
+    fn ed25519_requires_sig_and_ignores_hmac_proof() {
+        // A valid HMAC proof must NOT satisfy a pubkey-configured pod —
+        // the HMAC secret lives in the same env an attacker can read,
+        // so accepting it would be a downgrade hole.
+        let (_sk, v) = ed25519_pair();
+        let now = 1_700_000_000u64;
+        let hmac_proof = sign_user_header("usr_abc123", now, SECRET);
+        let err = verify_identity("usr_abc123", &now.to_string(), &hmac_proof, None, &v, now)
+            .unwrap_err();
+        assert!(matches!(err, AuthError::SigMissing));
+    }
+
+    #[test]
+    fn ed25519_rejects_forged_or_cross_user_sig() {
+        let (sk, v) = ed25519_pair();
+        let now = 1_700_000_000u64;
+        // Signature for alice presented as bob.
+        let sig = ed25519_sign(&sk, "alice", now);
+        let err = verify_identity("bob", &now.to_string(), "", Some(&sig), &v, now).unwrap_err();
+        assert!(matches!(err, AuthError::SigMismatch));
+        // Wrong key entirely.
+        let other = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let sig = ed25519_sign(&other, "alice", now);
+        let err = verify_identity("alice", &now.to_string(), "", Some(&sig), &v, now).unwrap_err();
+        assert!(matches!(err, AuthError::SigMismatch));
+        // Garbage sig.
+        let err = verify_identity("alice", &now.to_string(), "", Some("zz"), &v, now).unwrap_err();
+        assert!(matches!(err, AuthError::SigMalformed));
+    }
+
+    #[test]
+    fn ed25519_cross_verifies_python_cryptography_signature() {
+        // Golden vectors produced by the API side
+        // (auth/multiuser.py::derive_workspace_ed25519 with master
+        // "master", workspace id "ws1", message "alice:1700000000") —
+        // pins the cross-language wire contract.
+        let pub_hex = "a1c65ea8060f044cd5039d0cc1587adaa08eacadf375616161053d959a66e392";
+        let sig_hex = "7f3a87e3137994cf095150d0e5134ad90f8bf2e8e73f15f860ed1ab97e789ec8cdff1e547ab545291c03cc8b317cf684422c1cb4a3d59d96539b117253eb530b";
+        let v = IdentityVerifier::from_secret_and_pubkey(b"", Some(pub_hex)).unwrap();
+        let now = 1_700_000_000u64;
+        let got = verify_identity("alice", &now.to_string(), "", Some(sig_hex), &v, now).unwrap();
+        assert_eq!(got.as_str(), "alice");
+        // Same sig for a different user must fail.
+        assert!(verify_identity("bob", &now.to_string(), "", Some(sig_hex), &v, now).is_err());
+    }
+
+    #[test]
+    fn verifier_from_env_prefers_pubkey_and_fails_closed_on_garbage() {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let pub_hex = hex_encode(sk.verifying_key().as_bytes());
+        assert!(matches!(
+            IdentityVerifier::from_secret_and_pubkey(SECRET, Some(&pub_hex)),
+            Some(IdentityVerifier::Ed25519 { .. })
+        ));
+        assert!(matches!(
+            IdentityVerifier::from_secret_and_pubkey(SECRET, None),
+            Some(IdentityVerifier::Hmac { .. })
+        ));
+        assert!(matches!(
+            IdentityVerifier::from_secret_and_pubkey(SECRET, Some("")),
+            Some(IdentityVerifier::Hmac { .. })
+        ));
+        // Malformed pubkey must NOT silently downgrade to HMAC.
+        assert!(IdentityVerifier::from_secret_and_pubkey(SECRET, Some("nothex")).is_none());
+        assert!(IdentityVerifier::from_secret_and_pubkey(SECRET, Some("aabb")).is_none());
     }
 }

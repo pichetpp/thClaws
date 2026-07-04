@@ -111,9 +111,15 @@ fn tmp_dir() -> PathBuf {
 }
 
 async fn groq_transcript(video: &Path, dir: &Path, lang: Option<&str>) -> Option<String> {
-    let key = std::env::var("GROQ_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())?;
+    // BYOK-or-gateway (dev-plan/53 Stage D): a real GROQ_API_KEY posts
+    // to Groq directly; a gateway key routes via `<gw>/groq/audio/…`
+    // (per-second metered). Neither → skip the transcript, as before.
+    let ep = crate::media::provider::resolve_endpoint(
+        &["GROQ_API_KEY"],
+        "https://api.groq.com/openai/v1",
+        "groq",
+    )
+    .ok()?;
     // Skip cleanly if there's no audio stream.
     let has_audio = run(std::process::Command::new("ffprobe")
         .args([
@@ -155,13 +161,14 @@ async fn groq_transcript(video: &Path, dir: &Path, lang: Option<&str>) -> Option
     if let Some(l) = lang.filter(|l| *l != "auto") {
         form = form.text("language", l.to_string());
     }
-    let resp = reqwest::Client::new()
-        .post("https://api.groq.com/openai/v1/audio/transcriptions")
-        .bearer_auth(&key)
-        .multipart(form)
-        .send()
-        .await
-        .ok()?;
+    let resp = crate::multi_tenant::attach_member(
+        reqwest::Client::new().post(format!("{}/audio/transcriptions", ep.base_url)),
+    )
+    .bearer_auth(&ep.api_key)
+    .multipart(form)
+    .send()
+    .await
+    .ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -311,14 +318,16 @@ impl Tool for WatchVideoTool {
             kept.len(),
             extracted
         );
+        let transcribable = std::env::var("GROQ_API_KEY").is_ok()
+            || crate::providers::thclaws_gateway::has_access_key();
         match &transcript {
             Some(t) => summary.push_str(&format!("\n\n--- transcript (whisper-large-v3) ---\n{t}")),
-            None if std::env::var("GROQ_API_KEY").is_ok() => {
+            None if transcribable => {
                 summary.push_str("\n\n(no transcript — the video has no audio)")
             }
-            None => {
-                summary.push_str("\n\n(no transcript — set GROQ_API_KEY to transcribe the audio)")
-            }
+            None => summary.push_str(
+                "\n\n(no transcript — set GROQ_API_KEY or enable the thClaws Gateway to transcribe the audio)",
+            ),
         }
         blocks.push(ToolResultBlock::Text { text: summary });
 

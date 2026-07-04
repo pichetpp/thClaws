@@ -261,6 +261,11 @@ impl AgentDefsConfig {
         const BUILTINS: &[(&str, &str)] = &[
             ("dream", include_str!("default_prompts/dream.md")),
             ("translator", include_str!("default_prompts/translator.md")),
+            ("summarizer", include_str!("default_prompts/summarizer.md")),
+            (
+                "content-extractor",
+                include_str!("default_prompts/content-extractor.md"),
+            ),
             ("kms-linker", include_str!("default_prompts/kms-linker.md")),
             (
                 "kms-reconcile",

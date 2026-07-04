@@ -331,6 +331,17 @@ impl AgentFactory for ProductionAgentFactory {
             }
         }
 
+        // A subagent that explicitly allow-lists a gated tool (e.g.
+        // `FetchImages` behind the `content-extractor` gate) opens that gate
+        // for itself — the declarative parallel to a skill's `tool-gate:`, so
+        // a subagent is as capable as a skill at surfacing a gated tool group.
+        // Only tools NAMED in the allow-list count; an inherit-all def (empty
+        // `tools`) does not auto-open every gate. Process-global + session-
+        // sticky (same model as skills).
+        if let Some(def) = agent_def {
+            open_gates_for_allowlist(def, &base_tools);
+        }
+
         // Per-subagent MCP scoping (`AgentDef::mcp`). MCP tools are named
         // `<server>__<tool>` (see `mcp::MCP_NAME_SEPARATOR`). When the def
         // lists servers, drop every MCP tool whose server segment isn't
@@ -711,6 +722,19 @@ impl Tool for SubAgentTool {
     }
 }
 
+/// Open the tool gate for every gated tool this def explicitly allow-lists.
+/// Looks each name up in `base_tools` (gate membership is a property of the
+/// registered tool, independent of whether the gate is open), and activates
+/// its gate. Empty `def.tools` (inherit-all) is intentionally skipped by the
+/// caller so an unrestricted subagent doesn't fling every gate open.
+fn open_gates_for_allowlist(def: &crate::agent_defs::AgentDef, base_tools: &ToolRegistry) {
+    for name in &def.tools {
+        if let Some(gate) = base_tools.get(name).and_then(|t| t.requires_gate()) {
+            crate::tools::activate_gate(gate);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +746,27 @@ mod tests {
     use futures::stream;
     use std::collections::VecDeque;
     use std::sync::Mutex;
+
+    #[test]
+    fn allowlisting_a_gated_tool_opens_its_gate() {
+        crate::tools::reset_gates();
+        let mut base = ToolRegistry::new();
+        base.register(std::sync::Arc::new(crate::tools::FetchImagesTool::new())); // gated "content-extractor"
+
+        // Def that does NOT list it → gate stays closed.
+        let mut def = crate::agent_defs::AgentDef {
+            tools: vec!["Read".into()],
+            ..Default::default()
+        };
+        open_gates_for_allowlist(&def, &base);
+        assert!(!crate::tools::gate_is_active("content-extractor"));
+
+        // Def that explicitly allow-lists FetchImages → gate opens.
+        def.tools = vec!["Read".into(), "FetchImages".into()];
+        open_gates_for_allowlist(&def, &base);
+        assert!(crate::tools::gate_is_active("content-extractor"));
+        crate::tools::reset_gates();
+    }
 
     #[test]
     fn subagent_model_falls_back_when_pin_is_a_different_provider() {

@@ -90,6 +90,9 @@ impl Tool for WebFetchTool {
 
     async fn call(&self, input: Value) -> Result<String> {
         let url = req_str(&input, "url")?;
+        crate::net_guard::guard(url)
+            .await
+            .map_err(|e| Error::Tool(format!("WebFetch: {e}")))?;
         let max_bytes = input
             .get("max_bytes")
             .and_then(Value::as_u64)

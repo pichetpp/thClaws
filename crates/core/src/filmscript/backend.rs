@@ -198,11 +198,16 @@ fn ltx_payload(
     let image = frame_url.or_else(|| image_urls.first().map(String::as_str));
     if let Some(audio) = audio_url {
         // audio-to-video (pro, 1080p-locked): the voice is the soundtrack.
+        // `duration` is a gateway BILLING HINT only (a2v output length =
+        // the audio length; LTX's a2v API takes no duration) — dispatch
+        // strips it on the direct BYOK path, the gateway strips it before
+        // forwarding on the metered path (dev-plan/53 Stage D).
         let mut input = json!({
             "model": "ltx-2-3-pro",
             "audio_uri": audio,
             "prompt": prompt,
             "resolution": "1920x1080",
+            "duration": shot.resolved.duration,
             "guidance_scale": if image.is_some() { 2 } else { 3 },
         });
         if let Some(img) = image {

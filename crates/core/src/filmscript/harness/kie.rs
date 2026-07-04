@@ -31,13 +31,19 @@ pub struct TaskResult {
 
 pub struct KieClient {
     api_key: String,
+    base: String,
     client: reqwest::Client,
 }
 
 impl KieClient {
     pub fn new(api_key: String) -> Self {
+        Self::with_base(api_key, jobs_base())
+    }
+
+    pub fn with_base(api_key: String, base: String) -> Self {
         Self {
             api_key,
+            base,
             client: reqwest::Client::builder()
                 .user_agent(USER_AGENT)
                 .build()
@@ -45,18 +51,29 @@ impl KieClient {
         }
     }
 
+    /// BYOK-or-gateway endpoint (dev-plan/53 Stage D): a real
+    /// `KIE_API_KEY` calls api.kie.ai directly; otherwise a gateway key
+    /// routes through `<gateway>/kie` where the platform key is
+    /// injected and the job is metered (billed from the poll's
+    /// creditsConsumed).
+    pub fn resolve() -> Result<Self> {
+        let ep = crate::media::provider::resolve_endpoint(&["KIE_API_KEY"], &jobs_base(), "kie")?;
+        Ok(Self::with_base(ep.api_key, ep.base_url))
+    }
+
     pub async fn create_task(&self, payload: &Value) -> Result<String> {
-        let resp: Value = self
-            .client
-            .post(format!("{}/api/v1/jobs/createTask", jobs_base()))
-            .bearer_auth(&self.api_key)
-            .json(payload)
-            .send()
-            .await
-            .map_err(|e| Error::Tool(format!("kie createTask: {e}")))?
-            .json()
-            .await
-            .map_err(|e| Error::Tool(format!("kie createTask response: {e}")))?;
+        let resp: Value = crate::multi_tenant::attach_member(
+            self.client
+                .post(format!("{}/api/v1/jobs/createTask", self.base)),
+        )
+        .bearer_auth(&self.api_key)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| Error::Tool(format!("kie createTask: {e}")))?
+        .json()
+        .await
+        .map_err(|e| Error::Tool(format!("kie createTask response: {e}")))?;
 
         if let Some(task_id) = resp["data"]["taskId"].as_str() {
             return Ok(task_id.to_string());
@@ -89,19 +106,17 @@ impl KieClient {
                 )));
             }
 
-            let resp: Value = self
-                .client
-                .get(format!(
-                    "{}/api/v1/jobs/recordInfo?taskId={task_id}",
-                    jobs_base()
-                ))
-                .bearer_auth(&self.api_key)
-                .send()
-                .await
-                .map_err(|e| Error::Tool(format!("kie recordInfo: {e}")))?
-                .json()
-                .await
-                .map_err(|e| Error::Tool(format!("kie recordInfo response: {e}")))?;
+            let resp: Value = crate::multi_tenant::attach_member(self.client.get(format!(
+                "{}/api/v1/jobs/recordInfo?taskId={task_id}",
+                self.base
+            )))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("kie recordInfo: {e}")))?
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("kie recordInfo response: {e}")))?;
 
             let data = &resp["data"];
             match data["state"].as_str() {
@@ -139,17 +154,18 @@ impl KieClient {
     /// (`successFlag` 1=ok / 2,3=fail; the clip is the first mp4 in the
     /// payload). Used for the `veo` backend (REFERENCE_2_VIDEO).
     pub async fn create_veo_task(&self, payload: &Value) -> Result<String> {
-        let resp: Value = self
-            .client
-            .post(format!("{}/api/v1/veo/generate", jobs_base()))
-            .bearer_auth(&self.api_key)
-            .json(payload)
-            .send()
-            .await
-            .map_err(|e| Error::Tool(format!("kie veo generate: {e}")))?
-            .json()
-            .await
-            .map_err(|e| Error::Tool(format!("kie veo generate response: {e}")))?;
+        let resp: Value = crate::multi_tenant::attach_member(
+            self.client
+                .post(format!("{}/api/v1/veo/generate", self.base)),
+        )
+        .bearer_auth(&self.api_key)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| Error::Tool(format!("kie veo generate: {e}")))?
+        .json()
+        .await
+        .map_err(|e| Error::Tool(format!("kie veo generate response: {e}")))?;
         resp["data"]["taskId"]
             .as_str()
             .map(str::to_string)
@@ -173,19 +189,17 @@ impl KieClient {
                     POLL_TIMEOUT.as_secs()
                 )));
             }
-            let resp: Value = self
-                .client
-                .get(format!(
-                    "{}/api/v1/veo/record-info?taskId={task_id}",
-                    jobs_base()
-                ))
-                .bearer_auth(&self.api_key)
-                .send()
-                .await
-                .map_err(|e| Error::Tool(format!("kie veo record-info: {e}")))?
-                .json()
-                .await
-                .map_err(|e| Error::Tool(format!("kie veo record-info response: {e}")))?;
+            let resp: Value = crate::multi_tenant::attach_member(self.client.get(format!(
+                "{}/api/v1/veo/record-info?taskId={task_id}",
+                self.base
+            )))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("kie veo record-info: {e}")))?
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("kie veo record-info response: {e}")))?;
             match resp["data"]["successFlag"].as_i64() {
                 Some(1) => {
                     let clip_url = first_mp4_url(&resp["data"]).ok_or_else(|| {
@@ -247,18 +261,4 @@ pub(crate) fn first_mp4_url(v: &Value) -> Option<String> {
     let mut out = None;
     walk(v, &mut out);
     out
-}
-
-pub(crate) fn resolve_kie_key() -> Result<String> {
-    std::env::var("KIE_API_KEY")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| {
-            Error::Tool(
-                "KIE_API_KEY not set — get one at kie.ai (BYOK) and put it in .env; \
-                 gateway-metered keyless mode arrives with dev-plan/52 Tier 6"
-                    .into(),
-            )
-        })
 }

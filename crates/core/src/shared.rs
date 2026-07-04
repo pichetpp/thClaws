@@ -38,6 +38,7 @@ pub const GATEWAY_ALL_PROVIDERS: &[&str] = &[
     "thaillm",
     "xai",
     "moonshot",
+    "groq",
 ];
 
 /// The shared-brain directory when shared mode is active, else `None`.

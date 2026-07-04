@@ -592,7 +592,10 @@ enum ScheduleCmd {
 /// Hide the console allocated for the Windows console-subsystem binary when
 /// the user is launching the GUI. CLI mode keeps the console attached so
 /// `thclaws --cli` can read keys normally from PowerShell/CMD.
+// Called only from the `#[cfg(feature = "gui")]` launch paths below, so a
+// CLI-only build (`cargo build` without `--features gui`) never reaches it.
 #[cfg(windows)]
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 fn detach_console_for_gui() {
     use windows_sys::Win32::System::Console::FreeConsole;
 
@@ -604,12 +607,16 @@ fn detach_console_for_gui() {
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 fn detach_console_for_gui() {}
 
 /// Parse a TTL string like "30d" / "12h" / "60m" / "120s" / "never"
 /// into seconds. Used by `--gui-shell-token-ttl`. Returns `None` for
 /// "never" (no expiry) or any unparseable input — the caller falls
 /// back to the manifest / launcher default.
+// Only reached from the `#[cfg(feature = "gui")]` serve path, so a
+// CLI-only build wouldn't otherwise use it.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 fn parse_ttl_secs(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("never") || s.is_empty() {

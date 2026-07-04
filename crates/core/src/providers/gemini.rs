@@ -425,9 +425,7 @@ impl Provider for GeminiProvider {
             req.model
         );
 
-        let resp = self
-            .client
-            .post(&url)
+        let resp = crate::multi_tenant::attach_member(self.client.post(&url))
             .header("x-goog-api-key", &self.api_key)
             .header("content-type", "application/json")
             .json(&body)

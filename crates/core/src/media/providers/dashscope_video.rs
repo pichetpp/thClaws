@@ -110,8 +110,7 @@ impl VideoProvider for DashScopeVideoProvider {
         });
         let url = format!("{}{}", ep.base_url.trim_end_matches('/'), SUBMIT_PATH);
         let client = Self::client(60)?;
-        let resp = client
-            .post(&url)
+        let resp = crate::multi_tenant::attach_member(client.post(&url))
             .bearer_auth(&ep.api_key)
             .header("X-DashScope-Async", "enable")
             .header("content-type", "application/json")

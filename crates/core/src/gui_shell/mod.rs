@@ -7,6 +7,7 @@
 //! `run` / `cancel` / `on("text"|"done"|"error")`. See
 //! `dev-plan/33-gui-shell.md` for the full roadmap.
 
+pub mod inline_approval;
 pub mod manifest;
 pub mod registry;
 pub mod router;

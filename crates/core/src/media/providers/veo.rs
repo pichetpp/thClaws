@@ -209,8 +209,7 @@ impl VideoProvider for VeoVideoProvider {
             req.model
         );
         let client = Self::client(60)?;
-        let resp = client
-            .post(&url)
+        let resp = crate::multi_tenant::attach_member(client.post(&url))
             .header("x-goog-api-key", &ep.api_key)
             .header("content-type", "application/json")
             .json(&body)

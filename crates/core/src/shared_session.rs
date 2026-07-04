@@ -4392,8 +4392,14 @@ async fn drive_turn_stream(
     // session's task-local working dir (`workspace-<id>/`) so every tool
     // — bash, write, kms, pdf/epub, workflow — resolves paths against the
     // user's own folder, never the process cwd / shared SANDBOX_ROOT.
-    // Single-tenant leaves the scope unset (process cwd, unchanged).
+    // dev-plan/45 A2: also under the member scope, so outbound gateway
+    // calls carry `X-Thclaws-Member` for billing attribution.
+    // Single-tenant leaves both scopes unset (process cwd, unchanged).
     let root = state.cwd.clone();
+    let member = state
+        .session_roots
+        .as_ref()
+        .and_then(|r| r.member_id.clone());
     let inner = drive_turn_stream_inner(
         stream,
         state,
@@ -4404,9 +4410,21 @@ async fn drive_turn_stream(
         surface_session,
     );
     let turn_result = if crate::workdir::is_multiuser() {
-        AssertUnwindSafe(crate::workdir::scope_workdir(root, inner))
-            .catch_unwind()
-            .await
+        match member {
+            Some(id) => {
+                AssertUnwindSafe(crate::workdir::scope_workdir(
+                    root,
+                    crate::multi_tenant::scope_member(id, inner),
+                ))
+                .catch_unwind()
+                .await
+            }
+            None => {
+                AssertUnwindSafe(crate::workdir::scope_workdir(root, inner))
+                    .catch_unwind()
+                    .await
+            }
+        }
     } else {
         AssertUnwindSafe(inner).catch_unwind().await
     };

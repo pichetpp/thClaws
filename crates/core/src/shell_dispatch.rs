@@ -3652,36 +3652,36 @@ pub async fn dispatch(
                 };
                 match sub {
                     CloudSlash::Status => {
-                        for line in crate::cloud::cmd::status_lines(None, cloud_cfg.as_ref()) {
-                            emit(line);
-                        }
+                        // One SlashOutput = one system bubble in chat. Emit the
+                        // whole report as a single block (like /providers) so it
+                        // reads as one list, not a bubble ("pill") per row.
+                        let lines = crate::cloud::cmd::status_lines(None, cloud_cfg.as_ref());
+                        emit(lines.join("\n"));
                     }
                     CloudSlash::List { mine } => {
-                        for line in
-                            crate::cloud::cmd::list_lines(mine, None, cloud_cfg.as_ref()).await
-                        {
-                            emit(line);
-                        }
+                        // Single block, same reasoning as Status above.
+                        let lines =
+                            crate::cloud::cmd::list_lines(mine, None, cloud_cfg.as_ref()).await;
+                        emit(lines.join("\n"));
                     }
                     CloudSlash::Get { slug } => {
-                        for line in
+                        // Returns the whole progress log at once (not a live
+                        // stream), so emit it as one block — a bubble per line
+                        // reads as a stack of "pills". Same reasoning as Status.
+                        let lines =
                             crate::cloud::cmd::get_into_cwd_lines(slug, None, cloud_cfg.as_ref())
-                                .await
-                        {
-                            emit(line);
-                        }
+                                .await;
+                        emit(lines.join("\n"));
                     }
                     CloudSlash::Publish => {
-                        for line in
-                            crate::cloud::cmd::publish_cwd_lines(None, cloud_cfg.as_ref()).await
-                        {
-                            emit(line);
-                        }
+                        // Single block, same reasoning as Get above.
+                        let lines =
+                            crate::cloud::cmd::publish_cwd_lines(None, cloud_cfg.as_ref()).await;
+                        emit(lines.join("\n"));
                     }
                     CloudSlash::Unbind => {
-                        for line in crate::cloud::cmd::unbind_lines() {
-                            emit(line);
-                        }
+                        // Single block, same reasoning as Status above.
+                        emit(crate::cloud::cmd::unbind_lines().join("\n"));
                     }
                     CloudSlash::Push {
                         delete,

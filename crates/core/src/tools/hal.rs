@@ -310,6 +310,9 @@ impl Tool for WebScrapeTool {
 
     async fn call(&self, input: Value) -> Result<String> {
         let url = req_str(&input, "url")?;
+        crate::net_guard::guard(url)
+            .await
+            .map_err(|e| Error::Tool(format!("WebScrape: {e}")))?;
         let mut body = json!({"url": url});
         for field in [
             "wait_for",

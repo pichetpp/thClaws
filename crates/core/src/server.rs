@@ -200,7 +200,7 @@ struct ServeState {
 #[derive(Clone)]
 struct MultiTenantState {
     registry: crate::multi_tenant::UserSessionRegistry,
-    hmac_secret: Arc<Vec<u8>>,
+    verifier: Arc<crate::multi_tenant::IdentityVerifier>,
 }
 
 /// Spin up the server. Spawns the worker, builds the Axum router,
@@ -419,9 +419,18 @@ pub async fn run_with_engine(
             "\x1b[36m[serve] multi-tenant on — max_users={}, idle_timeout={:?}\x1b[0m",
             cfg.max_users, cfg.idle_timeout
         );
+        // dev-plan/45 B: prefer the asymmetric verifier when the pod is
+        // provisioned with THCLAWS_CLOUD_PUBKEY; a malformed pubkey is a
+        // hard startup error (never silently downgrade to the forgeable
+        // symmetric proof).
+        let verifier = crate::multi_tenant::IdentityVerifier::from_secret_and_pubkey(
+            &cfg.hmac_secret,
+            std::env::var("THCLAWS_CLOUD_PUBKEY").ok().as_deref(),
+        )
+        .expect("THCLAWS_CLOUD_PUBKEY is set but not a valid 32-byte hex Ed25519 key");
         MultiTenantState {
             registry,
-            hmac_secret: Arc::new(cfg.hmac_secret.clone()),
+            verifier: Arc::new(verifier),
         }
     });
     let ws_connections = Arc::new(AtomicUsize::new(0));
@@ -435,6 +444,9 @@ pub async fn run_with_engine(
         ws_connections: ws_connections.clone(),
         permission_notice,
     };
+    // Grab the identity verifier BEFORE `state` moves into the router —
+    // the multiuser auth layer below needs it.
+    let mt_verifier = state.multi_tenant.as_ref().map(|m| m.verifier.clone());
 
     // Cloud heartbeat: when running inside a thclaws.cloud workspace
     // pod, periodically POST to `/api/hosted/workspaces/<id>/keepalive`
@@ -518,9 +530,11 @@ pub async fn run_with_engine(
     // dev-plan/42: gate the ENTIRE surface behind HMAC identity in a
     // multiuser pod (both router shapes above), so no route is reachable
     // without a verified user. /healthz stays open for k8s probes.
-    let app = if let Some(mt) = config.multi_tenant.as_ref() {
-        let secret = Arc::new(mt.hmac_secret.clone());
-        app.layer(axum::middleware::from_fn_with_state(secret, multiuser_auth))
+    let app = if let Some(verifier) = mt_verifier {
+        app.layer(axum::middleware::from_fn_with_state(
+            verifier,
+            multiuser_auth,
+        ))
     } else {
         app
     };
@@ -836,12 +850,16 @@ fn build_shell_router(
 /// file-asset did). Single-tenant `--serve` never installs this layer
 /// (keeps its `THCLAWS_API_TOKEN` Bearer model). `/healthz` is exempt so
 /// k8s liveness/readiness probes — which carry no identity — still pass.
-async fn multiuser_auth(State(secret): State<Arc<Vec<u8>>>, req: Request, next: Next) -> Response {
+async fn multiuser_auth(
+    State(verifier): State<Arc<crate::multi_tenant::IdentityVerifier>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if multiuser_request_authed(req.uri().path(), req.headers(), secret.as_slice(), now) {
+    if multiuser_request_authed(req.uri().path(), req.headers(), &verifier, now) {
         next.run(req).await
     } else {
         StatusCode::UNAUTHORIZED.into_response()
@@ -854,7 +872,7 @@ async fn multiuser_auth(State(secret): State<Arc<Vec<u8>>>, req: Request, next: 
 fn multiuser_request_authed(
     path: &str,
     headers: &axum::http::HeaderMap,
-    secret: &[u8],
+    verifier: &crate::multi_tenant::IdentityVerifier,
     now_secs: u64,
 ) -> bool {
     if path == "/healthz" {
@@ -866,9 +884,15 @@ fn multiuser_request_authed(
         get("x-thclaws-user-ts"),
         get("x-thclaws-user-proof"),
     ) {
-        (Some(u), Some(ts), Some(p)) => {
-            crate::multi_tenant::verify_user_header(u, ts, p, secret, now_secs).is_ok()
-        }
+        (Some(u), Some(ts), Some(p)) => crate::multi_tenant::verify_identity(
+            u,
+            ts,
+            p,
+            get("x-thclaws-user-sig"),
+            verifier,
+            now_secs,
+        )
+        .is_ok(),
         _ => false,
     }
 }
@@ -1263,11 +1287,14 @@ fn verify_file_asset_for_user(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let user_id = crate::multi_tenant::verify_user_header(
+    let user_id = crate::multi_tenant::verify_identity(
         user_id_h,
         ts_h,
         proof_h,
-        &mt.hmac_secret,
+        headers
+            .get("x-thclaws-user-sig")
+            .and_then(|v| v.to_str().ok()),
+        &mt.verifier,
         now_secs,
     )
     .map_err(|e| {
@@ -1314,11 +1341,14 @@ fn resolve_session_handle(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let user_id = crate::multi_tenant::verify_user_header(
+    let user_id = crate::multi_tenant::verify_identity(
         user_id_h,
         ts_h,
         proof_h,
-        &mt.hmac_secret,
+        headers
+            .get("x-thclaws-user-sig")
+            .and_then(|v| v.to_str().ok()),
+        &mt.verifier,
         now_secs,
     )
     .map_err(|e| {
@@ -1829,10 +1859,10 @@ mod tests {
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
         let json: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(json["ok"], serde_json::Value::Bool(true));
-        assert_eq!(json["files"][0]["path"], "uploads/photo.jpg");
+        assert_eq!(json["files"][0]["path"], "_uploads/photo.jpg");
         assert_eq!(json["files"][0]["size"], 16);
 
-        assert!(td.path().join("uploads").join("photo.jpg").exists());
+        assert!(td.path().join("_uploads").join("photo.jpg").exists());
 
         // Second upload with the same name → `_1` suffix.
         let part_b = reqwest::multipart::Part::bytes(vec![1u8; 8])
@@ -1848,8 +1878,8 @@ mod tests {
             .expect("upload POST 2");
         assert_eq!(resp2.status(), reqwest::StatusCode::OK);
         let json2: serde_json::Value = resp2.json().await.unwrap();
-        assert_eq!(json2["files"][0]["path"], "uploads/photo_1.jpg");
-        assert!(td.path().join("uploads").join("photo_1.jpg").exists());
+        assert_eq!(json2["files"][0]["path"], "_uploads/photo_1.jpg");
+        assert!(td.path().join("_uploads").join("photo_1.jpg").exists());
 
         server_handle.abort();
     }
@@ -2087,7 +2117,9 @@ mod tests {
             });
         MultiTenantState {
             registry,
-            hmac_secret: std::sync::Arc::new(TEST_SECRET.to_vec()),
+            verifier: std::sync::Arc::new(crate::multi_tenant::IdentityVerifier::Hmac {
+                secret: TEST_SECRET.to_vec(),
+            }),
         }
     }
 
@@ -2113,35 +2145,63 @@ mod tests {
             .as_secs();
         let empty = HeaderMap::new();
 
+        let v = crate::multi_tenant::IdentityVerifier::Hmac {
+            secret: TEST_SECRET.to_vec(),
+        };
+        let wrong = crate::multi_tenant::IdentityVerifier::Hmac {
+            secret: b"a-different-secret".to_vec(),
+        };
         // No identity → rejected on a normal route.
-        assert!(!multiuser_request_authed("/", &empty, TEST_SECRET, now));
+        assert!(!multiuser_request_authed("/", &empty, &v, now));
         assert!(!multiuser_request_authed(
             "/v1/chat/completions",
             &empty,
-            TEST_SECRET,
+            &v,
             now
         ));
         // Health probe is exempt (k8s has no identity to present).
-        assert!(multiuser_request_authed(
-            "/healthz",
-            &empty,
-            TEST_SECRET,
-            now
-        ));
+        assert!(multiuser_request_authed("/healthz", &empty, &v, now));
         // Valid signed identity → allowed.
         assert!(multiuser_request_authed(
             "/",
             &headers_for("alice"),
-            TEST_SECRET,
+            &v,
             now
         ));
         // Wrong secret → forged → rejected.
         assert!(!multiuser_request_authed(
             "/",
             &headers_for("alice"),
-            b"a-different-secret",
+            &wrong,
             now
         ));
+        // dev-plan/45 B: a pubkey-configured pod REQUIRES the Ed25519
+        // sig — a valid HMAC triple alone no longer passes.
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let ed = crate::multi_tenant::IdentityVerifier::Ed25519 {
+            key: sk.verifying_key(),
+        };
+        assert!(!multiuser_request_authed(
+            "/",
+            &headers_for("alice"),
+            &ed,
+            now
+        ));
+        let mut signed = headers_for("alice");
+        let ts: u64 = signed["x-thclaws-user-ts"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        use ed25519_dalek::Signer;
+        let sig = sk.sign(format!("alice:{ts}").as_bytes());
+        signed.insert(
+            "x-thclaws-user-sig",
+            crate::multi_tenant::auth::hex_encode(&sig.to_bytes())
+                .parse()
+                .unwrap(),
+        );
+        assert!(multiuser_request_authed("/", &signed, &ed, now));
     }
 
     #[test]

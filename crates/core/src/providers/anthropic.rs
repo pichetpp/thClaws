@@ -180,8 +180,7 @@ impl AnthropicProvider {
     /// the cache-disabled retry. Returns the raw `reqwest::Response`
     /// — caller is responsible for status checking and body draining.
     async fn send_request(&self, body: &Value) -> Result<reqwest::Response> {
-        self.client
-            .post(&self.base_url)
+        crate::multi_tenant::attach_member(self.client.post(&self.base_url))
             .header(self.auth_header_name(), &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json")

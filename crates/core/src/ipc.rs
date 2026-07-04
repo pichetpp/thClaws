@@ -139,6 +139,71 @@ fn shell_has_permission(shell_id: &str, perm: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// dev-plan/39 Tier 3: is `tool_name` invokable by `shell_id` per its
+/// manifest? A shell opts INTO tool gating by declaring any
+/// `tools.invoke:<tool>` permission — then only the declared tools (or
+/// the `tools.invoke:*` wildcard) are allowed. A shell that declares NO
+/// `tools.invoke:*` permission runs in legacy/unfettered mode (built-in
+/// + hand-installed dev shells that predate the scheme), and an
+/// unresolvable shell id is left unchanged too — so this is additive and
+/// never breaks existing shells. Marketplace shells are pushed to declare
+/// at publish time, not here.
+fn shell_tool_invoke_allowed(shell_id: &str, tool_name: &str) -> bool {
+    let Some(shell) = crate::gui_shell::ShellRegistry::new().resolve(shell_id) else {
+        return true; // unknown shell → legacy behaviour, unchanged
+    };
+    tool_allowed_by_perms(&shell.manifest().permissions, tool_name)
+}
+
+/// Decode a base64 blob, write it into `<base>/_uploads/<unique>`, and
+/// return `{path, url}` (dev-plan/39 Tier 3 uploadFile). Pure over an
+/// explicit base dir so it's testable without cwd/session state.
+fn shell_upload_into(
+    base: &std::path::Path,
+    name: &str,
+    data_b64: &str,
+) -> std::result::Result<serde_json::Value, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("invalid base64: {e}"))?;
+    if bytes.len() as u64 > crate::uploads::UPLOAD_MAX_BYTES {
+        return Err(format!(
+            "{} exceeds {}-byte upload cap",
+            name,
+            crate::uploads::UPLOAD_MAX_BYTES
+        ));
+    }
+    let dir = crate::uploads::ensure_uploads_dir(base)
+        .map_err(|e| format!("cannot use uploads dir: {e}"))?;
+    let dest = crate::uploads::unique_path(&dir, name);
+    std::fs::write(&dest, &bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
+    let rel = dest
+        .strip_prefix(base)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| format!("{}/{name}", crate::uploads::UPLOADS_DIRNAME));
+    Ok(serde_json::json!({
+        "path": rel,
+        // Relative so it resolves under the shell's base URL in both
+        // Mode A (custom protocol) and Mode B (/t/<token>/).
+        "url": format!("file-asset/{rel}"),
+    }))
+}
+
+/// Pure allowlist check (testable without a registry): a `tools.invoke:*`
+/// wildcard or the exact `tools.invoke:<tool>` grants it; declaring no
+/// `tools.invoke:` permission at all = legacy/unfettered (allow).
+fn tool_allowed_by_perms(perms: &[String], tool_name: &str) -> bool {
+    let declared: Vec<&str> = perms
+        .iter()
+        .filter_map(|p| p.strip_prefix("tools.invoke:"))
+        .collect();
+    if declared.is_empty() {
+        return true;
+    }
+    declared.iter().any(|d| *d == "*" || *d == tool_name)
+}
+
 /// Serialise a research `JobView` for the `thclaws.research.*` bridge
 /// API (JobStatus/SystemTime aren't Serialize, so map by hand).
 fn job_view_json(v: &crate::research::JobView) -> serde_json::Value {
@@ -401,12 +466,28 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let hal_enabled = crate::config::AppConfig::load()
                 .map(|c| c.hal_enabled)
                 .unwrap_or(false);
+            // dev-plan/39 Tier 3: when the shell hosts its own approval UI
+            // it sends `preferInline` — route the approve/deny to the shell
+            // instead of popping the full-screen system modal over it.
+            let prefer_inline = msg
+                .get("preferInline")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let dispatch = ctx.dispatch.clone();
             let approver = ctx.approver.clone();
+            let inline_session = session_id.clone();
             std::thread::spawn(move || {
                 let outcome: std::result::Result<String, String> = (|| {
                     if tool_name.is_empty() {
                         return Err("gui_shell_tool_invoke: missing 'name' field".into());
+                    }
+                    // dev-plan/39 Tier 3: enforce the manifest tool allowlist
+                    // (no-op for shells that don't declare tools.invoke:*).
+                    if !shell_tool_invoke_allowed(&shell_id, &tool_name) {
+                        return Err(format!(
+                            "tool '{tool_name}' not in this shell's manifest permissions \
+                             (declare \"tools.invoke:{tool_name}\" to allow it)"
+                        ));
                     }
                     let mut registry = crate::tools::ToolRegistry::with_builtins();
                     if media_enabled {
@@ -430,14 +511,43 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         .map_err(|e| format!("tokio runtime build: {e}"))?;
                     rt.block_on(async {
                         if tool.requires_approval(&args) {
-                            let decision = approver
-                                .approve(&ApprovalRequest {
-                                    tool_name: tool_name.clone(),
-                                    input: args.clone(),
-                                    summary: Some(format!("{tool_name} (GUI shell)")),
-                                    originator: AgentOrigin::Main,
-                                })
-                                .await;
+                            let decision = if prefer_inline {
+                                // Inline path: dispatch an approval_request
+                                // event to the shell + await its widget's
+                                // decision (5-min cap → deny, so a shell
+                                // that never answers can't wedge the call).
+                                let (aid, rx) = crate::gui_shell::inline_approval::register();
+                                let evt = serde_json::json!({
+                                    "type": "gui_shell_event",
+                                    "sessionId": inline_session,
+                                    "event": "approval_request",
+                                    "payload": {
+                                        "approvalId": aid,
+                                        "toolName": tool_name.clone(),
+                                        "input": args.clone(),
+                                        "summary": format!("{tool_name} (GUI shell)"),
+                                    },
+                                });
+                                dispatch(evt.to_string());
+                                match tokio::time::timeout(std::time::Duration::from_secs(300), rx)
+                                    .await
+                                {
+                                    Ok(Ok(d)) => d,
+                                    _ => {
+                                        crate::gui_shell::inline_approval::forget(aid);
+                                        ApprovalDecision::Deny
+                                    }
+                                }
+                            } else {
+                                approver
+                                    .approve(&ApprovalRequest {
+                                        tool_name: tool_name.clone(),
+                                        input: args.clone(),
+                                        summary: Some(format!("{tool_name} (GUI shell)")),
+                                        originator: AgentOrigin::Main,
+                                    })
+                                    .await
+                            };
                             if matches!(decision, ApprovalDecision::Deny) {
                                 return Err(format!("tool '{tool_name}' denied by user"));
                             }
@@ -461,6 +571,22 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 };
                 dispatch(reply.to_string());
             });
+        }
+
+        // GUI Shell (dev-plan/39 Tier 3) — the shell's inline approval
+        // widget answering an `approval_request` it received. Resolves
+        // the pending decision the `gui_shell_tool_invoke` inline path is
+        // awaiting. Fire-and-forget (no reply needed).
+        "gui_shell_approval_respond" => {
+            let approval_id = msg.get("approvalId").and_then(|v| v.as_u64());
+            let decision = msg
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .map(crate::gui_shell::inline_approval::parse_decision)
+                .unwrap_or(ApprovalDecision::Deny);
+            if let Some(id) = approval_id {
+                crate::gui_shell::inline_approval::resolve(id, decision);
+            }
         }
 
         // GUI Shell (dev-plan/33 Tier 2) — per-shell, per-session
@@ -597,6 +723,151 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 }),
             };
             (ctx.dispatch)(reply.to_string());
+        }
+
+        // GUI Shell (dev-plan/39 Tier 3) — delete a storage key. Mirrors
+        // storage_set; `set(key,null)` stores null, this removes the key.
+        "gui_shell_storage_delete" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let key = msg.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let result = match ctx.shared.session_roots.as_ref() {
+                Some(roots) => crate::gui_shell::storage::delete_in(
+                    &roots.storage_dir,
+                    shell_id,
+                    session_id,
+                    key,
+                ),
+                None => crate::gui_shell::storage::delete(shell_id, session_id, key),
+            };
+            let reply = match result {
+                Ok(()) => serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id,
+                    "replyTo": request_id, "result": null,
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id,
+                    "replyTo": request_id, "error": e.to_string(),
+                }),
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        // GUI Shell (dev-plan/39 Tier 3) — upload a blob (base64) into the
+        // workspace's `_uploads/` and return a servable file-asset URL the
+        // shell can use as <img src>/<a href>. Rides the IPC channel so it
+        // works in both Mode A (desktop) and Mode B (serve); per-user
+        // isolated in multiuser because the base is the session's own
+        // workspace root. Capped at UPLOAD_MAX_BYTES.
+        "gui_shell_upload_file" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = msg
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("upload.bin")
+                .to_string();
+            let data_b64 = msg
+                .get("dataB64")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // Per-user root in multiuser (dp42), else the process workspace.
+            let base = ctx
+                .shared
+                .session_roots
+                .as_ref()
+                .and_then(|r| r.workspace_root.clone())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let reply = shell_upload_into(&base, &name, &data_b64);
+            let envelope = match reply {
+                Ok(result) => serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id,
+                    "replyTo": request_id, "result": result,
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id,
+                    "replyTo": request_id, "error": e,
+                }),
+            };
+            (ctx.dispatch)(envelope.to_string());
+        }
+
+        // GUI Shell (dev-plan/39 Tier 3) — the shell's declared manifest
+        // permissions, for `thclaws.permissions.list()/has()`. Read-only
+        // so a shell can grey out UI for actions it wasn't granted.
+        "gui_shell_permissions_list" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let perms = crate::gui_shell::ShellRegistry::new()
+                .resolve(shell_id)
+                .map(|s| s.manifest().permissions.clone())
+                .unwrap_or_default();
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "gui_shell_event", "sessionId": session_id,
+                    "replyTo": request_id, "result": perms,
+                })
+                .to_string(),
+            );
+        }
+
+        // GUI Shell (dev-plan/39 Tier 3) — shell-initiated approval: the
+        // shell asks the user to sign off on its OWN action (distinct from
+        // the tool-invoke inline approval). Routes through the session's
+        // approver (system modal / auto per mode) and returns the verdict
+        // so the shell decides what to do. Runs on a worker thread since
+        // approver.approve() blocks on user input.
+        "gui_shell_await_approval" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let summary = msg
+                .get("summary")
+                .or_else(|| msg.get("reason"))
+                .or_else(|| msg.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("shell action")
+                .to_string();
+            let dispatch = ctx.dispatch.clone();
+            let approver = ctx.approver.clone();
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                let decision = rt.block_on(async {
+                    approver
+                        .approve(&ApprovalRequest {
+                            tool_name: "shell.action".to_string(),
+                            input: serde_json::json!({ "summary": summary }),
+                            summary: Some(summary.clone()),
+                            originator: AgentOrigin::Main,
+                        })
+                        .await
+                });
+                let approved = !matches!(decision, ApprovalDecision::Deny);
+                dispatch(
+                    serde_json::json!({
+                        "type": "gui_shell_event", "sessionId": session_id,
+                        "replyTo": request_id,
+                        "result": { "approved": approved },
+                    })
+                    .to_string(),
+                );
+            });
         }
 
         // GUI Shell model widget (thclaws.model.*). Gated by manifest
@@ -4213,23 +4484,49 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let data_b64 = msg.get("data").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
-            {
-                Ok(path) => {
-                    if path.exists() {
-                        (false, Some("a file with that name already exists".into()))
-                    } else {
+            // Uniquify within the requested dir (a repeat drop of the same
+            // filename shouldn't clash) and report back the ACTUAL saved path
+            // so the composer injects the real one.
+            let mut saved_rel = raw_path.to_string();
+            // check_write (not check): uploads never target the reserved
+            // .thclaws/ tree — defense-in-depth against a crafted client.
+            let (ok, error): (bool, Option<String>) =
+                match crate::sandbox::Sandbox::check_write(raw_path) {
+                    Ok(desired) => {
                         use base64::Engine;
                         match base64::engine::general_purpose::STANDARD.decode(data_b64) {
+                            Ok(bytes) if bytes.len() as u64 > crate::uploads::UPLOAD_MAX_BYTES => (
+                                false,
+                                Some(format!(
+                                    "file exceeds the {} MB limit",
+                                    crate::uploads::UPLOAD_MAX_BYTES / (1024 * 1024)
+                                )),
+                            ),
                             Ok(bytes) => {
-                                let parent_made = match path.parent() {
-                                    Some(parent) => std::fs::create_dir_all(parent)
-                                        .map_err(|e| format!("mkdir parent: {e}")),
-                                    None => Ok(()),
+                                let parent = desired
+                                    .parent()
+                                    .map(std::path::Path::to_path_buf)
+                                    .unwrap_or_default();
+                                let fname = desired
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "file".into());
+                                let final_abs = crate::uploads::unique_path(&parent, &fname);
+                                let final_fname = final_abs
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or(fname);
+                                saved_rel = match std::path::Path::new(raw_path).parent() {
+                                    Some(d) if !d.as_os_str().is_empty() => {
+                                        format!("{}/{}", d.to_string_lossy(), final_fname)
+                                    }
+                                    _ => final_fname,
                                 };
-                                match parent_made {
+                                let made = std::fs::create_dir_all(&parent)
+                                    .map_err(|e| format!("mkdir parent: {e}"));
+                                match made {
                                     Err(e) => (false, Some(e)),
-                                    Ok(()) => match std::fs::write(&path, &bytes) {
+                                    Ok(()) => match std::fs::write(&final_abs, &bytes) {
                                         Ok(()) => (true, None),
                                         Err(e) => (false, Some(format!("write: {e}"))),
                                     },
@@ -4238,14 +4535,13 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             Err(e) => (false, Some(format!("decode: {e}"))),
                         }
                     }
-                }
-                Err(e) => (false, Some(format!("access denied: {e}"))),
-            };
+                    Err(e) => (false, Some(format!("access denied: {e}"))),
+                };
             (ctx.dispatch)(
                 serde_json::json!({
                     "type": "file_upload_result",
                     "id": id,
-                    "path": raw_path,
+                    "path": saved_rel,
                     "ok": ok,
                     "error": error,
                 })
@@ -4551,6 +4847,113 @@ mod tests {
             quit_fired.load(Ordering::SeqCst),
             "app_close should fire on_quit"
         );
+    }
+
+    /// dev-plan/39 Tier 3: uploadFile decodes the blob into `_uploads/`
+    /// and returns a servable file-asset URL.
+    #[test]
+    fn shell_upload_writes_and_returns_url() {
+        use base64::Engine as _;
+        let tmp = std::env::temp_dir().join(format!("gs-upload-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(b"hello-shell");
+        let reply = shell_upload_into(&tmp, "note.txt", &data_b64).unwrap();
+        let url = reply["url"].as_str().unwrap();
+        let rel = reply["path"].as_str().unwrap();
+        assert!(url.starts_with("file-asset/_uploads/note"), "{url}");
+        assert!(rel.starts_with("_uploads/note"), "{rel}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(rel)).unwrap(),
+            "hello-shell"
+        );
+        // Bad base64 → error, not panic.
+        assert!(shell_upload_into(&tmp, "x", "!!!not-base64!!!").is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// dev-plan/39 Tier 3: tool-invoke manifest gating.
+    #[test]
+    fn tool_allowlist_gates_only_when_declared() {
+        // No tools.invoke:* declared → legacy/unfettered (allow all).
+        let legacy = vec!["agent.run".to_string(), "storage".to_string()];
+        assert!(tool_allowed_by_perms(&legacy, "Bash"));
+        assert!(tool_allowed_by_perms(&[], "Read"));
+        // Declared allowlist → only listed tools.
+        let scoped = vec![
+            "tools.invoke:Read".to_string(),
+            "tools.invoke:Bash".to_string(),
+        ];
+        assert!(tool_allowed_by_perms(&scoped, "Bash"));
+        assert!(tool_allowed_by_perms(&scoped, "Read"));
+        assert!(!tool_allowed_by_perms(&scoped, "Write"));
+        assert!(!tool_allowed_by_perms(&scoped, "KmsDelete"));
+        // Wildcard grants everything.
+        let wild = vec!["tools.invoke:*".to_string()];
+        assert!(tool_allowed_by_perms(&wild, "Bash"));
+        assert!(tool_allowed_by_perms(&wild, "AnythingElse"));
+    }
+
+    /// dev-plan/39 Tier 3: the `gui_shell_approval_respond` IPC arm
+    /// resolves a pending inline approval so the awaiting tool-invoke
+    /// gets the shell's verdict (not the system modal).
+    #[tokio::test]
+    async fn gui_shell_approval_respond_resolves_inline() {
+        use crate::permissions::ApprovalDecision;
+        let (id, rx) = crate::gui_shell::inline_approval::register();
+
+        let shared = Arc::new(crate::shared_session::spawn());
+        let (approver, _rx) = crate::permissions::GuiApprover::new();
+        let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
+        let ctx = IpcContext {
+            is_serve_mode: true,
+            shared,
+            approver,
+            pending_asks,
+            dispatch: Arc::new(|_| {}),
+            on_quit: Arc::new(|| {}),
+            on_send_initial_state: Arc::new(|| {}),
+            on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
+        };
+        let handled = handle_ipc(
+            serde_json::json!({
+                "type": "gui_shell_approval_respond",
+                "approvalId": id,
+                "decision": "allow",
+            }),
+            &ctx,
+        );
+        assert!(handled, "gui_shell_approval_respond is a migrated arm");
+        assert_eq!(rx.await.unwrap(), ApprovalDecision::Allow);
+    }
+
+    /// A malformed / missing decision fails closed to Deny.
+    #[tokio::test]
+    async fn gui_shell_approval_respond_bad_decision_denies() {
+        use crate::permissions::ApprovalDecision;
+        let (id, rx) = crate::gui_shell::inline_approval::register();
+        let shared = Arc::new(crate::shared_session::spawn());
+        let (approver, _rx) = crate::permissions::GuiApprover::new();
+        let ctx = IpcContext {
+            is_serve_mode: true,
+            shared,
+            approver,
+            pending_asks: Arc::new(Mutex::new(HashMap::new())),
+            dispatch: Arc::new(|_| {}),
+            on_quit: Arc::new(|| {}),
+            on_send_initial_state: Arc::new(|| {}),
+            on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
+        };
+        handle_ipc(
+            serde_json::json!({
+                "type": "gui_shell_approval_respond",
+                "approvalId": id,
+                "decision": "wat",
+            }),
+            &ctx,
+        );
+        assert_eq!(rx.await.unwrap(), ApprovalDecision::Deny);
     }
 
     /// schedule_add_submit's validator branches: rejects empty fields

@@ -68,6 +68,11 @@
   const pending = new Map();     // requestId -> {resolve, reject}
   const subscribers = new Map(); // eventName -> Set<callback>
   let nextRequestId = 1;
+  // dev-plan/39 Tier 3: set once the shell registers an inline approval
+  // handler (thclaws.approvals.subscribe). Makes tool invokes send
+  // `preferInline` so the engine routes approve/deny to the shell's
+  // widget instead of the full-screen system modal.
+  let hasApprovalHandler = false;
 
   // Mode B WebSocket transport — opened lazily on first send. The
   // bridge auto-reconnects with exponential backoff if the socket
@@ -172,10 +177,32 @@
     return set;
   }
 
+  // A request whose backend arm never replies (an unimplemented /
+  // renamed command) must not hang the shell's promise forever. Every
+  // send() self-rejects after this long if no reply arrived. Generous
+  // so a real long-running tool invoke (image/video gen) still lands —
+  // those reply when done, well under this ceiling.
+  const SEND_TIMEOUT_MS = 15 * 60 * 1000;
+
   function send(type, payload) {
     return new Promise((resolve, reject) => {
       const requestId = nextRequestId++;
-      pending.set(requestId, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (pending.has(requestId)) {
+          pending.delete(requestId);
+          reject(
+            new Error(
+              `thclaws bridge: no reply for '${type}' after ${SEND_TIMEOUT_MS / 1000}s ` +
+                `(unimplemented or dropped command?)`,
+            ),
+          );
+        }
+      }, SEND_TIMEOUT_MS);
+      // Wrap so resolving/rejecting also clears the timeout.
+      pending.set(requestId, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
       if (isModeB) {
         // Mode B: write directly to WS, queuing until open.
         const frame = JSON.stringify({
@@ -206,6 +233,29 @@
         "*",
       );
     });
+  }
+
+  // Fire-and-forget command (no reply awaited) — same wire shape as
+  // send() but without registering a pending promise. Used by cancel-
+  // style + approval-respond signals.
+  function fireAndForget(type, payload) {
+    if (isModeB) {
+      const frame = JSON.stringify({
+        type: `gui_shell_${type}`,
+        id: nextRequestId++,
+        sessionId,
+        shellId,
+        ...payload,
+      });
+      const sock = ensureWs();
+      if (sock && sock.readyState === WebSocket.OPEN) sock.send(frame);
+      else wsQueue.push(frame);
+      return;
+    }
+    parent.postMessage(
+      { ns: "thclaws-shell", requestId: nextRequestId++, type, payload, shellId, sessionId },
+      "*",
+    );
   }
 
   // Mode A only: parent React app forwards backend dispatches to us
@@ -314,7 +364,50 @@
             new TypeError("thclaws.tools.invoke: name must be a non-empty string"),
           );
         }
-        return send("tool_invoke", { name, args: args ?? null });
+        return send("tool_invoke", {
+          name,
+          args: args ?? null,
+          preferInline: hasApprovalHandler,
+        });
+      },
+    },
+
+    // ── dev-plan/39 Tier 3 — inline tool approvals ────────────────
+    // A shell with its own approve/deny UI subscribes here; the engine
+    // then routes an mutating tool call's approval to `cb` (as an
+    // `approval_request` with an `id`) instead of the full-screen system
+    // modal. The shell renders its widget and calls `respond(id, ...)`.
+    approvals: {
+      // cb receives { id, toolName, input, summary }. Returns an
+      // unsubscribe fn. Registering flags invokes as `preferInline`.
+      subscribe(cb) {
+        if (typeof cb !== "function") {
+          throw new TypeError("thclaws.approvals.subscribe: cb must be a function");
+        }
+        hasApprovalHandler = true;
+        const set = ensureSub("approval_request");
+        const wrapped = (payload) => {
+          cb({
+            id: payload && payload.approvalId,
+            toolName: payload && payload.toolName,
+            input: payload && payload.input,
+            summary: payload && payload.summary,
+          });
+        };
+        set.add(wrapped);
+        return () => {
+          set.delete(wrapped);
+          if (set.size === 0) hasApprovalHandler = false;
+        };
+      },
+      // decision: "allow" | "allow_for_session" | "deny".
+      respond(id, decision) {
+        if (id == null) return;
+        const d =
+          decision === "allow" || decision === "allow_for_session"
+            ? decision
+            : "deny";
+        fireAndForget("approval_respond", { approvalId: id, decision: d });
       },
     },
 
@@ -363,7 +456,11 @@
           new TypeError("thclaws.callTool: name must be a non-empty string"),
         );
       }
-      return send("tool_invoke", { name, args: args ?? null });
+      return send("tool_invoke", {
+        name,
+        args: args ?? null,
+        preferInline: hasApprovalHandler,
+      });
     },
 
     // Tier 3 stub. The shell asks for permission to take an action
@@ -371,57 +468,94 @@
     // screen system modal). Engine wiring lands in Tier 3 follow-up;
     // for now, returning a clear rejection lets shells code against
     // the contract without crashing.
+    // The shell asks the user to sign off on its OWN action (distinct
+    // from tool-call inline approval, which is thclaws.approvals.*).
+    // Routes through the session approver; resolves to { approved }.
     awaitApproval(request) {
-      return send("await_approval", request ?? {}).catch((e) => {
-        if (String(e).includes("doesn't implement")) {
-          throw new Error(
-            "thclaws.awaitApproval: not yet wired through engine — falls back to the system approval modal. Tier 3 follow-up.",
-          );
-        }
-        throw e;
-      });
+      return send("await_approval", request ?? {});
     },
 
-    // Tier 3 stub. Streams turn events as an AsyncIterable. Until the
-    // engine wires the per-event broadcast path, callers can keep
-    // using thclaws.run() + thclaws.on("text", …) — this method is
-    // here so marketplace shells coding to the new contract have a
-    // stable entry point.
+    // Run a turn and stream its events as an AsyncIterable in arrival
+    // order: `{type:"text", delta}`, `{type:"tool_call", name, label,
+    // input}`, `{type:"tool_result", name, output}` — terminated by the
+    // turn's `done` (or surfaced as a rejection on `error`). Built on the
+    // same gui_shell_event stream the backend already emits
+    // (render_gui_shell_dispatch); no separate engine path needed.
+    //
+    //   for await (const ev of thclaws.streamTurn("draft a poem")) {
+    //     if (ev.type === "text") out.append(ev.delta);
+    //     else if (ev.type === "tool_call") showSpinner(ev.label);
+    //   }
     streamTurn(prompt, opts) {
       const queue = [];
       const waiters = [];
       let done = false;
-      let unsubText = null;
-      let unsubDone = null;
-      let unsubErr = null;
-      const push = (item) => {
+      let pendingError = null;
+      const unsubs = [];
+      const cleanup = () => {
+        while (unsubs.length) {
+          const u = unsubs.pop();
+          try { u(); } catch (e) { /* already gone */ }
+        }
+      };
+      const push = (value) => {
+        const item = { done: false, value };
         if (waiters.length) waiters.shift()(item);
         else queue.push(item);
       };
-      unsubText = window.thclaws.on("text", (p) => push({ done: false, value: { type: "text", delta: p.delta } }));
-      unsubDone = window.thclaws.on("done", () => {
+      const finish = (err) => {
+        if (done) return;
         done = true;
-        push({ done: true, value: undefined });
-        if (unsubText) unsubText();
-        if (unsubErr) unsubErr();
-      });
-      unsubErr = window.thclaws.on("error", (p) => {
-        done = true;
-        push({ done: true, value: undefined, error: new Error(p?.message || "error") });
-      });
-      window.thclaws.run(prompt, opts).catch(() => {});
+        pendingError = err || null;
+        cleanup();
+        // Wake any parked next() so it resolves/rejects instead of hanging.
+        while (waiters.length) {
+          if (err) waiters.shift()({ __err: err });
+          else waiters.shift()({ done: true, value: undefined });
+        }
+      };
+      unsubs.push(
+        window.thclaws.on("text", (p) =>
+          push({ type: "text", delta: typeof p === "string" ? p : (p && p.delta) || "" }),
+        ),
+      );
+      unsubs.push(
+        window.thclaws.on("tool_call", (p) =>
+          push({ type: "tool_call", name: p && p.name, label: p && p.label, input: p && p.input }),
+        ),
+      );
+      unsubs.push(
+        window.thclaws.on("tool_result", (p) =>
+          push({ type: "tool_result", name: p && p.name, output: p && p.output }),
+        ),
+      );
+      unsubs.push(window.thclaws.on("done", () => finish(null)));
+      unsubs.push(
+        window.thclaws.on("error", (p) =>
+          finish(new Error((p && (p.error || p.message)) || "turn error")),
+        ),
+      );
+      window.thclaws.run(prompt, opts).catch((e) => finish(e));
       return {
         [Symbol.asyncIterator]() {
           return {
             next() {
               if (queue.length) return Promise.resolve(queue.shift());
+              if (pendingError) {
+                const e = pendingError;
+                pendingError = null;
+                return Promise.reject(e);
+              }
               if (done) return Promise.resolve({ done: true, value: undefined });
-              return new Promise((r) => waiters.push(r));
+              return new Promise((resolve, reject) => {
+                waiters.push((item) => {
+                  if (item && item.__err) reject(item.__err);
+                  else resolve(item);
+                });
+              });
             },
             return() {
-              if (unsubText) unsubText();
-              if (unsubDone) unsubDone();
-              if (unsubErr) unsubErr();
+              finish(null);
               return Promise.resolve({ done: true, value: undefined });
             },
           };
@@ -429,28 +563,40 @@
       };
     },
 
-    // Tier 3 stub. Uploads a blob to the workspace's per-user asset
-    // store + returns a `thclaws://localhost/file-asset/<rel>` URL.
-    // Until the engine accepts uploads, falls back to a clear error
-    // so shells can show "Upload not supported yet" inline.
+    // Upload a Blob into the workspace's `_uploads/` and resolve to a
+    // servable asset URL the shell can drop into <img src>/<a href>.
+    // Base64s over the IPC channel (works in desktop + serve; per-user
+    // isolated in multiuser). Capped engine-side (~25 MB); reject early
+    // on obviously-oversize blobs to avoid a wasted round-trip.
     uploadFile(blob, name) {
       if (!(blob instanceof Blob)) {
         return Promise.reject(new TypeError("thclaws.uploadFile: first arg must be a Blob"));
       }
-      return send("upload_file", {
-        name: name || (blob.name || "upload.bin"),
-        mime: blob.type || "application/octet-stream",
-        // In Tier 3 follow-up the bridge will POST multipart to a
-        // dedicated /upload route; the WS path is a fallback for
-        // small payloads.
-      }).catch((e) => {
-        if (String(e).includes("doesn't implement")) {
-          throw new Error(
-            "thclaws.uploadFile: not yet wired through engine. Tier 3 follow-up.",
-          );
-        }
-        throw e;
-      });
+      const MAX = 25 * 1024 * 1024;
+      if (blob.size > MAX) {
+        return Promise.reject(
+          new Error(`thclaws.uploadFile: blob is ${blob.size} bytes, over the ${MAX}-byte cap`),
+        );
+      }
+      return blob
+        .arrayBuffer()
+        .then((buf) => {
+          // Chunked base64 — String.fromCharCode(...huge) blows the arg
+          // limit, so encode in 32 KB slices.
+          const u8 = new Uint8Array(buf);
+          let bin = "";
+          const CHUNK = 0x8000;
+          for (let i = 0; i < u8.length; i += CHUNK) {
+            bin += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+          }
+          const dataB64 = btoa(bin);
+          return send("upload_file", {
+            name: name || blob.name || "upload.bin",
+            mime: blob.type || "application/octet-stream",
+            dataB64,
+          });
+        })
+        .then((result) => (result && result.url) || result);
     },
 
     // Host UI integration — full-screen control. In full-screen UI

@@ -13,6 +13,7 @@
 //! types are only constructed when the operator opts in.
 
 pub mod auth;
+pub mod member;
 pub mod metering;
 pub mod user_state;
 
@@ -27,7 +28,11 @@ pub mod user_state;
 #[cfg(feature = "gui")]
 pub mod registry;
 
-pub use auth::{verify_user_header, AuthError, UserId, MAX_TIMESTAMP_SKEW_SECS};
+pub use auth::{
+    verify_identity, verify_user_header, AuthError, IdentityVerifier, UserId,
+    MAX_TIMESTAMP_SKEW_SECS,
+};
+pub use member::{attach_member, current_member_id, scope_member, MEMBER_HEADER};
 pub use metering::{
     from_env as metering_from_env, HttpMeteringSink, MessageEvent, MeteringSink, NoopMeteringSink,
     ProviderCall, StdoutMeteringSink,

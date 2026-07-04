@@ -160,8 +160,7 @@ impl ImageProvider for GeminiImageProvider {
             .timeout(Duration::from_secs(120))
             .build()
             .map_err(|e| Error::Tool(format!("http client: {e}")))?;
-        let resp = client
-            .post(&url)
+        let resp = crate::multi_tenant::attach_member(client.post(&url))
             .header("x-goog-api-key", &ep.api_key)
             .header("content-type", "application/json")
             .json(&body)

@@ -109,6 +109,63 @@ impl Default for AgentSdkProvider {
     }
 }
 
+/// Resolve the `claude` CLI to a spawnable path.
+///
+/// - An explicit `configured` value (anything other than the bare
+///   `"claude"` default — i.e. a `CLAUDE_BIN`/`with_bin` override) is
+///   respected verbatim.
+/// - Otherwise, if `claude` is found on the current `PATH`, use the bare
+///   name (lets the OS resolve it — the terminal-launch happy path).
+/// - Otherwise fall back to the well-known install locations a
+///   GUI/launchd launch misses (its PATH is `/usr/bin:/bin:…`). Returns
+///   the first that exists; if none, returns `"claude"` unchanged so the
+///   caller's not-found error still fires with a helpful message.
+fn resolve_claude_bin(configured: &str) -> String {
+    if configured != "claude" {
+        return configured.to_string();
+    }
+    if let Some(p) = find_on_path("claude") {
+        return p.to_string_lossy().into_owned();
+    }
+    let home = crate::util::home_dir();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(h) = &home {
+        for rel in [
+            ".claude/local/claude", // Claude Code's native installer
+            ".local/bin/claude",
+            ".npm-global/bin/claude",
+            ".volta/bin/claude",
+            ".bun/bin/claude",
+            ".yarn/bin/claude",
+        ] {
+            candidates.push(h.join(rel));
+        }
+    }
+    for abs in [
+        "/opt/homebrew/bin/claude", // Apple-Silicon Homebrew
+        "/usr/local/bin/claude",    // Intel Homebrew / manual
+        "/usr/bin/claude",
+    ] {
+        candidates.push(std::path::PathBuf::from(abs));
+    }
+    for c in candidates {
+        if c.is_file() {
+            return c.to_string_lossy().into_owned();
+        }
+    }
+    "claude".to_string()
+}
+
+/// First `<dir>/<name>` on `PATH` that is a file. `None` if `PATH` is
+/// unset or the binary isn't found (the GUI/launchd case).
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let p = dir.join(name);
+        p.is_file().then_some(p)
+    })
+}
+
 #[async_trait]
 impl Provider for AgentSdkProvider {
     async fn stream(&self, req: StreamRequest) -> Result<EventStream> {
@@ -125,8 +182,12 @@ impl Provider for AgentSdkProvider {
             })
             .unwrap_or_default();
 
-        // Build the CLI command.
-        let mut cmd = Command::new(&self.claude_bin);
+        // Build the CLI command. Resolve `claude` robustly: a GUI /
+        // launchd-launched app inherits a minimal PATH (no ~/.local/bin,
+        // Homebrew, npm, …) so a bare `claude` spawn ENOENTs even when it
+        // works from a terminal (public issues #174/#176).
+        let bin = resolve_claude_bin(&self.claude_bin);
+        let mut cmd = Command::new(&bin);
         cmd.arg("--output-format")
             .arg("stream-json")
             .arg("--input-format")
@@ -206,9 +267,20 @@ impl Provider for AgentSdkProvider {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Error::Provider(format!("spawn claude: {e}")))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::Provider(format!(
+                    "spawn claude: '{bin}' not found. The Claude Code CLI (`claude`) isn't on \
+                     this process's PATH — common when thClaws is launched from the macOS \
+                     Finder/Dock (or a scheduled job), which don't inherit your shell PATH. \
+                     Fix: install Claude Code, or set CLAUDE_BIN to its full path (e.g. \
+                     `~/.claude/local/claude`), or use a native provider model instead of \
+                     `agent/*`."
+                ))
+            } else {
+                Error::Provider(format!("spawn claude: {e}"))
+            }
+        })?;
 
         let mut stdin = child
             .stdin
@@ -564,5 +636,45 @@ impl Provider for AgentSdkProvider {
         if let Ok(mut g) = self.session_id.lock() {
             *g = id;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_override_is_respected_verbatim() {
+        // A CLAUDE_BIN / with_bin override is never second-guessed.
+        assert_eq!(
+            resolve_claude_bin("/custom/path/claude"),
+            "/custom/path/claude"
+        );
+        assert_eq!(resolve_claude_bin("my-claude-wrapper"), "my-claude-wrapper");
+    }
+
+    #[test]
+    fn falls_back_to_bare_name_when_nothing_found() {
+        // With an empty PATH and (almost certainly) none of the fallback
+        // locations present in the test env, we still return "claude" so
+        // the caller's not-found error fires with the helpful message
+        // rather than a wrong path.
+        let prev = std::env::var_os("PATH");
+        std::env::remove_var("PATH");
+        let got = resolve_claude_bin("claude");
+        if let Some(p) = prev {
+            std::env::set_var("PATH", p);
+        }
+        // Either a real install exists on this machine (full path) or we
+        // fall back to the bare name — never empty, never a nonexistent
+        // fabricated path.
+        assert!(got == "claude" || std::path::Path::new(&got).is_file());
+    }
+
+    #[test]
+    fn find_on_path_locates_a_ubiquitous_binary() {
+        // `sh` is on PATH in every CI/dev env; prove the PATH walk works.
+        assert!(find_on_path("sh").is_some());
+        assert!(find_on_path("definitely-not-a-real-binary-xyzzy").is_none());
     }
 }
